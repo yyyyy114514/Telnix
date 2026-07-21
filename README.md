@@ -5,6 +5,84 @@
 
 ---
 
+[TOC]
+
+## 快速开始
+
+### 环境要求
+
+| 项         | 要求                                                    |
+| ---------- | ------------------------------------------------------- |
+| 操作系统   | Windows 10 / 11（依赖 WinDivert，暂不支持 macOS/Linux） |
+| Python     | 3.10+                                                   |
+| Node.js    | 18+（仅构建前端需要，运行已构建产物不需要）             |
+| 管理员权限 | TCP/UDP 原始抓包需要；HTTP/HTTPS 抓包不需要             |
+
+### MCP配置&使用
+
+详见 [README_MCP.md](README_MCP.md) 
+
+### Agent CLI调用
+
+按下面步骤安装依赖后让Agent阅读 [README_AI.md](README_AI.md) 即可
+
+### 一键安装
+
+```powershell
+# 克隆仓库
+git clone https://github.com/yyyyy114514/Opennet.git
+cd Opennet
+
+# 一键安装所有依赖（Python + Node）
+.\install.ps1
+```
+
+或手动安装：
+
+```powershell
+# 后端依赖
+cd src\host
+pip install -e .
+
+# 前端依赖（可选，仅需要改前端时安装）
+cd ..\ui
+npm install
+```
+
+### 一键运行
+
+```powershell
+# 构建前端（首次运行或前端有改动时需要）
+.\build.ps1
+
+# 启动 OpenNet（自动开代理 + 装证书 + 打开浏览器）
+.\run.ps1
+
+# 或不打开浏览器
+.\run.ps1 --no-browser
+```
+
+或手动启动：
+
+```powershell
+cd src\host
+python -m opennet
+```
+
+启动后访问 http://127.0.0.1:18901 即可使用。
+
+### TCP/UDP 抓包（需要管理员）
+
+TCP/UDP 原始抓包依赖 WinDivert，需要管理员权限。在 CLI 里执行：
+
+```powershell
+python -m opennet.cli system restart-as-admin
+```
+
+会弹 UAC 提权窗口，同意后后端以管理员身份重启。
+
+------
+
 ## 项目特色
 
 ### 1. 完全由 GLM-5.2 构建
@@ -99,74 +177,6 @@ OpenNet 不只是 GUI 工具，还为 AI Agent 提供了完整的编程接口：
 - **可视化规则编辑**：拖拽排序、批量启停、命中统计一目了然
 - **专注模式**：只抓指定进程/host，过滤噪音
 - **多选批量操作**：批量删除、批量放行断点、批量 AI 分析
-
----
-
-## 快速开始
-
-### 环境要求
-
-| 项 | 要求 |
-|---|---|
-| 操作系统 | Windows 10 / 11（依赖 WinDivert，暂不支持 macOS/Linux） |
-| Python | 3.10+ |
-| Node.js | 18+（仅构建前端需要，运行已构建产物不需要） |
-| 管理员权限 | TCP/UDP 原始抓包需要；HTTP/HTTPS 抓包不需要 |
-
-### 一键安装
-
-```powershell
-# 克隆仓库
-git clone https://github.com/yyyyy114514/Opennet.git
-cd Opennet
-
-# 一键安装所有依赖（Python + Node）
-.\install.ps1
-```
-
-或手动安装：
-
-```powershell
-# 后端依赖
-cd src\host
-pip install -e .
-
-# 前端依赖（可选，仅需要改前端时安装）
-cd ..\ui
-npm install
-```
-
-### 一键运行
-
-```powershell
-# 构建前端（首次运行或前端有改动时需要）
-.\build.ps1
-
-# 启动 OpenNet（自动开代理 + 装证书 + 打开浏览器）
-.\run.ps1
-
-# 或不打开浏览器
-.\run.ps1 --no-browser
-```
-
-或手动启动：
-
-```powershell
-cd src\host
-python -m opennet
-```
-
-启动后访问 http://127.0.0.1:18901 即可使用。
-
-### TCP/UDP 抓包（需要管理员）
-
-TCP/UDP 原始抓包依赖 WinDivert，需要管理员权限。在 CLI 里执行：
-
-```powershell
-python -m opennet.cli system restart-as-admin
-```
-
-会弹 UAC 提权窗口，同意后后端以管理员身份重启。
 
 ---
 
