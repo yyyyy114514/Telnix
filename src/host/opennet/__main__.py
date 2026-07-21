@@ -229,16 +229,18 @@ def main():
 
     host = get_host()
     port = get_port()
-    url = f"http://{host}:{port}"
+    # 浏览器始终用 127.0.0.1 打开（0.0.0.0 在 Windows 上浏览器无法访问）
+    # 即使 API 监听 0.0.0.0（允许局域网设备连接），本机也通过 127.0.0.1 访问
+    browser_url = f"http://127.0.0.1:{port}"
     print(f"[OpenNet] 进程伪装名: {get_masquerade_name()}")
     print(f"[OpenNet] 代理地址: {get_proxy_host()}:{get_proxy_port()}")
-    print(f"[OpenNet] Web 地址: {url}")
+    print(f"[OpenNet] Web 地址: {browser_url}" + (f"（监听 {host}，局域网可访问）" if host == "0.0.0.0" else ""))
     print(f"[OpenNet] 根证书: {ssl_bump.root_cert_path}")
     print(f"[OpenNet] 根证书已安装: {proxy.cert_installed}")
     if no_browser:
         print("[OpenNet] --no-browser 模式：不自动打开浏览器（agent 自动化场景）")
     else:
-        _open_browser_later(url)
+        _open_browser_later(browser_url)
 
     try:
         uvicorn.run(app, host=host, port=port, log_level="info")
