@@ -1,0 +1,48 @@
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+// Vite 配置：开发代理 /api 到后端 FastAPI
+export default defineConfig({
+  plugins: [vue()],
+  resolve: {
+    alias: {
+      // 把 lodash-es 重定向到 lodash（CJS 单文件），避免 esbuild 逐个转换几百个 ESM 小文件。
+      'lodash-es': 'lodash',
+      // 把 element-plus 重定向到 dist 完整打包版本（单文件），避免 esbuild 逐个转换
+      // element-plus/es/ 下成百上千个 .mjs 组件文件（在 Windows 上间歇性卡死）。
+      // 产物会稍大，但构建可稳定完成。完整打包已含所有组件和 locale，API 完全一致。
+      'element-plus': 'element-plus/dist/index.full.mjs',
+    },
+  },
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:18899',
+        changeOrigin: true,
+      },
+    },
+  },
+  optimizeDeps: {
+    include: ['lodash', 'element-plus', 'vue', 'vue-router', 'pinia'],
+  },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    sourcemap: false,
+    minify: 'esbuild',
+    chunkSizeWarningLimit: 1500,
+    commonjsOptions: {
+      // lodash 是 CJS，需要 transformMixedEsModules 以正确处理混合模块
+      transformMixedEsModules: true,
+    },
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'element-plus': ['element-plus', '@element-plus/icons-vue'],
+          'vendor': ['vue', 'vue-router', 'pinia'],
+        },
+      },
+    },
+  },
+})

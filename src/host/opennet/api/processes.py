@@ -1,0 +1,160 @@
+"""进程列表 API：用于筛选下拉 + 忽略进程管理。"""
+
+from fastapi import APIRouter, Request
+from pydantic import BaseModel
+
+from .. import db
+from . import err, ok
+
+router = APIRouter()
+
+
+@router.get("/processes")
+async def list_processes(request: Request):
+    """进程列表（有网络连接的进程，用于筛选下拉）。"""
+    proxy = request.app.state.opennet.proxy
+    if proxy is None:
+        return err("代理未启动")
+    return ok(proxy.process_lookup.list_processes())
+
+
+@router.get("/processes/snapshot")
+async def process_snapshot(request: Request,
+                           with_connections: bool = False,
+                           tree: bool = False,
+                           name: str = "",
+                           include_listen: bool = False):
+    """进程快照（可选连接快照/进程树），用 psutil 直接读系统状态。
+
+    - with_connections=true：附带每个进程的当前 TCP 连接（laddr/raddr/status）
+    - tree=true：按进程树输出，每个进程含 children 列表（找父子关系）
+    - name=x：按进程名过滤（大小写不敏感）
+    - include_listen=true：包含 LISTEN 状态连接（默认跳过，只看 ESTABLISHED）
+    """
+    try:
+        import psutil
+    except ImportError:
+        # 回退到普通 list_processes
+        proxy = request.app.state.opennet.proxy
+        if proxy is None:
+            return err("代理未启动")
+        return ok(proxy.process_lookup.list_processes())
+
+    nl = name.lower() if name else ""
+    procs = []
+    all_procs = {}  # pid -> info，用于建进程树
+    for p in psutil.process_iter(["pid", "name", "ppid", "username", "cmdline"]):
+        try:
+            info = p.info
+            pname = info.get("name") or ""
+            if nl and nl not in pname.lower():
+                continue
+            item = {
+                "pid": info.get("pid"),
+                "name": pname,
+                "ppid": info.get("ppid"),
+                "username": info.get("username") or "",
+                "cmdline": " ".join(info.get("cmdline") or [])[:200],
+            }
+            if with_connections:
+                conns = []
+                try:
+                    for c in p.net_connections(kind="inet"):
+                        # 默认跳过 LISTEN，include_listen=true 时保留
+                        if c.status == "LISTEN" and not include_listen:
+                            continue
+                        conns.append({
+                            "laddr": f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else "",
+                            "raddr": f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else "",
+                            "status": c.status,
+                            "family": str(c.family),
+                        })
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    pass
+                item["connections"] = conns
+                item["connection_count"] = len(conns)
+            procs.append(item)
+            all_procs[item["pid"]] = item
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+
+    # 进程树：把每个进程挂到父进程的 children 下
+    if tree:
+        roots = []
+        for item in procs:
+            ppid = item.get("ppid")
+            if ppid and ppid in all_procs and ppid != item["pid"]:
+                parent = all_procs[ppid]
+                parent.setdefault("children", []).append(item)
+            else:
+                roots.append(item)
+        return ok({"processes": roots, "tree": True, "count": len(procs)})
+
+    return ok({"processes": procs, "count": len(procs)})
+
+
+class IgnoreBody(BaseModel):
+    pid: int | None = None
+    name: str = ""
+
+
+@router.post("/processes/ignore")
+async def ignore_process(body: IgnoreBody, request: Request):
+    """忽略进程（该进程流量直连不抓）。pid 为空时按进程名忽略，可添加多个。"""
+    db.add_ignored_process(body.pid, body.name)
+    proxy = request.app.state.opennet.proxy
+    if proxy:
+        proxy.refresh_ignored()
+    return ok({"ignored": True, "pid": body.pid, "name": body.name})
+
+
+@router.delete("/processes/ignore/{row_id}")
+async def unignore_process(row_id: int, request: Request):
+    """取消忽略进程（按行 id 删除）。"""
+    db.remove_ignored_process(row_id)
+    proxy = request.app.state.opennet.proxy
+    if proxy:
+        proxy.refresh_ignored()
+    return ok({"ignored": False, "id": row_id})
+
+
+@router.get("/processes/ignored")
+async def ignored_processes():
+    """已忽略进程列表。"""
+    return ok(db.get_ignored_processes())
+
+
+# ---------- 忽略 host 通配符 ----------
+
+class IgnoreHostBody(BaseModel):
+    """添加忽略 host 通配符。支持 * ? 通配符，如 *.example.com。"""
+    host: str
+
+
+@router.post("/processes/ignore-host")
+async def ignore_host(body: IgnoreHostBody, request: Request):
+    """添加忽略 host（匹配的 host 流量直连不抓）。"""
+    pattern = (body.host or "").strip()
+    if not pattern:
+        return err("host 不能为空")
+    rec = db.add_ignored_host(pattern)
+    proxy = request.app.state.opennet.proxy
+    if proxy:
+        proxy.refresh_ignored()
+    return ok({"ignored": True, "id": rec.get("id"), "host_pattern": pattern})
+
+
+@router.delete("/processes/ignore-host/{host_id}")
+async def unignore_host(host_id: int, request: Request):
+    """取消忽略 host。"""
+    db.remove_ignored_host(host_id)
+    proxy = request.app.state.opennet.proxy
+    if proxy:
+        proxy.refresh_ignored()
+    return ok({"ignored": False, "id": host_id})
+
+
+@router.get("/processes/ignored-hosts")
+async def ignored_hosts():
+    """已忽略 host 列表。"""
+    return ok(db.get_ignored_hosts())

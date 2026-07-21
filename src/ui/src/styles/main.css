@@ -1,0 +1,317 @@
+/* OpenNet 全局样式 - 网络工程师控制台主题（亮/暗双主题） */
+
+/* ===== 亮色主题（默认） ===== */
+:root {
+  /* 颜色系统 */
+  --on-bg: #ffffff;
+  --on-bg-elevated: #f6f8fa;
+  --on-bg-hover: #eaeef2;
+  --on-bg-active: rgba(13, 148, 136, 0.10);
+  --on-border: #d0d7de;
+  --on-border-light: #e1e4e8;
+  --on-text: #1f2328;
+  --on-text-muted: #59636e;
+  --on-text-dim: #6e7681;
+  --on-accent: #0d9488;
+  --on-accent-dim: #14b8a6;
+  --on-accent-glow: rgba(13, 148, 136, 0.14);
+
+  /* 状态色 */
+  --on-ok: #1a7f37;
+  --on-redirect: #0969da;
+  --on-warn: #9a6700;
+  --on-error: #cf222e;
+  --on-pending: #6e7681;
+
+  /* 断点色 */
+  --on-bp-request: #9a6700;
+  --on-bp-response: #0969da;
+
+  --on-font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
+  --on-font-sans: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+
+  /* element-plus 亮色变量覆盖（统一品牌色调） */
+  --el-color-primary: #0d9488;
+  --el-color-primary-light-3: #14b8a6;
+  --el-color-primary-light-5: #2dd4bf;
+  --el-color-primary-light-7: #5eead4;
+  --el-color-primary-light-8: #99f6e4;
+  --el-color-primary-light-9: #ccfbf1;
+  --el-color-primary-dark-2: #0f766e;
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f6f8fa;
+  --el-bg-color-overlay: #ffffff;
+  --el-text-color-primary: #1f2328;
+  --el-text-color-regular: #364149;
+  --el-text-color-secondary: #59636e;
+  --el-border-color: #d0d7de;
+  --el-border-color-light: #e1e4e8;
+  --el-border-color-lighter: #eaeef2;
+  --el-fill-color: #f6f8fa;
+  --el-fill-color-light: #eaeef2;
+  --el-fill-color-blank: #ffffff;
+  --el-mask-color: rgba(255, 255, 255, 0.7);
+
+  /* 代码块背景（亮色用浅灰） */
+  --on-code-bg: #f6f8fa;
+
+  /* 侧边栏/状态栏专用色（亮色用浅灰，区别于主区白底） */
+  --on-bg-sidebar: #f0f3f6;
+  --on-bg-statusbar: #f0f3f6;
+}
+
+/* ===== 流量列表禁选文字（设置可调，默认开启） ===== */
+/* 在 <html> 加 .list-no-select 类后生效，禁选流量列表 + 全局分析列表内文字，
+   详细信息区域（Inspector 等）不受影响 */
+html.list-no-select .flow-list .fl-row,
+html.list-no-select .flow-list .fl-head,
+html.list-no-select .flow-list .fl-head-cell,
+html.list-no-select .analyze-view .flow-row,
+html.list-no-select .analyze-view .group-header {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ===== 暗色主题 ===== */
+html.dark {
+  /* 颜色系统（对比度增强版） */
+  --on-bg: #0d1117;
+  --on-bg-elevated: #161b22;
+  --on-bg-hover: #1f262e;
+  --on-bg-active: rgba(45, 212, 191, 0.12);
+  --on-border: #3d444d;              /* 提亮：原 #30363d → #3d444d */
+  --on-border-light: #2f363d;        /* 提亮：原 #21262d → #2f363d */
+  --on-text: #f0f6fc;                /* 提亮：原 #e6edf3 → #f0f6fc */
+  --on-text-muted: #9ba6b3;          /* 提亮：原 #7d8590 → #9ba6b3 */
+  --on-text-dim: #848d97;            /* 提亮：原 #6e7681 → #848d97 */
+  --on-accent: #2dd4bf;
+  --on-accent-dim: #14b8a6;
+  --on-accent-glow: rgba(45, 212, 191, 0.18);
+
+  /* 状态色（暗色提亮） */
+  --on-ok: #46c75a;
+  --on-redirect: #4ca5ff;
+  --on-warn: #e3b341;
+  --on-error: #ff6b61;
+  --on-pending: #9ba6b3;
+
+  /* 断点色 */
+  --on-bp-request: #e3b341;
+  --on-bp-response: #4ca5ff;
+
+  /* element-plus 暗色变量 */
+  --el-color-primary: #2dd4bf;
+  --el-color-primary-light-3: #14b8a6;
+  --el-color-primary-light-5: #0d9488;
+  --el-color-primary-light-7: #134e4a;
+  --el-color-primary-light-8: #0a3a37;
+  --el-color-primary-light-9: #062825;
+  --el-color-primary-dark-2: #5eead4;
+  --el-bg-color: #0d1117;
+  --el-bg-color-page: #0d1117;
+  --el-bg-color-overlay: #161b22;
+  --el-text-color-primary: #f0f6fc;
+  --el-text-color-regular: #d6dee8;
+  --el-text-color-secondary: #9ba6b3;
+  --el-border-color: #3d444d;
+  --el-border-color-light: #2f363d;
+  --el-border-color-lighter: #2f363d;
+  --el-fill-color: #161b22;
+  --el-fill-color-light: #1f262e;
+  --el-fill-color-blank: #0d1117;
+  --el-mask-color: rgba(1, 4, 9, 0.7);
+
+  /* 代码块背景（暗色） */
+  --on-code-bg: #0d1117;
+
+  /* 侧边栏/状态栏专用色（暗色用更深色，营造层次感） */
+  --on-bg-sidebar: #010409;
+  --on-bg-statusbar: #010409;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--on-bg);
+  color: var(--on-text);
+  font-family: var(--on-font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* el-select / el-dropdown 下拉浮层（teleport 到 body）样式
+   原因：element-plus 浮层用 --el-bg-color-overlay，需要跟随主题 */
+.el-select__popper.el-popper,
+.el-dropdown__popper.el-popper,
+.el-popper.is-light {
+  background: var(--on-bg-elevated) !important;
+  border: 1px solid var(--on-border) !important;
+  color: var(--on-text) !important;
+}
+.el-select__popper.el-popper .el-popper__arrow::before,
+.el-dropdown__popper.el-popper .el-popper__arrow::before {
+  background: var(--on-bg-elevated) !important;
+  border-color: var(--on-border) !important;
+}
+.el-select-dropdown__item {
+  color: var(--on-text) !important;
+}
+.el-select-dropdown__item.is-hovering,
+.el-select-dropdown__item:hover {
+  background-color: var(--on-bg-hover) !important;
+}
+.el-select-dropdown__item.is-selected {
+  color: var(--on-accent) !important;
+  font-weight: 600;
+}
+.el-dropdown-menu {
+  background-color: var(--on-bg-elevated) !important;
+}
+.el-dropdown-menu__item {
+  color: var(--on-text) !important;
+}
+.el-dropdown-menu__item:not(.is-disabled):hover,
+.el-dropdown-menu__item:focus {
+  background-color: var(--on-bg-hover) !important;
+  color: var(--on-accent) !important;
+}
+
+/* el-checkbox 主题对比度增强（默认框线太暗看不清） */
+.el-checkbox__label {
+  color: var(--on-text) !important;
+}
+.el-checkbox__inner {
+  background-color: var(--on-bg) !important;
+  border-color: var(--on-border) !important;
+}
+.el-checkbox__input.is-checked .el-checkbox__inner {
+  background-color: var(--on-accent) !important;
+  border-color: var(--on-accent) !important;
+}
+.el-checkbox__input.is-checked + .el-checkbox__label {
+  color: var(--on-text) !important;
+}
+.el-checkbox__input.is-hover .el-checkbox__inner,
+.el-checkbox__inner:hover {
+  border-color: var(--on-accent) !important;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--on-border);
+  border-radius: 5px;
+  border: 2px solid var(--on-bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--on-text-dim); }
+
+.mono { font-family: var(--on-font-mono); }
+
+/* 行内 code 标签：确保亮色模式下对比度足够 */
+code {
+  background: var(--on-code-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.92em;
+  font-family: var(--on-font-mono);
+  color: var(--on-text);
+}
+/* pre 内的 code（代码块）不重复加背景和内边距 */
+pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+/* 断点闪烁动画 */
+@keyframes blink-yellow {
+  0%, 100% { background-color: rgba(210, 153, 34, 0.28); }
+  50% { background-color: rgba(210, 153, 34, 0.08); }
+}
+@keyframes blink-blue {
+  0%, 100% { background-color: rgba(88, 166, 255, 0.28); }
+  50% { background-color: rgba(88, 166, 255, 0.08); }
+}
+.bp-request-row { animation: blink-yellow 1.4s ease-in-out infinite; }
+.bp-response-row { animation: blink-blue 1.4s ease-in-out infinite; }
+
+/* 状态码颜色 */
+.status-2xx { color: var(--on-ok); font-weight: 600; }
+.status-3xx { color: var(--on-redirect); font-weight: 600; }
+.status-4xx { color: var(--on-warn); font-weight: 600; }
+.status-5xx { color: var(--on-error); font-weight: 600; }
+.status-null { color: var(--on-pending); font-weight: 600; }
+
+/* 工具类 */
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-1 { flex: 1 1 0%; min-width: 0; min-height: 0; }
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.full { width: 100%; height: 100%; }
+.overflow-auto { overflow: auto; }
+.text-muted { color: var(--on-text-muted); }
+.text-dim { color: var(--on-text-dim); }
+.text-accent { color: var(--on-accent); }
+.no-select { user-select: none; }
+
+/* 通用面板 */
+.panel {
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border-light);
+  border-radius: 6px;
+}
+
+/* 高亮代码块 */
+.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+  font-family: var(--on-font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+/* atom-one-dark.css 缺少 .hljs-tag，补充 XML/HTML 标签尖括号颜色 */
+.hljs-tag { color: #e06c75; }
+
+/* element-plus 组件微调 */
+.el-table { background: transparent; }
+.el-table--border, .el-table--border .el-table__cell { border-color: var(--on-border-light); }
+.el-table tr { background-color: transparent; }
+.el-table__row:hover > td { background-color: var(--on-bg-hover) !important; }
+.el-table__body tr.current-row > td { background-color: var(--on-accent-glow) !important; }
+.el-table th.el-table__cell { background-color: var(--on-bg-elevated) !important; color: var(--on-text-muted); font-weight: 600; }
+
+.el-button--primary { --el-button-bg-color: var(--on-accent-dim); --el-button-border-color: var(--on-accent-dim); --el-button-hover-bg-color: var(--on-accent); --el-button-hover-border-color: var(--on-accent); }
+
+.el-tabs__item { color: var(--on-text-muted); font-size: 12.5px; height: 34px; }
+.el-tabs__item.is-active { color: var(--on-accent); }
+.el-tabs__active-bar { background-color: var(--on-accent); }
+.el-tabs__nav-wrap::after { background-color: var(--on-border-light); }
+
+.el-input__wrapper, .el-select .el-input__wrapper, .el-textarea__inner {
+  background-color: var(--on-bg) !important;
+  box-shadow: 0 0 0 1px var(--on-border) inset !important;
+}
+.el-input__wrapper.is-focus, .el-textarea__inner:focus { box-shadow: 0 0 0 1px var(--on-accent) inset !important; }
+
+.el-dialog { background: var(--on-bg-elevated) !important; border: 1px solid var(--on-border); border-radius: 8px; }
+.el-dialog__title { color: var(--on-text); }
+
+.el-switch.is-checked .el-switch__core { background-color: var(--on-accent-dim) !important; border-color: var(--on-accent-dim) !important; }
+
+/* 拖拽分隔条 */
+.splitter-v { cursor: col-resize; width: 4px; background: var(--on-border-light); transition: background .15s; flex-shrink: 0; }
+.splitter-v:hover, .splitter-v.active { background: var(--on-accent-dim); }
+.splitter-h { cursor: row-resize; height: 4px; background: var(--on-border-light); transition: background .15s; flex-shrink: 0; }
+.splitter-h:hover, .splitter-h.active { background: var(--on-accent-dim); }
