@@ -13,7 +13,10 @@ from datetime import datetime
 
 from .config import get_db_path
 
-SCHEMA = """
+# 建表语句（不含 INDEX）：CREATE TABLE IF NOT EXISTS 不会修改已有表结构，
+# 因此旧 db 文件需要靠 _migrate 补列。INDEX 语句单独放 SCHEMA_INDEXES，
+# 在 _migrate 之后再执行（否则旧表缺列时 CREATE INDEX 会失败）。
+SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
@@ -42,13 +45,12 @@ CREATE TABLE IF NOT EXISTS flows (
     breakpoint_status TEXT DEFAULT NULL,
     tags TEXT DEFAULT '',
     tag_note TEXT DEFAULT '',
+    protocol TEXT DEFAULT 'http',
+    raw_data TEXT DEFAULT NULL,
+    src_port INTEGER DEFAULT NULL,
+    dst_port INTEGER DEFAULT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
-CREATE INDEX IF NOT EXISTS idx_flows_session ON flows(session_id);
-CREATE INDEX IF NOT EXISTS idx_flows_host ON flows(host);
-CREATE INDEX IF NOT EXISTS idx_flows_process ON flows(process_name);
-CREATE INDEX IF NOT EXISTS idx_flows_protocol ON flows(protocol);
-CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method);
 
 CREATE TABLE IF NOT EXISTS auto_reply_rules (
     id TEXT PRIMARY KEY,
@@ -99,6 +101,14 @@ CREATE TABLE IF NOT EXISTS ai_messages (
     created_at TEXT NOT NULL,
     FOREIGN KEY (chat_id) REFERENCES ai_chats(id) ON DELETE CASCADE
 );
+"""
+
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_flows_session ON flows(session_id);
+CREATE INDEX IF NOT EXISTS idx_flows_host ON flows(host);
+CREATE INDEX IF NOT EXISTS idx_flows_process ON flows(process_name);
+CREATE INDEX IF NOT EXISTS idx_flows_protocol ON flows(protocol);
+CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method);
 CREATE INDEX IF NOT EXISTS idx_ai_messages_chat ON ai_messages(chat_id);
 """
 
@@ -179,9 +189,12 @@ def init_db():
     finally:
         _init_conn.close()
     with get_connection() as conn:
-        conn.executescript(SCHEMA)
-        # 迁移：为旧表添加 note 列（CREATE TABLE IF NOT EXISTS 不会改已有表）
+        # 1. 先建表（IF NOT EXISTS 不改已有表，旧表缺列需要靠 _migrate 补）
+        conn.executescript(SCHEMA_TABLES)
+        # 2. 迁移：为旧表添加新列（CREATE TABLE IF NOT EXISTS 不会改已有表）
         _migrate(conn)
+        # 3. 建索引（必须在 _migrate 之后，否则旧表缺 protocol 列时 CREATE INDEX 会失败）
+        conn.executescript(SCHEMA_INDEXES)
         # 默认启动清空 flows 并重置自增序列（避免 ID 累积到上万）
         # 用环境变量 OPENNET_KEEP_FLOWS=1 可保留历史
         if os.environ.get("OPENNET_KEEP_FLOWS") != "1":
