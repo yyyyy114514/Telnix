@@ -91,7 +91,11 @@ def _notify_settings_changed():
 def setup_watchdog():
     """注册看门狗：进程退出时自动恢复代理设置。
 
-    atexit 覆盖正常退出；SetConsoleCtrlHandler 覆盖 Ctrl+C / 关闭控制台。
+    覆盖三种退出场景：
+    - 正常退出（sys.exit / main 返回）：atexit 触发 clear_system_proxy
+    - Ctrl+C / Ctrl+Break：SetConsoleCtrlHandler 同步清代理 + os._exit
+    - 关闭控制台窗口（CTRL_CLOSE_EVENT）：同上，Windows 只给 ~5 秒，
+      必须在 handler 里同步清完再退出，否则 winreg 调用会被强杀导致代理残留
     """
     atexit.register(clear_system_proxy)
 
@@ -99,8 +103,12 @@ def setup_watchdog():
     def _handler(ctrl_type):
         # CTRL_C_EVENT=0, CTRL_BREAK_EVENT=1, CTRL_CLOSE_EVENT=2,
         # CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6
-        clear_system_proxy()
-        return False  # 让默认处理继续
+        try:
+            clear_system_proxy()
+        except Exception:  # noqa: BLE001
+            pass
+        # 同步清完代理后立即退出，不依赖 atexit / finally（避免被 Windows 强杀）
+        os._exit(0)
 
     try:
         ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, True)
