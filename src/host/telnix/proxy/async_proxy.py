@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 import ssl
 import threading
@@ -24,15 +25,28 @@ from ..ip_region import lookup as ip_region_lookup
 from . import ssl_bump as ssl_bump_mod
 from .server import Headers
 from .breakpoint import BreakpointManager
+from .process_lookup import ProcessLookup
 from ..clash.client import get_upstream_proxy
+
+
+def _compile_host_wildcard(pattern: str):
+    """编译 host 通配符（* → .*, ? → .），大小写不敏感。失败返回 None。"""
+    if not pattern:
+        return None
+    regex_str = '^' + re.escape(pattern).replace(r'\*', '.*').replace(r'\?', '.') + '$'
+    try:
+        return re.compile(regex_str, re.IGNORECASE)
+    except re.error:
+        return None
 
 
 class AsyncProxyServer:
     """asyncio 代理服务器。
 
     与 ProxyServer 接口兼容：start()/stop()/refresh_cert_status()/cert_installed
-    注意：断点功能目前仅在 builtin 线程引擎中实现，async 引擎仅提供 BreakpointManager
-    占位对象（保持接口兼容，但不会真正阻断请求/响应）。
+    以及 API 层访问的 focus/ignore/pinning/breakpoint 等属性。
+    注意：断点、focus、ignore 仅维护状态（API 可读写），async 引擎的转发链路
+    未实现实际过滤逻辑（实验性引擎，生产请用 builtin 线程引擎）。
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8888,
@@ -48,6 +62,29 @@ class AsyncProxyServer:
         self._server: Optional[asyncio.AbstractServer] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_event = threading.Event()
+        # 运行状态（与 ProxyServer 接口兼容，capture.py:40 访问 proxy._running）
+        self._running = False
+        # 进程查找（processes.py 访问 proxy.process_lookup）
+        self.process_lookup = ProcessLookup()
+        # 忽略列表（refresh_ignored 从 DB 加载；API 层访问 _ignored_* 属性）
+        self._ignored_lock = threading.Lock()
+        self._ignored_pids: set[int] = set()
+        self._ignored_names: set[str] = set()
+        self._ignored_hosts: list[str] = []
+        self._ignored_host_regexes: list[re.Pattern | None] = []
+        # 专注模式（focus.py 访问 get_focus_mode/set_focus_mode）
+        self._focus_lock = threading.Lock()
+        self._focus_pids: set[int] = set()
+        self._focus_hosts: list[str] = []
+        self._focus_host_regexes: list[re.Pattern | None] = []
+        self._focus_methods: set[str] = set()
+        self._focus_status_codes: set[int] = set()
+        self._focus_content_types: list[str] = []
+        self._focus_enabled = False
+        # 证书 pinning 疑似进程（与 ProxyServer 接口兼容，capture.py:31 访问）
+        self._pinning_lock = threading.Lock()
+        self._pinning_suspected: list[dict] = []
+        self._pinning_keys: set[tuple] = set()
         # 上游代理（Clash 集成）
         self._upstream: Optional[tuple[str, int]] = None
         # 断点管理器（占位：与 ProxyServer 接口兼容，async 引擎未实现断点拦截逻辑）
@@ -64,6 +101,7 @@ class AsyncProxyServer:
 
         asyncio 事件循环不能与 uvicorn 的循环混用，因此放在独立线程中。
         """
+        self._running = True
         t = threading.Thread(target=self._run_loop, daemon=True, name="async-proxy")
         t.start()
         logger.info("async-proxy", f"asyncio 代理服务器已启动: {self.host}:{self.port}")
@@ -87,6 +125,7 @@ class AsyncProxyServer:
 
     def stop(self):
         """停止代理服务器。"""
+        self._running = False
         self._stop_event.set()
         logger.info("async-proxy", "asyncio 代理服务器已停止")
 
@@ -101,6 +140,61 @@ class AsyncProxyServer:
 
     def set_ignore_pids(self, pids: set[int]):
         self.ignore_pids = pids
+
+    def refresh_ignored(self):
+        """从 DB 加载忽略列表（与 ProxyServer 接口兼容）。
+
+        capture.py:101 / processes.py 多处调用。async 引擎转发链路未实际使用
+        这些列表做过滤，但 API 层需要能读写状态。
+        """
+        with self._ignored_lock:
+            rows = db.get_ignored_processes()
+            self._ignored_pids = {r["pid"] for r in rows if r.get("pid") and r["pid"] > 0}
+            self._ignored_names = {r["process_name"].lower()
+                                   for r in rows
+                                   if (not r.get("pid") or r["pid"] <= 0) and r.get("process_name")}
+            host_rows = db.get_ignored_hosts()
+            self._ignored_hosts = [r["host_pattern"] for r in host_rows if r.get("host_pattern")]
+            self._ignored_host_regexes = [_compile_host_wildcard(p) for p in self._ignored_hosts]
+
+    def get_focus_mode(self) -> dict:
+        """获取专注模式状态（与 ProxyServer 接口兼容，focus.py:87 访问）。"""
+        with self._focus_lock:
+            return {
+                "enabled": self._focus_enabled,
+                "pids": list(self._focus_pids),
+                "hosts": list(self._focus_hosts),
+                "methods": list(self._focus_methods),
+                "status_codes": list(self._focus_status_codes),
+                "content_types": list(self._focus_content_types),
+            }
+
+    def set_focus_mode(self, enabled: bool, pids: list[int] | None = None,
+                       hosts: list[str] | None = None,
+                       methods: list[str] | None = None,
+                       status_codes: list[int] | None = None,
+                       content_types: list[str] | None = None):
+        """设置专注模式（与 ProxyServer 接口兼容，focus.py:118 访问）。
+
+        enabled 参数被忽略——自动根据是否有任何专注条件判断。
+        async 引擎转发链路未实现实际过滤，仅维护状态供 API 读写。
+        """
+        with self._focus_lock:
+            if pids is not None:
+                self._focus_pids = set(pids)
+            if hosts is not None:
+                self._focus_hosts = list(hosts)
+                self._focus_host_regexes = [_compile_host_wildcard(p) for p in self._focus_hosts]
+            if methods is not None:
+                self._focus_methods = {m.upper() for m in methods if m}
+            if status_codes is not None:
+                self._focus_status_codes = set(status_codes)
+            if content_types is not None:
+                self._focus_content_types = [c.lower() for c in content_types if c]
+            self._focus_enabled = bool(
+                self._focus_pids or self._focus_hosts or self._focus_methods
+                or self._focus_status_codes or self._focus_content_types
+            )
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter):
