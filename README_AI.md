@@ -1,26 +1,26 @@
-# OpenNet Agent 使用手册
+# Telnix Agent 使用手册
 
-> 本文档面向 **AI agent**。读完即可用 CLI 或 HTTP API 控制 OpenNet 抓包、改包、重放、发包。
+> 本文档面向 **AI agent**。读完即可用 CLI 或 HTTP API 控制 Telnix 抓包、改包、重放、发包。
 
-OpenNet 是 Windows 上的 HTTP/HTTPS 抓包工具（类似 Fiddler/Charles），支持 SSL bump 解密 HTTPS、自动回复（改字段/mock 响应）、断点、重放、发包（Composer）、导出。提供 **CLI**（给 agent 主用）和 **HTTP API**（CLI 的底层，复杂场景兜底）。
+Telnix 是 Windows 上的 HTTP/HTTPS 抓包工具（类似 Fiddler/Charles），支持 SSL bump 解密 HTTPS、自动回复（改字段/mock 响应）、断点、重放、发包（Composer）、导出。提供 **CLI**（给 agent 主用）和 **HTTP API**（CLI 的底层，复杂场景兜底）。
 
 ---
 
 ## 启动参数（agent 必读）
 
-后端启动命令 `python -m opennet`（工作目录 `src\host`），支持以下参数：
+后端启动命令 `python -m Telnix`（工作目录 `src\host`），支持以下参数：
 
 | 参数 | 说明 |
 |---|---|
-| `--no-browser` | 不自动打开浏览器，agent 自动化场景必用（避免干扰用户）。等价环境变量 `OPENNET_NO_BROWSER=1` |
+| `--no-browser` | 不自动打开浏览器，agent 自动化场景必用（避免干扰用户）。等价环境变量 `Telnix_NO_BROWSER=1` |
 | `--help` | 查看帮助 |
 
 ```bash
 # agent 启动后端，不开浏览器
-python -m opennet --no-browser
+python -m Telnix --no-browser
 
 # 或用环境变量
-OPENNET_NO_BROWSER=1 python -m opennet
+Telnix_NO_BROWSER=1 python -m Telnix
 ```
 
 **用户设置存储**：用户设置（GUI 偏好、列顺序、导航顺序、主题、缓存阈值等）存在 `<data_dir>/settings.json`（原子写入 + 线程锁），不再用 SQLite。首次启动若 JSON 不存在但 SQLite 有数据会自动迁移。用户可在 GUI 设置页点「打开设置文件」用记事本直接编辑。
@@ -65,6 +65,9 @@ OPENNET_NO_BROWSER=1 python -m opennet
 | 看日志 | `log tail` / `log clear` / `log export` | [§3.9](#39-log--日志) |
 | 重启前后端 | `system restart` | [§3.21](#321-system--系统控制重启--退出--管理员重启) |
 | 以管理员身份重启（TCP/UDP 抓包用） | `system restart-as-admin` | [§3.21](#321-system--系统控制重启--退出--管理员重启) |
+| 安装可选依赖（mitmproxy） | `system install-dep` + `system install-dep-status` 轮询 | [§3.21.1](#3211-system-install-dep--在线安装可选依赖如-mitmproxy) |
+| 查看设置 / 写入设置 | `settings get [-k KEY]` / `settings set -k KEY -v VALUE` | [§3.21.2](#3212-settings--设置管理get--set--engine) |
+| 切换代理引擎 | `settings engine [builtin\|async\|mitmproxy]` + `system restart` | [§3.21.2](#3212-settings--设置管理get--set--engine) |
 | 从零发包（Composer） | `send --url ... --method ...` | [§3.22](#322-send--从零发包composer) |
 | 接管会话前清场（保留原状，事后询问用户是否退出） | `agent start` / `agent end` | [§3.23](#323-agent--agent-工作模式保留原状end-不关代理不退出) |
 | 批量导入规则 | `intercept import rules.json` | [§3.14](#314-intercept-exportimport--拦截规则导入导出) |
@@ -77,31 +80,31 @@ OPENNET_NO_BROWSER=1 python -m opennet
 
 ```bash
 # 1. 确认后端在跑（默认 127.0.0.1:18901）
-python -m opennet.cli status
+python -m telnix.cli status
 
 # 2. 开始抓包，拿到 session_id
-python -m opennet.cli capture start
+python -m telnix.cli capture start
 # stdout: {"session_id": 7, "capturing": true}
 
 # 3. 让被分析软件跑一会儿，tail 看包（Ctrl+C 退出）
-python -m opennet.cli packets list --tail --emit-curl
+python -m telnix.cli packets list --tail --emit-curl
 
 # 4. 发现要改的请求，加拦截规则（先 dry-run 预览）
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.example.com && method=POST && path~=/api/v1/*' \
   --action 'set-json remainingUses 99999' \
   --name 'bump-uses' \
   --dry-run
 
 # 5. 确认无误，去掉 --dry-run 真生效
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.example.com && method=POST && path~=/api/v1/*' \
   --action 'set-json remainingUses 99999' \
   --name 'bump-uses'
 
 # 6. 收尾
-python -m opennet.cli capture stop
-python -m opennet.cli export --format har -o evidence.har
+python -m telnix.cli capture stop
+python -m telnix.cli export --format har -o evidence.har
 ```
 
 ---
@@ -110,23 +113,23 @@ python -m opennet.cli export --format har -o evidence.har
 
 | 项 | 默认 | 环境变量 |
 |---|---|---|
-| API 地址 | `http://127.0.0.1:18901` | `OPENNET_API` |
-| 默认 session | 活动会话（从 `/status` 查询） | `OPENNET_SESSION` |
+| API 地址 | `http://127.0.0.1:18901` | `TELNIX_API` |
+| 默认 session | 活动会话（从 `/status` 查询） | `Telnix_SESSION` |
 | 代理端口 | 8888 | — |
 
-> **端口说明**：API 端口是 **18901**（不是 18899）。18899/18900 在部分 Windows 机器被动态端口保留（bind 报 WSAEACCES=13），所以 OpenNet 改用 18901。CLI 默认连 18901，与 `config.DEFAULT_PORT` 保持一致。agent 不要假设端口是 18899。
+> **端口说明**：API 端口是 **18901**（不是 18899）。18899/18900 在部分 Windows 机器被动态端口保留（bind 报 WSAEACCES=13），所以 Telnix 改用 18901。CLI 默认连 18901，与 `config.DEFAULT_PORT` 保持一致。agent 不要假设端口是 18899。
 
 ```bash
 # 自定义后端地址
-OPENNET_API=http://127.0.0.1:18901 python -m opennet.cli status
+TELNIX_API=http://127.0.0.1:18901 python -m telnix.cli status
 
 # 固定 session（agent 脚本里多次命令复用同一 session，省去每条命令带 --session）
-export OPENNET_SESSION=7
-python -m opennet.cli packets list       # 自动用 session 7
-python -m opennet.cli packets get 42     # --session 优先级 > 环境变量 > /status
+export Telnix_SESSION=7
+python -m telnix.cli packets list       # 自动用 session 7
+python -m telnix.cli packets get 42     # --session 优先级 > 环境变量 > /status
 ```
 
-**session 优先级**：`--session N` 参数 > `OPENNET_SESSION` 环境变量 > `/status` 查询活动会话。
+**session 优先级**：`--session N` 参数 > `Telnix_SESSION` 环境变量 > `/status` 查询活动会话。
 
 后端未启动时 CLI 会退出码 2 + stderr 输出 `{"ok": false, "error": "无法连接后端...", "kind": "conn"}`。
 
@@ -154,13 +157,13 @@ agent 解析建议：先看退出码判断错误大类，再读 stdout（成功�
 
 ## 3. CLI 命令详解
 
-> 所有命令前缀：`python -m opennet.cli <subcommand>`
-> 工作目录需在 `d:\Desktop\opennet\src\host` 下，或后端已打包到 PATH。
+> 所有命令前缀：`python -m telnix.cli <subcommand>`
+> 工作目录需在 `d:\Desktop\Telnix\src\host` 下，或后端已打包到 PATH。
 
 ### 3.1 `status` — 后端状态
 
 ```bash
-python -m opennet.cli status
+python -m telnix.cli status
 ```
 
 ```json
@@ -181,24 +184,24 @@ agent 首次接入先调这个，确认后端活着 + 当前是否在抓包 + �
 
 ```bash
 # 开始抓包（返回 session_id，后续命令可带 --session 续命）
-python -m opennet.cli capture start [--max-duration 60] [--auto-stop 30] [--layer http|tcp|all]
+python -m telnix.cli capture start [--max-duration 60] [--auto-stop 30] [--layer http|tcp|all]
 # {"session_id": 7, "capturing": true, "auto_stop_seconds": 30.0,
 #  "hint": "后端将在 30.0s 后自动停止抓包"}
 
 # 停止
-python -m opennet.cli capture stop [--layer all]
+python -m telnix.cli capture stop [--layer all]
 # {"capturing": false}
 
 # 清空当前会话流量
-python -m opennet.cli capture clear
+python -m telnix.cli capture clear
 # {"cleared": true}
 
 # 暂停抓包（保留会话，代理仍跑，只是不记录新流量）
-python -m opennet.cli capture pause
+python -m telnix.cli capture pause
 # {"paused": true, "session_id": 7, "hint": "会话保留，代理仍跑。resume 恢复，stop 真正停止"}
 
 # 恢复抓包记录（在原会话继续）
-python -m opennet.cli capture resume
+python -m telnix.cli capture resume
 # {"resumed": true, "session_id": 7}
 ```
 
@@ -216,7 +219,7 @@ python -m opennet.cli capture resume
 
 ```bash
 # 列表（NDJSON），默认当前活动会话，最新在前
-python -m opennet.cli packets list \
+python -m telnix.cli packets list \
   [--session 7] \
   [--limit 100] \
   [--since-id 42] \
@@ -241,7 +244,7 @@ python -m opennet.cli packets list \
 
 ```bash
 # 单条详情
-python -m opennet.cli packets get 42 [--emit-curl] [--hex] [--field request_body|response_body|raw_data] [--offset 0] [--length 4096] [--decode plugin.py] [--decode-field request_body|response_body]
+python -m telnix.cli packets get 42 [--emit-curl] [--hex] [--field request_body|response_body|raw_data] [--offset 0] [--length 4096] [--decode plugin.py] [--decode-field request_body|response_body]
 ```
 
 #### 解码器插件（`--decode`）
@@ -270,7 +273,7 @@ def decode(data: bytes, flow: dict) -> dict:
 
 **用法**：
 ```bash
-python -m opennet.cli packets get 42 --decode my_steam_decoder.py
+python -m telnix.cli packets get 42 --decode my_steam_decoder.py
 # 输出：{...原始 flow 字段..., "decoded": {"length": 128, "msg_id": 5, "payload_hex": "...", "host": "..."}}
 ```
 
@@ -281,52 +284,52 @@ python -m opennet.cli packets get 42 --decode my_steam_decoder.py
 
 ```bash
 # 删除
-python -m opennet.cli packets delete 42
-python -m opennet.cli packets delete --ids 1,2,3
+python -m telnix.cli packets delete 42
+python -m telnix.cli packets delete --ids 1,2,3
 
 # 跨流量搜索（正则匹配 body/url/path）
-python -m opennet.cli packets search --body-regex 'remainingUses.*\d{4,}'
-python -m opennet.cli packets search --binary-hex 'efbbbf'  # 搜 BOM 头
-python -m opennet.cli packets search --binary-hex 'efbbbf' --offset 0:1024  # 只在前 1KB 搜（节省大 body 搜索时间）
-python -m opennet.cli packets search --body-regex 'sig=[a-f0-9]{32}' --all  # 跨所有会话搜索
+python -m telnix.cli packets search --body-regex 'remainingUses.*\d{4,}'
+python -m telnix.cli packets search --binary-hex 'efbbbf'  # 搜 BOM 头
+python -m telnix.cli packets search --binary-hex 'efbbbf' --offset 0:1024  # 只在前 1KB 搜（节省大 body 搜索时间）
+python -m telnix.cli packets search --body-regex 'sig=[a-f0-9]{32}' --all  # 跨所有会话搜索
 # 多条件组合搜索（§3.1，所有条件 AND 关系）
-python -m opennet.cli packets search --body-regex 'sig=[a-f0-9]{32}' --method POST --status 200
-python -m opennet.cli packets search --header-regex 'Authorization: Bearer .+' --method POST --all
-python -m opennet.cli packets search --method POST --status 200 --pid 1234 --process chrome.exe
-python -m opennet.cli packets search --method GET --status 404    # 只用精确字段过滤（无需正则）
+python -m telnix.cli packets search --body-regex 'sig=[a-f0-9]{32}' --method POST --status 200
+python -m telnix.cli packets search --header-regex 'Authorization: Bearer .+' --method POST --all
+python -m telnix.cli packets search --method POST --status 200 --pid 1234 --process chrome.exe
+python -m telnix.cli packets search --method GET --status 404    # 只用精确字段过滤（无需正则）
 
 # 跨会话查询所有流量（不依赖活动会话，逆向比对历史用）
-python -m opennet.cli packets list-all [--host H] [--process P] [--method M] \
+python -m telnix.cli packets list-all [--host H] [--process P] [--method M] \
   [--status N] [--protocol http|tcp|udp] [--limit N] [--offset N] [--since-id N] \
   [--filter 'expr'] [--filter-path P] [--filter-url U] [--emit-curl] [--json-array] \
   [--decode plugin.py] [--decode-field request_body|response_body]
 
 # 跨会话清理流量（按需清理旧数据，避免 SQLite 膨胀）
-python -m opennet.cli packets clear --all              # 清空全部历史流量
-python -m opennet.cli packets clear --before-id 1000   # 删除 id<1000 的旧流量
+python -m telnix.cli packets clear --all              # 清空全部历史流量
+python -m telnix.cli packets clear --before-id 1000   # 删除 id<1000 的旧流量
 
 # 单 flow 导出（逆向取证刚需，不用导出整个 session）
-python -m opennet.cli packets export 42 --format curl -o req.sh
-python -m opennet.cli packets export 42 --format python-requests -o req.py
-python -m opennet.cli packets export 42 --format postman -o req.json
-python -m opennet.cli packets export 42 --format csv -o req.csv     # CSV 单行带表头
-python -m opennet.cli packets export 42 --format json -o req.json  # 不指定 -o 则 stdout
+python -m telnix.cli packets export 42 --format curl -o req.sh
+python -m telnix.cli packets export 42 --format python-requests -o req.py
+python -m telnix.cli packets export 42 --format postman -o req.json
+python -m telnix.cli packets export 42 --format csv -o req.csv     # CSV 单行带表头
+python -m telnix.cli packets export 42 --format json -o req.json  # 不指定 -o 则 stdout
 
 # 流量统计（按 host/method/status/protocol 分组）
-python -m opennet.cli packets stats
-python -m opennet.cli packets stats --by content_type      # 按 Content-Type 分组（跨会话全量统计）
-python -m opennet.cli packets stats --by process           # 按进程名分组（跨会话全量统计）
+python -m telnix.cli packets stats
+python -m telnix.cli packets stats --by content_type      # 按 Content-Type 分组（跨会话全量统计）
+python -m telnix.cli packets stats --by process           # 按进程名分组（跨会话全量统计）
 
 # 流量标签（打标 / 按标签过滤，存 SQLite 切换会话不丢）
-python -m opennet.cli packets tag 42 --add analyzed
-python -m opennet.cli packets tag 42 --add suspicious,key --note "疑似签名字段"
-python -m opennet.cli packets tag 42 --remove analyzed
-python -m opennet.cli packets tag 42 --clear
-python -m opennet.cli packets tag 42 --clear-note          # 清除备注（保留标签）
-python -m opennet.cli packets tag --list                   # 列出全局所有标签及每标签的 flow 数（§4.2）
-python -m opennet.cli packets list --tag suspicious        # 按标签过滤
-python -m opennet.cli packets list-all --tag analyzed      # 跨会话按标签过滤
-python -m opennet.cli packets list --has-tags              # 只看有标签的
+python -m telnix.cli packets tag 42 --add analyzed
+python -m telnix.cli packets tag 42 --add suspicious,key --note "疑似签名字段"
+python -m telnix.cli packets tag 42 --remove analyzed
+python -m telnix.cli packets tag 42 --clear
+python -m telnix.cli packets tag 42 --clear-note          # 清除备注（保留标签）
+python -m telnix.cli packets tag --list                   # 列出全局所有标签及每标签的 flow 数（§4.2）
+python -m telnix.cli packets list --tag suspicious        # 按标签过滤
+python -m telnix.cli packets list-all --tag analyzed      # 跨会话按标签过滤
+python -m telnix.cli packets list --has-tags              # 只看有标签的
 ```
 
 - `--hex`：输出 hex dump 格式（偏移+字节+ASCII），配合 `--field` 指定字段、`--offset`/`--length` 截取。
@@ -341,17 +344,17 @@ python -m opennet.cli packets list --has-tags              # 只看有标签的
 
 ```bash
 # 对比两条流量的请求/响应字段（unified diff，JSON body 自动格式化便于 diff）
-python -m opennet.cli packets diff 42 43 --field response_body
+python -m telnix.cli packets diff 42 43 --field response_body
 # {"id1": 42, "id2": 43, "field": "response_body", "diff": "--- #42.response_body\n+++ #43.response_body\n@@ -1,3 +1,3 @@\n-  \"remainingUses\": 1\n+  \"remainingUses\": 99999\n", "identical": false}
 
 # 唯一 endpoint 提取（path 模板归一化，画 API 地图）
-python -m opennet.cli packets endpoints [--host H] [--limit 200] [--json-array] [--session S] [--keep-query] [--sample-strategy first|last|random]
+python -m telnix.cli packets endpoints [--host H] [--limit 200] [--json-array] [--session S] [--keep-query] [--sample-strategy first|last|random]
 # NDJSON，每行一个 endpoint：
 # {"method": "POST", "host": "api.example.com", "path_template": "/v1/users/{id}/usage",
 #  "count": 12, "status_set": [200, 401], "sample_ids": [42, 43, 44], "query_keys": ["page", "size"]}
 
 # 流量时间线（按时间排序，标注大间隔段落）
-python -m opennet.cli packets timeline [--host H] [--gap 1.0] [--limit 200] [--session S]
+python -m telnix.cli packets timeline [--host H] [--gap 1.0] [--limit 200] [--session S]
 # {"timeline": [...], "count": N, "segments": M, "gap_threshold": 1.0}
 ```
 
@@ -363,15 +366,15 @@ python -m opennet.cli packets timeline [--host H] [--gap 1.0] [--limit 200] [--s
 
 ```bash
 # 按 endpoint 分组统计（path 模板归一化）
-python -m opennet.cli packets stats --by endpoint [--session S] [--limit 2000]
+python -m telnix.cli packets stats --by endpoint [--session S] [--limit 2000]
 # {"by": "endpoint", "endpoints": [...]}
 
 # 附加 size/duration 百分位指标（p50/p95/max/min）
-python -m opennet.cli packets stats --by endpoint --metrics size,duration
+python -m telnix.cli packets stats --by endpoint --metrics size,duration
 # 每个 endpoint 多 "size": {"p50":..., "p95":..., "max":..., "min":..., "count":...}
 
 # 也可以只加 --metrics 不加 --by，在原有 host/method/status 分组基础上附加全局 size/duration 分布
-python -m opennet.cli packets stats --metrics size,duration
+python -m telnix.cli packets stats --metrics size,duration
 ```
 
 - `--by endpoint`：拉取本会话最多 500 条流量做 path 模板归一化分组（见 `packets endpoints`），输出每个 endpoint 的 method/host/path_template/count/status_set/sample_ids。
@@ -381,8 +384,8 @@ python -m opennet.cli packets stats --metrics size,duration
 
 ```bash
 # 批量解码：list 和 list-all 都支持 --decode，每条流量输出 decoded 字段
-python -m opennet.cli packets list --decode my_decoder.py --limit 50
-python -m opennet.cli packets list-all --host api.example.com --decode my_decoder.py
+python -m telnix.cli packets list --decode my_decoder.py --limit 50
+python -m telnix.cli packets list-all --host api.example.com --decode my_decoder.py
 ```
 
 - `--decode plugin.py`：加载 Python 解码器（接口见上方"解码器插件"小节），对每条流量的 `response_body` 解码，结果放到输出 JSON 的 `decoded` 字段。适合批量解析二进制协议（如 Steam protobuf），不用逐条 `packets get`。
@@ -391,7 +394,7 @@ python -m opennet.cli packets list-all --host api.example.com --decode my_decode
 
 ```bash
 # 阻塞输出匹配过滤表达式的新流量（NDJSON），Ctrl+C 退出
-python -m opennet.cli packets watch --filter 'host~=api.example.com && method=POST'
+python -m telnix.cli packets watch --filter 'host~=api.example.com && method=POST'
 # {"id": 42, "method": "POST", "host": "api.example.com", ...}
 # {"id": 43, ...}
 ```
@@ -406,9 +409,9 @@ python -m opennet.cli packets watch --filter 'host~=api.example.com && method=PO
 逆向常需看"请求 A 响应里的 token/session_id 被请求 B 用了"这种依赖关系。`trace` 自动从源 flow 响应提取字符串值，在后续流量的请求里搜索，输出依赖链。
 
 ```bash
-python -m opennet.cli packets trace 42 [--limit 500] [--min-length 8]
-python -m opennet.cli packets trace 42 --all              # 跨会话追踪 token 传递
-python -m opennet.cli packets trace 42 --min-length 8     # 只追踪长度 >=8 的字符串（减少短串误报）
+python -m telnix.cli packets trace 42 [--limit 500] [--min-length 8]
+python -m telnix.cli packets trace 42 --all              # 跨会话追踪 token 传递
+python -m telnix.cli packets trace 42 --min-length 8     # 只追踪长度 >=8 的字符串（减少短串误报）
 # NDJSON，每行一个依赖：
 # {"source_flow": 42, "target_flow": 45, "field": "data.token", "value": "abc123def456"}
 # {"source_flow": 42, "target_flow": 47, "field": "session_id", "value": "xyz789"}
@@ -427,8 +430,8 @@ python -m opennet.cli packets trace 42 --min-length 8     # 只追踪长度 >=8 
 逆向定位签名字段靠人工 diff。`analyze` 自动比对多条同接口请求的 JSON body，找出"长度固定 + 字符集受限 + 每次都不同"的可疑签名字段。
 
 ```bash
-python -m opennet.cli packets analyze 42 43 44 [--find-signature]
-python -m opennet.cli packets analyze 42 43 44 --all      # 跨会话签名字段检测
+python -m telnix.cli packets analyze 42 43 44 [--find-signature]
+python -m telnix.cli packets analyze 42 43 44 --all      # 跨会话签名字段检测
 # NDJSON，每行一个字段分析结果（按 suspicion_score 降序）：
 # {"field_path": "data.sig", "lengths": [32], "charsets": ["hex"],
 #  "varies": true, "sample_values": ["a1b2...", "c3d4...", "e5f6..."],
@@ -482,7 +485,7 @@ python -m opennet.cli packets analyze 42 43 44 --all      # 跨会话签名字�
 
 ```bash
 # 添加规则
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.example.com && method=POST && path~=/api/v1/*' \
   --action 'set-json remainingUses 99999' \
   --name 'bump-uses' \          # 写入 note 字段
@@ -496,7 +499,7 @@ python -m opennet.cli intercept add \
 
 ```bash
 # 幂等创建：已存在相同规则不重复创建
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.example.com && path~=/usage' \
   --action 'set-json remainingUses 99999' \
   --name 'bump-uses' --idempotent
@@ -539,33 +542,33 @@ python -m opennet.cli intercept add \
 
 ```bash
 # 规则列表（NDJSON，每条含 rule_id + hit_count 命中统计字段）
-python -m opennet.cli intercept list [--json-array] [--with-stats]
+python -m telnix.cli intercept list [--json-array] [--with-stats]
 # 每条规则输出含: id, rule_id, pattern, action, enabled, note,
 #   method_filter, status_filter, pid_filter, process_filter,
 #   hit_count, last_hit_at, last_hit_flow_id
 
 # 查看某规则的命中统计 + 最后命中的流量详情（§4.1）
-python -m opennet.cli intercept hits <rule_id>
+python -m telnix.cli intercept hits <rule_id>
 # {"rule_id": "abc123", "pattern": "*api.x.com*/usage*", "action": "modify_response",
 #  "hit_count": 42, "last_hit_at": "2026-07-18T12:34:56", "last_hit_flow_id": 99,
 #  "last_hit_flow": {id: 99, method: "POST", host: "api.x.com", ...}}
 
 # 删除
-python -m opennet.cli intercept del <rule_id>
-python -m opennet.cli intercept del --ids id1,id2,id3
+python -m telnix.cli intercept del <rule_id>
+python -m telnix.cli intercept del --ids id1,id2,id3
 
 # 启用/禁用规则（不删除，支持批量）
-python -m opennet.cli intercept toggle <rule_id>              # 切换 enabled
-python -m opennet.cli intercept toggle <rule_id> --enable     # 强制启用
-python -m opennet.cli intercept toggle <rule_id> --disable    # 强制禁用
-python -m opennet.cli intercept toggle --all --disable        # 批量禁用所有规则
+python -m telnix.cli intercept toggle <rule_id>              # 切换 enabled
+python -m telnix.cli intercept toggle <rule_id> --enable     # 强制启用
+python -m telnix.cli intercept toggle <rule_id> --disable    # 强制禁用
+python -m telnix.cli intercept toggle --all --disable        # 批量禁用所有规则
 # {"toggled": true, "rule_id": "...", "enabled": false}
 
 # 修改现有规则（不删除重建）
-python -m opennet.cli intercept update <rule_id> --note '新备注'
-python -m opennet.cli intercept update <rule_id> --match 'host~=api2.example.com' --action 'set-json k v'
-python -m opennet.cli intercept update <rule_id> --enable     # 同时启用
-python -m opennet.cli intercept update <rule_id> --disable --note '临时停用'
+python -m telnix.cli intercept update <rule_id> --note '新备注'
+python -m telnix.cli intercept update <rule_id> --match 'host~=api2.example.com' --action 'set-json k v'
+python -m telnix.cli intercept update <rule_id> --enable     # 同时启用
+python -m telnix.cli intercept update <rule_id> --disable --note '临时停用'
 # {"updated": true, "rule_id": "...", "fields": ["note", "enabled"]}
 ```
 
@@ -581,34 +584,34 @@ python -m opennet.cli intercept update <rule_id> --disable --note '临时停用'
 
 ```bash
 # 原样重放
-python -m opennet.cli replay 42
+python -m telnix.cli replay 42
 # {"replayed": true, "id": 42}
 
 # 改参数重放（覆盖 method/host/port/body/headers）
-python -m opennet.cli replay 42 --method PUT --host test.example.com --port 8443
-python -m opennet.cli replay 42 --body '{"msg":"modified"}' --header 'X-Test: 1'
+python -m telnix.cli replay 42 --method PUT --host test.example.com --port 8443
+python -m telnix.cli replay 42 --body '{"msg":"modified"}' --header 'X-Test: 1'
 
 # fuzz 批量重放（遍历 JSON body 里某字段的值范围）
-python -m opennet.cli replay 42 --fuzz 'user_id=1..100'
+python -m telnix.cli replay 42 --fuzz 'user_id=1..100'
 # {"results": [...], "count": 100}  # 每个值重放一次，返回所有响应
 
 # 多字段组合 fuzz（cartesian 笛卡尔积 / zip 配对）
-python -m opennet.cli replay 42 --fuzz-file payloads.json --mode cartesian
+python -m telnix.cli replay 42 --fuzz-file payloads.json --mode cartesian
 # payloads.json: {"user_id": [1,2,3], "role": ["admin","user"], "sig": ["a","b"]}
 # cartesian: 3×2×2=12 次；zip: 3 次（取最短长度）
 
 # 批量重放 N 次并对比响应差异（测服务端是否返回固定结果 / 是否有随机字段）
-python -m opennet.cli replay 42 --repeat 5 --compare
+python -m telnix.cli replay 42 --repeat 5 --compare
 # {"replayed": true, "id": 42, "count": 5, "results": [...],
 #  "compare": [{"run": 1, "identical": true, "diff": ""}, ...]}
 
 # 并发重放（测服务端并发限制/竞态）
-python -m opennet.cli replay 42 --repeat 20 --parallel 5
+python -m telnix.cli replay 42 --repeat 20 --parallel 5
 # {"replayed": true, "id": 42, "count": 20, "parallel": 5, "results": [...]}
 # 5 线程并发重放 20 次，results 按 index 排序
 
 # 慢接口 / 长连接：自定义超时（默认带 body 120s，无 body 30s）
-python -m opennet.cli replay 42 --timeout 300
+python -m telnix.cli replay 42 --timeout 300
 ```
 
 覆盖参数：
@@ -638,7 +641,7 @@ python -m opennet.cli replay 42 --timeout 300
 ### 3.6 `export` — 导出会话
 
 ```bash
-python -m opennet.cli export \
+python -m telnix.cli export \
   [--session 7] \
   --format har|json|csv|python-requests|postman|curl \
   [-o evidence.har]
@@ -654,7 +657,7 @@ python -m opennet.cli export \
 | `postman` | Postman Collection v2.1 JSON，可直接导入 Postman | `.json` |
 | `curl` | bash 脚本，每条流量一个 curl 命令 | `.sh` |
 
-- 不指定 `-o` 时按 format 自动推导文件名（如 `--format csv` → `opennet_export.csv`）。
+- 不指定 `-o` 时按 format 自动推导文件名（如 `--format csv` → `Telnix_export.csv`）。
 - **Windows 二进制 body 兼容**：当 body 是二进制（`base64:` 前缀）且指定了 `-o` 文件时，Windows 上会额外生成 `<stem>_body.bin` 二进制文件，主文件用引用方式而非内联管道：
   - `--format curl`：生成 `<stem>_body.bin`，curl 命令用 `--data-binary @<stem>_body.bin` 引用（不再用 `echo | base64 -d |` Unix 管道）。
   - `--format python-requests`：生成 `<stem>_body.bin`，脚本里用 `open('req_body.bin','rb')` 读取后传给 `requests.post(..., data=...)`。
@@ -665,9 +668,9 @@ python -m opennet.cli export \
 ### 3.7 `proxy` — 系统代理开关
 
 ```bash
-python -m opennet.cli proxy status   # 查状态
-python -m opennet.cli proxy on       # 开系统代理（让所有软件走 OpenNet）
-python -m opennet.cli proxy off      # 关系统代理（不影响规则，规则走 SSL bump 仍生效）
+python -m telnix.cli proxy status   # 查状态
+python -m telnix.cli proxy on       # 开系统代理（让所有软件走 Telnix）
+python -m telnix.cli proxy off      # 关系统代理（不影响规则，规则走 SSL bump 仍生效）
 ```
 
 输出：`{"system_proxy_on": true, "proxy_host": "127.0.0.1", "proxy_port": 8888}`
@@ -675,30 +678,30 @@ python -m opennet.cli proxy off      # 关系统代理（不影响规则，规�
 ### 3.8 `cert` — 证书管理
 
 ```bash
-python -m opennet.cli cert status    # {"installed": true}
-python -m opennet.cli cert install   # 装根证书到系统信任库（首次必做）
-python -m opennet.cli cert remove    # 从系统信任库卸载根证书
+python -m telnix.cli cert status    # {"installed": true}
+python -m telnix.cli cert install   # 装根证书到系统信任库（首次必做）
+python -m telnix.cli cert remove    # 从系统信任库卸载根证书
 ```
 
-**HTTPS 解密前置条件**：`cert_installed=true`。没装证书的话，HTTPS 流量只能看到 CONNECT 但解不开 payload，拦截规则也不会生效。`remove` 用于卸载证书（如换机器或不再使用 OpenNet 时清理）。
+**HTTPS 解密前置条件**：`cert_installed=true`。没装证书的话，HTTPS 流量只能看到 CONNECT 但解不开 payload，拦截规则也不会生效。`remove` 用于卸载证书（如换机器或不再使用 Telnix 时清理）。
 
 ### 3.9 `log` — 日志
 
 ```bash
 # 查看日志（NDJSON）
-python -m opennet.cli log tail \
+python -m telnix.cli log tail \
   [--level ERROR|WARNING|INFO|DEBUG] \
   [--category proxy|ai|settings] \
   [--limit 100]
 
 # 清空日志
-python -m opennet.cli log clear
+python -m telnix.cli log clear
 # {"cleared": true}
 
 # 导出日志为 JSONL 文件（可带过滤条件）
-python -m opennet.cli log export -o logs.jsonl
-python -m opennet.cli log export -o error_logs.jsonl --level ERROR --category proxy
-python -m opennet.cli log export --keyword "证书"    # 不指定 -o 则输出到 stdout
+python -m telnix.cli log export -o logs.jsonl
+python -m telnix.cli log export -o error_logs.jsonl --level ERROR --category proxy
+python -m telnix.cli log export --keyword "证书"    # 不指定 -o 则输出到 stdout
 ```
 
 - `log tail`：查看日志。`category=proxy` 看抓包/规则匹配细节，`category=ai` 看 AI 调用。
@@ -711,20 +714,20 @@ python -m opennet.cli log export --keyword "证书"    # 不指定 -o 则输出�
 
 ```bash
 # 查状态（管理员？pydivert 装了？在跑？）
-python -m opennet.cli raw status
-# {"running": false, "is_admin": true, "pydivert_installed": false, "hint": "运行: python -m opennet.cli raw install"}
+python -m telnix.cli raw status
+# {"running": false, "is_admin": true, "pydivert_installed": false, "hint": "运行: python -m telnix.cli raw install"}
 
 # 一键安装 pydivert（调后端 pip install，驱动 WinDivert64.sys 随包附带）
-python -m opennet.cli raw install
+python -m telnix.cli raw install
 # {"installed": true, "output": "Successfully installed pydivert..."}
 
 # 启动（需先 capture start 拿到 session_id）
-python -m opennet.cli capture start
-python -m opennet.cli raw start [--pid 1234] [--port 443] [--filter 'tcp or udp']
+python -m telnix.cli capture start
+python -m telnix.cli raw start [--pid 1234] [--port 443] [--filter 'tcp or udp']
 # {"running": true}
 
 # 停止
-python -m opennet.cli raw stop
+python -m telnix.cli raw stop
 # {"running": false}
 ```
 
@@ -743,25 +746,25 @@ python -m opennet.cli raw stop
 
 ```bash
 # 查状态
-python -m opennet.cli focus status
+python -m telnix.cli focus status
 # {"enabled": false, "pids": [], "hosts": []}
 
 # 按 PID 专注
-python -m opennet.cli focus on --pid 1234
+python -m telnix.cli focus on --pid 1234
 
 # 按进程名专注（自动解析 PID + 子进程）
-python -m opennet.cli focus on --name chrome.exe
-python -m opennet.cli focus on --name chrome.exe --no-children  # 不含子进程
+python -m telnix.cli focus on --name chrome.exe
+python -m telnix.cli focus on --name chrome.exe --no-children  # 不含子进程
 
 # 按 host 通配符专注（只抓指定域名的包，其他直接放行）
-python -m opennet.cli focus on --host '*.example.com'
-python -m opennet.cli focus on --host '*.example.com,api.*.com'  # 逗号分隔多个
+python -m telnix.cli focus on --host '*.example.com'
+python -m telnix.cli focus on --host '*.example.com,api.*.com'  # 逗号分隔多个
 
 # 进程 + host 组合（跨类 OR 匹配：满足任一即记录/拦截）
-python -m opennet.cli focus on --name chrome.exe --host '*.google.com'
+python -m telnix.cli focus on --name chrome.exe --host '*.google.com'
 
 # 关闭
-python -m opennet.cli focus off
+python -m telnix.cli focus off
 ```
 
 - `--name`：按进程名专注，后端用 **psutil** 解析所有同名进程 PID（不依赖 wmic，Win11 24H2+ 兼容）。
@@ -774,36 +777,36 @@ python -m opennet.cli focus off
 
 ```bash
 # 查状态
-python -m opennet.cli breakpoint status
+python -m telnix.cli breakpoint status
 # {"break_on_request": false, "break_on_response": false,
 #  "timeout_seconds": 0.0, "pending": [], "pending_flows": []}
 
 # 开请求断点（可选超时，超时后自动放行避免连接卡死）
-python -m opennet.cli breakpoint on --type request --timeout 30
+python -m telnix.cli breakpoint on --type request --timeout 30
 # {"break_on_request": true, "timeout_seconds": 30.0,
 #  "hint": "断点 request 已开启，30.0s 未放行自动 release", ...}
 
 # 开响应断点
-python -m opennet.cli breakpoint on --type response --timeout 30
+python -m telnix.cli breakpoint on --type response --timeout 30
 
 # 关闭
-python -m opennet.cli breakpoint off --type request
+python -m telnix.cli breakpoint off --type request
 
 # 单独改超时（不影响开关状态）
-python -m opennet.cli breakpoint timeout --timeout 60
+python -m telnix.cli breakpoint timeout --timeout 60
 
 # 放行单条被拦截的流量
-python -m opennet.cli breakpoint release 42
+python -m telnix.cli breakpoint release 42
 # {"flow_id": 42, "action": "release"}
 
 # 丢弃单条（模拟连接断开，客户端会收到错误）
-python -m opennet.cli breakpoint drop 42
+python -m telnix.cli breakpoint drop 42
 # {"flow_id": 42, "action": "drop"}
 
 # 批量放行/丢弃所有 pending 断点（agent 退出前清理用）
-python -m opennet.cli breakpoint release --all
+python -m telnix.cli breakpoint release --all
 # {"action": "release", "total": 3, "released": 3}
-python -m opennet.cli breakpoint drop --all
+python -m telnix.cli breakpoint drop --all
 ```
 
 - `--type request|response`：断点类型，不传默认 `request`。
@@ -820,22 +823,22 @@ python -m opennet.cli breakpoint drop --all
 
 ```bash
 # 当前所有进程（NDJSON）
-python -m opennet.cli processes
+python -m telnix.cli processes
 
 # 按进程名过滤（大小写不敏感）
-python -m opennet.cli processes --name chrome
+python -m telnix.cli processes --name chrome
 
 # 附带每个进程的当前 TCP 连接（找"谁连着 api.example.com:443"）
-python -m opennet.cli processes --name chrome --with-connections
+python -m telnix.cli processes --name chrome --with-connections
 # 每个进程多 "connections": [{"laddr":"...","raddr":"1.2.3.4:443","status":"ESTABLISHED"}, ...]
 # 和 "connection_count": N
 
 # 按进程树输出（找父子关系，如 svchost.exe 的子进程）
-python -m opennet.cli processes --name svchost.exe --tree
+python -m telnix.cli processes --name svchost.exe --tree
 # {"processes": [{"pid":..., "name":"svchost.exe", "children":[...]}], "tree": true, "count": N}
 
 # 输出 JSON 数组
-python -m opennet.cli processes --name chrome --json-array
+python -m telnix.cli processes --name chrome --json-array
 ```
 
 #### 忽略进程·host（子命令）
@@ -844,25 +847,25 @@ python -m opennet.cli processes --name chrome --json-array
 
 ```bash
 # 忽略进程（按 PID 或按名称，可添加多个；pid 为空时按名称忽略）
-python -m opennet.cli processes ignore --pid 1234
-python -m opennet.cli processes ignore --name chrome.exe
-python -m opennet.cli processes ignore --pid 1234 --name chrome.exe   # 组合
+python -m telnix.cli processes ignore --pid 1234
+python -m telnix.cli processes ignore --name chrome.exe
+python -m telnix.cli processes ignore --pid 1234 --name chrome.exe   # 组合
 
 # 取消忽略进程（按行 id，先 processes ignored 看 id）
-python -m opennet.cli processes unignore 3
+python -m telnix.cli processes unignore 3
 
 # 列出已忽略进程
-python -m opennet.cli processes ignored
+python -m telnix.cli processes ignored
 # {"id": 3, "pid": 1234, "process_name": "chrome.exe", "ignored_at": "..."}
 
 # 忽略 host（通配符，如 *.example.com）
-python -m opennet.cli processes ignore-host --host "*.example.com"
+python -m telnix.cli processes ignore-host --host "*.example.com"
 
 # 取消忽略 host（按行 id）
-python -m opennet.cli processes unignore-host 2
+python -m telnix.cli processes unignore-host 2
 
 # 列出已忽略 host
-python -m opennet.cli processes ignored-hosts
+python -m telnix.cli processes ignored-hosts
 # {"id": 2, "host_pattern": "*.example.com", "ignored_at": "..."}
 ```
 
@@ -891,20 +894,20 @@ python -m opennet.cli processes ignored-hosts
 
 ```bash
 # 导出所有规则到文件
-python -m opennet.cli intercept export -o my_rules.json
+python -m telnix.cli intercept export -o my_rules.json
 # {"exported": true, "path": "my_rules.json", "count": 5}
 # 文件格式：{"rules": [...], "exported_at": "2026-07-16T12:34:56"}
 
 # 导入规则（默认 merge 追加，不去重）
-python -m opennet.cli intercept import my_rules.json
+python -m telnix.cli intercept import my_rules.json
 # {"imported": true, "mode": "merge", "created": 5, "deleted_old": 0, "total_in_file": 5}
 
 # 导入规则（replace 模式：先清空所有现有规则再导入）
-python -m opennet.cli intercept import my_rules.json --mode replace
+python -m telnix.cli intercept import my_rules.json --mode replace
 # {"imported": true, "mode": "replace", "created": 5, "deleted_old": 3, "total_in_file": 5}
 
 # 大批量导入：--quiet 只输出汇总，不输出 results 数组
-python -m opennet.cli intercept import big_rules.json --quiet
+python -m telnix.cli intercept import big_rules.json --quiet
 # {"imported": true, "mode": "merge", "created": 98, "deleted_old": 0,
 #  "failed": 2, "total_in_file": 100}
 # 默认（不加 --quiet）会输出 "results": [{...}, {...}, ...] 每条规则的导入结果
@@ -912,7 +915,7 @@ python -m opennet.cli intercept import big_rules.json --quiet
 
 | 参数 | 说明 |
 |---|---|
-| `export -o FILE` | 导出文件路径（默认 `opennet_rules.json`） |
+| `export -o FILE` | 导出文件路径（默认 `Telnix_rules.json`） |
 | `import FILE` | 规则 JSON 文件路径 |
 | `--mode merge\|replace` | `merge`=追加（默认），`replace`=先清空所有现有规则再导入 |
 | `--quiet` | 只输出汇总（created/failed/total），不输出 results 数组。大批量导入时精简输出，便于 agent 直接看成功失败总数 |
@@ -926,16 +929,16 @@ python -m opennet.cli intercept import big_rules.json --quiet
 
 ```bash
 # 列出所有会话（含每会话流量数 flow_count）
-python -m opennet.cli sessions list
+python -m telnix.cli sessions list
 # {"id": 1, "name": "会话 2026-07-16 21:31:28", "started_at": "...", "ended_at": null, "flow_count": 42}
 # {"id": 2, ...}
 
 # 查看会话详情（含 flow_count）
-python -m opennet.cli sessions show 7
+python -m telnix.cli sessions show 7
 # {"id": 7, "name": "...", "started_at": "...", "ended_at": "...", "flow_count": 42}
 
 # 删除会话（同时删除该会话的所有流量）
-python -m opennet.cli sessions delete 7
+python -m telnix.cli sessions delete 7
 # {"deleted": true, "session_id": 7, "flows_deleted": 42}
 ```
 
@@ -950,23 +953,23 @@ python -m opennet.cli sessions delete 7
 
 ```bash
 # 立即连续重放整个会话（串行）
-python -m opennet.cli replay-batch --session 7
+python -m telnix.cli replay-batch --session 7
 # NDJSON，每行一个重放结果：
 # {"index": 0, "flow_id": 42, "ok": true, "status": 200, "duration": 456}
 # {"index": 1, "flow_id": 43, "ok": true, "status": 200, "duration": 120}
 
 # 按原始时间间隔重放（测服务端限流/风控，强制串行）
-python -m opennet.cli replay-batch --session 7 --preserve-timing
+python -m telnix.cli replay-batch --session 7 --preserve-timing
 # 每条请求之间 sleep 原始 timestamp 差值（单次最多 sleep 60s 防卡死）
 
 # 并发立即重放（测服务端并发处理，真流式输出）
-python -m opennet.cli replay-batch --session 7 --parallel 5
+python -m telnix.cli replay-batch --session 7 --parallel 5
 # 5 线程并发重放，用 as_completed 完成一个输出一个（不按提交顺序阻塞等前面的）
 # {"index": 1, "flow_id": 43, "ok": true, "status": 200, "duration": 120}   # 先完成的先输出
 # {"index": 0, "flow_id": 42, "ok": true, "status": 200, "duration": 456}   # 慢的后输出
 
 # 选择性重放（客户端过滤后重放，过滤表达式见 §4）
-python -m opennet.cli replay-batch --session 7 --filter 'method=POST'  # 只重放 POST 请求
+python -m telnix.cli replay-batch --session 7 --filter 'method=POST'  # 只重放 POST 请求
 # 输出含 filtered_count 字段表示被过滤掉的数量
 ```
 
@@ -997,21 +1000,21 @@ python -m opennet.cli replay-batch --session 7 --filter 'method=POST'  # 只重�
 
 ```bash
 # 列出所有内置模板
-python -m opennet.cli intercept template list
+python -m telnix.cli intercept template list
 # NDJSON：{"name":"mock-404","description":"返回 404 Not Found 响应","action_spec":{...}}
 #         {"name":"unlock-vip","description":"改响应体 is_vip=true",...}
 
 # 应用模板（创建规则）
-python -m opennet.cli intercept template apply unlock-vip \
+python -m telnix.cli intercept template apply unlock-vip \
   --match '*api.example.com*/vip*' --note '解锁VIP测试'
 # {"created":true,"rule_id":"abc123","template":"unlock-vip","pattern":"*api.example.com*/vip*"}
 
 # 应用带过滤字段的模板
-python -m opennet.cli intercept template apply mock-404 \
+python -m telnix.cli intercept template apply mock-404 \
   --match '*api.example.com*/user*' --method-filter GET,POST --note 'mock 404 测试'
 
 # 创建为禁用状态（稍后手动启用）
-python -m opennet.cli intercept template apply slow-response \
+python -m telnix.cli intercept template apply slow-response \
   --match '*api.example.com*/api*' --disabled
 ```
 
@@ -1145,10 +1148,10 @@ curl -X DELETE http://127.0.0.1:18901/api/flows/groups/1
 
 ### 3.20 导入流量 import（HTTP API）
 
-支持导入 JSON（OpenNet 原生导出）和 HAR（HTTP Archive 1.2 标准）格式的流量数据。自动创建新会话，将所有流量插入。
+支持导入 JSON（Telnix 原生导出）和 HAR（HTTP Archive 1.2 标准）格式的流量数据。自动创建新会话，将所有流量插入。
 
 ```bash
-# 导入 OpenNet 导出的 JSON
+# 导入 Telnix 导出的 JSON
 curl -X POST http://127.0.0.1:18901/api/import \
   -H "Content-Type: application/json" \
   -d '{"format":"json","content":"<文件内容字符串>","session_name":"导入测试"}'
@@ -1172,7 +1175,7 @@ curl -X POST http://127.0.0.1:18901/api/import \
 
 - `format`：`json`（默认）| `har`。
 - JSON 格式支持两种：`{session: {...}, flows: [...]}` 或纯 `[...]` 数组。
-- HAR 格式：解析 `log.entries`，每条 entry 含 `request`/`response`/`headers`/`postData`/`content`，自动转 OpenNet flow 结构。
+- HAR 格式：解析 `log.entries`，每条 entry 含 `request`/`response`/`headers`/`postData`/`content`，自动转 Telnix flow 结构。
 - 自动创建新会话，插入所有流量。单条失败不阻塞其他。
 - 返回 `{session_id, session_name, imported, total}`。
 - 前端 UI 在抓包页/全局分析页/搜索页都提供导入按钮，按文件扩展名（`.json`/`.har`）自动判断格式。
@@ -1182,21 +1185,21 @@ curl -X POST http://127.0.0.1:18901/api/import \
 
 ```bash
 # 重启前后端服务（同进程内 os.execv 重启，继承同一控制台）
-python -m opennet.cli system restart
+python -m telnix.cli system restart
 # {"restarting": true}
 
-# 退出 OpenNet（关闭前后端 + 清系统代理）
-python -m opennet.cli system quit
+# 退出 Telnix（关闭前后端 + 清系统代理）
+python -m telnix.cli system quit
 # {"quitting": true}
 
 # 以管理员身份重启（GUI 用户确认 + UAC 提权，用于 TCP/UDP 抓包等需管理员的功能）
-python -m opennet.cli system restart-as-admin
+python -m telnix.cli system restart-as-admin
 # 用户同意：{"restarting": true, "as_admin": true, "approved": true, "message": "用户已批准..."}
 # 用户拒绝：stderr 输出 {"ok": false, "error": "...", "rejected_by_user": true, ...}，退出码 1
 ```
 
 - `system restart`：重启前后端。用于修改后端代码或配置后生效，或后端异常时恢复。重启前会自动关闭系统代理。重启后保留原启动参数（如 `--no-browser`）。
-- `system quit`：完全退出 OpenNet。清系统代理 + 关闭服务。agent 收尾时用。
+- `system quit`：完全退出 Telnix。清系统代理 + 关闭服务。agent 收尾时用。
 - `system restart-as-admin`：**以管理员身份重启，走 GUI 用户确认流程**：
   1. CLI 调 `POST /system/request-admin-restart` 创建 pending 请求
   2. 后端立即在桌面弹**原生 Windows 置顶 Yes/No 弹窗**（`MB_TOPMOST | MB_SYSTEMMODAL | MB_SETFOREGROUND`，任务栏图标闪烁，默认聚焦「否」按钮防误按）
@@ -1209,6 +1212,90 @@ python -m opennet.cli system restart-as-admin
   - `POST /system/restart`、`POST /system/quit`、`POST /system/clear-proxy`、`POST /system/enable-proxy`
   - `POST /system/restart-as-admin`（兼容旧接口，直接弹 UAC 不经 GUI 确认）
   - `POST /system/request-admin-restart` + `GET /system/admin-request/{id}/wait` + `POST /system/admin-request/{id}/respond`（新 GUI 确认流程）
+  - `POST /system/install-dep` + `GET /system/install-dep/status` + `POST /system/install-dep/cancel`（可选依赖在线安装）
+
+#### 3.21.1 `system install-dep` — 在线安装可选依赖（如 mitmproxy）
+
+```bash
+# 触发 pip install mitmproxy（异步任务，命令立即返回）
+python -m telnix.cli system install-dep
+# {"status": "running", "package": "mitmproxy"}
+# stderr: [Telnix] 安装任务已启动，使用 `telnix system install-dep-status` 查询进度
+
+# 指定包名（默认 mitmproxy）
+python -m telnix.cli system install-dep --package mitmproxy
+
+# 查询安装进度（轮询直到 status=success 或 failed）
+python -m telnix.cli system install-dep-status
+# {"status": "success", "package": "mitmproxy", "return_code": 0,
+#  "mitmproxy_available": true, "log": "..."}
+# stderr: [Telnix] mitmproxy 安装成功（已可切换为代理引擎），重启 Telnix 后生效
+```
+
+- `system install-dep`：异步任务，立即返回 `status=running`，需轮询 `install-dep-status` 查询进度
+- `system install-dep-status`：返回 `{status, package, log, return_code, mitmproxy_available}`：
+  - `status=success` 且 `package=mitmproxy` 时额外返回 `mitmproxy_available` 字段
+  - 若安装成功但当前进程未加载（`mitmproxy_available=false`），返回 `note` 字段提示需重启 Telnix 才能生效
+- **典型工作流**：`install-dep` → 轮询 `install-dep-status` 直到 `success` → `settings engine mitmproxy`（切换引擎） → `system restart`（重启让引擎生效）
+- agent 用法：第一次调用 `system_install_dep`，然后用 1.5s 间隔轮询 `system_install_dep_status` 直到 `status != running`，最后根据 `mitmproxy_available` 决定是否提示重启
+
+#### 3.21.2 `settings` — 设置管理（get / set / engine）
+
+```bash
+# 读取所有设置（NDJSON）
+python -m telnix.cli settings get
+# {"data_path": "...", "proxy_engine": "builtin", "mitmproxy_available": false, ...}
+# stderr: [Telnix] 当前全部设置（key=value）：
+#           data_path = ...
+#           proxy_engine = builtin
+#           ...
+
+# 读单个 key
+python -m telnix.cli settings get -k proxy_engine
+# {"key": "proxy_engine", "value": "builtin"}
+
+# 写入单个 key（bool/数字/list/dict 自动反序列化）
+python -m telnix.cli settings set -k auto_scroll -v true
+python -m telnix.cli settings set -k flow_columns -v '["method","status","host"]'
+
+# 查看当前代理引擎
+python -m telnix.cli settings engine
+# {"proxy_engine": "builtin", "mitmproxy_available": false,
+#  "available_engines": ["async", "builtin", "mitmproxy"]}
+# stderr: [Telnix] 当前代理引擎: builtin
+#         [Telnix] mitmproxy 可用: 否（未安装可执行 telnix system install-dep）
+#         [Telnix] 可选引擎: builtin（默认线程）/ async（asyncio）/ mitmproxy（需 pip install mitmproxy）
+#         [Telnix] 切换示例: telnix settings engine async
+#         [Telnix] 切换后需执行: telnix system restart
+
+# 切换引擎（builtin → async）
+python -m telnix.cli settings engine async
+# {"ok": true, "proxy_engine": "async", "previous": "builtin",
+#  "mitmproxy_available": false, "hint": "需重启后端才生效：telnix system restart"}
+# stderr: [Telnix] 代理引擎已切换: builtin → async
+#         [Telnix] 重要：需重启后端才生效，执行: telnix system restart
+
+# 切换到 mitmproxy（未安装时报错）
+python -m telnix.cli settings engine mitmproxy
+# {"ok": false, "error": "mitmproxy 未安装，无法切换到该引擎",
+#  "hint": "先执行 `telnix system install-dep` 安装 mitmproxy，再切换引擎"}
+# stderr: [Telnix] 错误：mitmproxy 未安装，无法切换到该引擎
+#         [Telnix] 修复建议：先执行 `telnix system install-dep` 安装 mitmproxy，再切换引擎
+# 退出码 1
+```
+
+- `settings get [-k KEY]`：读取所有设置或单个 key。返回完整设置 dict（含 `data_path`、`mitmproxy_available` 等注入字段）
+- `settings set -k KEY -v VALUE`：写入单个设置项。`VALUE` 会自动尝试 JSON 反序列化：
+  - `"true"` / `"false"` → bool
+  - `"123"` → int
+  - `"[1,2,3]"` → list
+  - `'{"k":"v"}'` → dict
+  - 其他 → 字符串
+- `settings engine [NAME]`：查看或切换代理引擎：
+  - 省略 NAME → 仅查看当前引擎、mitmproxy 可用性、可选引擎列表
+  - 指定 NAME → 切换引擎。`mitmproxy` 未安装时返回 `{"ok": false, ...}` + 退出码 1，并给出 `system install-dep` 修复建议
+  - **切换后必须 `system restart`** 才能让新引擎加载到当前进程
+- 底层 API：`GET /settings` + `PUT /settings`（任意 key 写入，list/dict 自动 JSON 序列化、bool 转 1/0）
 
 ### 3.22 `send` — 从零发包（Composer）
 
@@ -1216,31 +1303,31 @@ python -m opennet.cli system restart-as-admin
 
 ```bash
 # 基础 GET 请求
-python -m opennet.cli send --url https://api.example.com/v1/users
+python -m telnix.cli send --url https://api.example.com/v1/users
 # {"status_code": 200, "reason": "OK", "size": 1234, "duration_ms": 456,
 #  "response_headers": "...", "response_body": "...",
 #  "request": {"method": "GET", "url": "...", "headers": {...}, "body": null}}
 
 # POST 带 JSON body
-python -m opennet.cli send --method POST --url https://api.example.com/v1/users \
+python -m telnix.cli send --method POST --url https://api.example.com/v1/users \
   --header 'Content-Type: application/json' \
   --body '{"name":"alice","age":30}'
 
 # 从文件读 body（二进制/大 body 用）
-python -m opennet.cli send --method POST --url https://api.example.com/upload \
+python -m telnix.cli send --method POST --url https://api.example.com/upload \
   --body-file payload.bin --header 'Content-Type: application/octet-stream'
 
 # 自定义超时（默认 30s）
-python -m opennet.cli send --url https://slow.example.com --timeout 60
+python -m telnix.cli send --url https://slow.example.com --timeout 60
 
 # 只输出响应头（不打印 body，适合只看状态码/头）
-python -m opennet.cli send --url https://api.example.com --headers-only
+python -m telnix.cli send --url https://api.example.com --headers-only
 
 # 只输出响应体（纯文本，方便管道处理）
-python -m opennet.cli send --url https://api.example.com/text --body-only
+python -m telnix.cli send --url https://api.example.com/text --body-only
 
 # 导出 curl 命令（不实际发送）
-python -m opennet.cli send --method POST --url https://api.example.com \
+python -m telnix.cli send --method POST --url https://api.example.com \
   --header 'X-Test: 1' --body '{"k":1}' --emit-curl
 # 输出: curl -X POST 'https://api.example.com' -H 'X-Test: 1' -d '{"k":1}'
 ```
@@ -1257,7 +1344,7 @@ python -m opennet.cli send --method POST --url https://api.example.com \
 | `--body-only` | 只输出响应体（纯文本） |
 | `--emit-curl` | 只输出等效 curl 命令，不实际发送 |
 
-- **独立 socket**：`send` 不走 OpenNet 代理，直接 `socket.create_connection` 连接目标，不写入 flows 表，不影响抓包数据。
+- **独立 socket**：`send` 不走 Telnix 代理，直接 `socket.create_connection` 连接目标，不写入 flows 表，不影响抓包数据。
 - **不依赖抓包状态**：无需 `capture start` 即可发包，适合快速测试单个接口。
 - **前端 GUI**：发包页（路由 `/send`）提供同样功能，支持历史记录（localStorage 存最近 50 条）、模板保存、cURL 导入/导出、表单持久化（切换页面不丢失）。
 - 底层 API：`POST /send`，body `{method, url, headers, body, timeout}`，返回 `{status_code, reason, response_headers, response_body, size, duration_ms, request}`。
@@ -1266,35 +1353,35 @@ python -m opennet.cli send --method POST --url https://api.example.com \
 
 ### 3.23 `agent` — agent 工作模式（保留原状，end 不关代理/不退出）
 
-agent 接管会话前的"清场"工具：临时关闭所有影响抓包/拦截的因素（自动回复规则、专注模式、断点），并把 agent 自身进程加入忽略列表（防止抓自己的包），完成工作后恢复用户原状。**注意：`agent end` 不关闭系统代理、不退出 OpenNet**——因为用户可能依赖 OpenNet 的自动修改规则继续工作，agent 应询问用户后再决定是否调 `system quit`。
+agent 接管会话前的"清场"工具：临时关闭所有影响抓包/拦截的因素（自动回复规则、专注模式、断点），并把 agent 自身进程加入忽略列表（防止抓自己的包），完成工作后恢复用户原状。**注意：`agent end` 不关闭系统代理、不退出 Telnix**——因为用户可能依赖 Telnix 的自动修改规则继续工作，agent 应询问用户后再决定是否调 `system quit`。
 
 ```bash
 # 1. 开工前：保存原状并清空工作区
-python -m opennet.cli agent start
+python -m telnix.cli agent start
 # → 备份当前所有规则 + focus 设置 + 断点设置到临时文件
 # → 禁用所有自动回复规则、关闭 focus、关闭断点
 # → 把 agent 进程（如 TRAE SOLO CN.exe）加入忽略列表，避免抓自己的包
 # → 返回 backup_path 供排查
 
 # 2. 做事：抓包 / 重放 / 改包 / 发包 ...
-python -m opennet.cli capture start
-python -m opennet.cli packets list --tail
-python -m opennet.cli replay 42 --body '{"x":1}'
-python -m opennet.cli send --url https://api.example.com/v1/login --method POST --body '{"user":"a","pass":"b"}'
+python -m telnix.cli capture start
+python -m telnix.cli packets list --tail
+python -m telnix.cli replay 42 --body '{"x":1}'
+python -m telnix.cli send --url https://api.example.com/v1/login --method POST --body '{"user":"a","pass":"b"}'
 
 # 3. 收工：从备份恢复原状（不关代理、不退出）
-python -m opennet.cli agent end
+python -m telnix.cli agent end
 # → 规则按备份原样恢复（enabled 状态保留）
 # → focus 设置恢复
 # → 断点设置恢复
 # → 移除 agent start 时添加的忽略进程（保留用户原本就忽略的进程）
 # → 删除备份文件
-# → 系统代理保持开启、OpenNet 继续运行
-# → 返回 hint：询问用户是否关闭 OpenNet
+# → 系统代理保持开启、Telnix 继续运行
+# → 返回 hint：询问用户是否关闭 Telnix
 
 # 4.（可选）询问用户后退出
 # 用户同意 → 调 system quit（后端退出时 atexit 自动清理系统代理）
-# 用户拒绝 → 啥也不做，OpenNet 保持运行（用户可继续使用自动修改规则）
+# 用户拒绝 → 啥也不做，Telnix 保持运行（用户可继续使用自动修改规则）
 ```
 
 **子命令**：
@@ -1302,7 +1389,7 @@ python -m opennet.cli agent end
 | 子命令 | 作用 |
 |---|---|
 | `start` | 保存原状（snapshot）→ 禁用所有规则 + 关 focus + 关断点 + **把 agent 进程加入忽略列表**（默认含 `TRAE SOLO CN.exe`，源码 `AGENT_IGNORE_PROCESSES`）。**重复 start 会报错**（避免覆盖未恢复的备份） |
-| `end` | 从备份恢复 rules + focus + 断点（`clear_rules=true` 先清空再导入，避免 agent 工作期间新建的规则残留）→ **移除 agent start 时添加的忽略进程**（保留用户原本忽略的）→ 删除备份。**不关代理、不退出 OpenNet**（用户可能还要用自动修改规则）。**未 start 就 end 会报错** |
+| `end` | 从备份恢复 rules + focus + 断点（`clear_rules=true` 先清空再导入，避免 agent 工作期间新建的规则残留）→ **移除 agent start 时添加的忽略进程**（保留用户原本忽略的）→ 删除备份。**不关代理、不退出 Telnix**（用户可能还要用自动修改规则）。**未 start 就 end 会报错** |
 | `status` | 查询工作区状态：`active`（有备份）/ `inactive`（无备份），含备份内的规则数、原 focus/断点状态 |
 
 **agent 忽略进程列表**（源码 `cli.py: AGENT_IGNORE_PROCESSES`）：
@@ -1310,7 +1397,7 @@ python -m opennet.cli agent end
 
 `agent start` 时若列表中的进程已在用户忽略列表中，则跳过（不重复添加），但 `end` 时只移除 `start` 实际新增的（不会误删用户原本忽略的进程）。
 
-**备份文件**：系统临时目录下 `opennet_agent_workspace_backup.json`（跨进程保留，重启后端不影响）。格式与 `GET /snapshot` 一致，多一个 `agent_added_ignored_processes` 字段记录本次 start 新增的忽略进程名，可手动查看/编辑。
+**备份文件**：系统临时目录下 `Telnix_agent_workspace_backup.json`（跨进程保留，重启后端不影响）。格式与 `GET /snapshot` 一致，多一个 `agent_added_ignored_processes` 字段记录本次 start 新增的忽略进程名，可手动查看/编辑。
 
 **返回字段**：
 
@@ -1322,12 +1409,12 @@ python -m opennet.cli agent end
  "exported_at": "...",
  "hint": "工作区已清空：规则已禁用、focus 已关闭、断点已关闭、agent 进程已加入忽略列表。完成工作后请调 `agent end` 恢复原状。"}
 
-// agent end（注意 system_proxy_cleared=false，OpenNet 保持运行）
+// agent end（注意 system_proxy_cleared=false，Telnix 保持运行）
 {"agent_workspace": "ended", "restored": true, "rules_restored": 3,
  "focus_set": true, "breakpoint_set": true,
  "ignored_processes_removed": 1,
  "system_proxy_cleared": false,
- "hint": "工作区已恢复到 agent start 之前的状态。注意：自动修改规则需要 OpenNet 运行才生效，因此系统代理未关闭、OpenNet 未退出。请询问用户是否关闭 OpenNet；用户同意后再调 `system quit`（后端退出时会自动清理系统代理）。"}
+ "hint": "工作区已恢复到 agent start 之前的状态。注意：自动修改规则需要 Telnix 运行才生效，因此系统代理未关闭、Telnix 未退出。请询问用户是否关闭 Telnix；用户同意后再调 `system quit`（后端退出时会自动清理系统代理）。"}
 
 // agent status (active)
 {"agent_workspace": "active", "backup_path": "...", "rules_in_backup": 3,
@@ -1345,18 +1432,18 @@ agent start
 ├─ capture start
 ├─ <do work: packets list / replay / send / intercept add ...>
 ├─ capture stop
-agent end                ← 恢复原状 + 移除 agent 添加的忽略进程，OpenNet 继续运行
-└─ 询问用户是否关闭 OpenNet
+agent end                ← 恢复原状 + 移除 agent 添加的忽略进程，Telnix 继续运行
+└─ 询问用户是否关闭 Telnix
    ├─ 同意 → system quit  ← 后端 atexit 自动清代理
    └─ 拒绝 → 保留运行（用户可继续用自动修改规则）
 ```
 
 **注意事项**：
 - `agent start` 后即使后端重启，备份文件仍在，重启后 `agent end` 仍可恢复
-- `agent end` **不会关代理、不会退出 OpenNet**——因为用户可能依赖自动修改规则继续工作
+- `agent end` **不会关代理、不会退出 Telnix**——因为用户可能依赖自动修改规则继续工作
 - 若 agent 异常退出未调 `end`，下次 `agent start` 会报错"已有未恢复的备份"，需先 `agent end` 恢复
 - `agent start` 不影响 `capturing` 状态（抓包是否记录独立于规则/focus/断点）
-- **关闭 OpenNet 的正确方式**：agent 询问用户同意后调 `system quit`，后端退出时 atexit 钩子自动清系统代理，无需 agent 手动清理
+- **关闭 Telnix 的正确方式**：agent 询问用户同意后调 `system quit`，后端退出时 atexit 钩子自动清系统代理，无需 agent 手动清理
 - **忽略进程的语义**：`agent start` 添加的忽略进程只在 `agent end` 时移除；若用户在 agent 工作期间手动调 `proxy ignore --name TRAE SOLO CN.exe` 重复添加，`end` 也会按备份记录的进程名匹配移除（可能误删用户手动加的同名项，建议 agent 工作期间不要重复添加同名进程）
 - **agent 进程改名/换 IDE**：若 agent 改用其他 IDE（如 VSCode），需更新 `cli.py` 中的 `AGENT_IGNORE_PROCESSES` 列表
 
@@ -1464,13 +1551,13 @@ mock 的 `Content-Type` 默认 `application/json`。
 
 ```bash
 # 写死请求 body 转发到服务器，看真实响应
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.target.com && path~=/login' \
   --action 'mock-request {"username":"test","password":"abc"}' \
   --name 'fixed-login'
 
 # 指定 Content-Type（默认 application/json）
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.target.com && path~=/upload' \
   --action "mock-request '<xml>data</xml>' 'application/xml'" \
   --name 'fixed-xml'
@@ -1507,12 +1594,12 @@ python -m opennet.cli intercept add \
 
 ```bash
 # 响应延迟 5 秒（测客户端超时处理）
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.target.com && path~=/login' \
   --action 'delay 5000' --name 'slow-login'
 
 # 请求延迟 2 秒（测服务端竞态）
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.target.com && path~=/pay' \
   --action 'delay-request 2000' --name 'slow-pay-req'
 ```
@@ -1533,29 +1620,29 @@ v9 提供的 6 个逆向实战工作流模板，从"未知软件"到"协议理�
 
 ```bash
 # 1. 环境自检
-python -m opennet.cli status
-python -m opennet.cli cert status    # 证书未安装则 cert install
+python -m telnix.cli status
+python -m telnix.cli cert status    # 证书未安装则 cert install
 
 # 2. 启动抓包（含 auto-stop 防忘关）
-python -m opennet.cli capture start --auto-stop 300
+python -m telnix.cli capture start --auto-stop 300
 
 # 3. 操作目标软件（agent 触发或提示用户操作）
 
 # 4. 停止抓包
-python -m opennet.cli capture stop
+python -m telnix.cli capture stop
 
 # 5. 绘制 API 地图
-python -m opennet.cli packets endpoints --limit 0 --keep-query
+python -m telnix.cli packets endpoints --limit 0 --keep-query
 # 输出每个 endpoint 的 method/host/path_template/count/status_set/sample_ids/query_keys
 
 # 6. 看时间线找关键时序
-python -m opennet.cli packets timeline --limit 0
+python -m telnix.cli packets timeline --limit 0
 
 # 7. 标记关键接口
-python -m opennet.cli packets tag <sample_id> --add key-api --note "登录接口"
+python -m telnix.cli packets tag <sample_id> --add key-api --note "登录接口"
 
 # 8. 查看具体请求
-python -m opennet.cli packets get <sample_id>
+python -m telnix.cli packets get <sample_id>
 ```
 
 ### 工作流 2：字段修改验证（modify_response）
@@ -1564,33 +1651,33 @@ python -m opennet.cli packets get <sample_id>
 
 ```bash
 # 1. 先 dry-run 确认规则会匹配到目标流量
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.target.com && path~=/api/usage' \
   --action 'set-json data.remainingUses 999' \
   --name 'bump-uses' --dry-run
 
 # 2. 确认 matched_flows 非空后，幂等创建规则
-python -m opennet.cli intercept add \
+python -m telnix.cli intercept add \
   --match 'host~=api.target.com && path~=/api/usage' \
   --action 'set-json data.remainingUses 999' \
   --name 'bump-uses' --idempotent
 
 # 3. 触发请求（操作软件或重放）
-python -m opennet.cli replay <flow_id>
+python -m telnix.cli replay <flow_id>
 
 # 4. 看规则是否命中
-python -m opennet.cli intercept hits <rule_id>
+python -m telnix.cli intercept hits <rule_id>
 # 或看日志
-python -m opennet.cli log tail --category proxy
+python -m telnix.cli log tail --category proxy
 
 # 5. 验证不通过则禁用规则（A/B 对比）
-python -m opennet.cli intercept toggle <rule_id> --disable
+python -m telnix.cli intercept toggle <rule_id> --disable
 # 操作软件看原始响应
-python -m opennet.cli intercept toggle <rule_id> --enable
+python -m telnix.cli intercept toggle <rule_id> --enable
 # 操作软件看修改后响应
 
 # 6. 用完删除
-python -m opennet.cli intercept del <rule_id>
+python -m telnix.cli intercept del <rule_id>
 ```
 
 ### 工作流 3：签名/加密字段定位
@@ -1599,21 +1686,21 @@ python -m opennet.cli intercept del <rule_id>
 
 ```bash
 # 1. 抓多次同接口请求（不同参数）
-python -m opennet.cli capture start --auto-stop 60
+python -m telnix.cli capture start --auto-stop 60
 # 操作软件触发 3-5 次同接口请求（不同参数）
 
 # 2. 用 endpoints 找到目标接口的 sample_ids
-python -m opennet.cli packets endpoints --host api.target.com --limit 0
+python -m telnix.cli packets endpoints --host api.target.com --limit 0
 
 # 3. 用 analyze 自动检测签名字段
-python -m opennet.cli packets analyze <id1> <id2> <id3> <id4> --find-signature
+python -m telnix.cli packets analyze <id1> <id2> <id3> <id4> --find-signature
 # 输出候选字段：[{field_path, length, charset, varies, sample_values}]
 
 # 4. 用 trace 追踪签名是否从其他接口响应传递来
-python -m opennet.cli packets trace <id1> --all --min-length 8
+python -m telnix.cli packets trace <id1> --all --min-length 8
 
 # 5. 标记可疑字段
-python -m opennet.cli packets tag <id1> --add suspicious --note "sign 字段待分析"
+python -m telnix.cli packets tag <id1> --add suspicious --note "sign 字段待分析"
 ```
 
 ### 工作流 4：mock 接口测试客户端容错
@@ -1622,22 +1709,22 @@ python -m opennet.cli packets tag <id1> --add suspicious --note "sign 字段待�
 
 ```bash
 # 1. 幂等创建多个 mock 规则
-python -m opennet.cli intercept add --match 'path~=/api/user' --action 'mock 404 notfound' --name 'mock-404' --idempotent
-python -m opennet.cli intercept add --match 'path~=/api/user' --action 'mock 500 error' --name 'mock-500' --idempotent
-python -m opennet.cli intercept add --match 'path~=/api/user' --action 'mock 200 ""' --name 'mock-empty' --idempotent
-python -m opennet.cli intercept add --match 'path~=/api/user' --action 'delay 5000' --name 'mock-slow' --idempotent
+python -m telnix.cli intercept add --match 'path~=/api/user' --action 'mock 404 notfound' --name 'mock-404' --idempotent
+python -m telnix.cli intercept add --match 'path~=/api/user' --action 'mock 500 error' --name 'mock-500' --idempotent
+python -m telnix.cli intercept add --match 'path~=/api/user' --action 'mock 200 ""' --name 'mock-empty' --idempotent
+python -m telnix.cli intercept add --match 'path~=/api/user' --action 'delay 5000' --name 'mock-slow' --idempotent
 
 # 2. 逐个启用测试（确保只启用一条）
-python -m opennet.cli intercept toggle --all --disable
-python -m opennet.cli intercept toggle <mock-404-id> --enable
+python -m telnix.cli intercept toggle --all --disable
+python -m telnix.cli intercept toggle <mock-404-id> --enable
 # 操作软件观察客户端行为
-python -m opennet.cli intercept toggle <mock-404-id> --disable
-python -m opennet.cli intercept toggle <mock-500-id> --enable
+python -m telnix.cli intercept toggle <mock-404-id> --disable
+python -m telnix.cli intercept toggle <mock-500-id> --enable
 # ...
 
 # 3. 用完批量删除
-python -m opennet.cli intercept toggle --all --disable
-python -m opennet.cli intercept del --ids <id1>,<id2>,<id3>,<id4>
+python -m telnix.cli intercept toggle --all --disable
+python -m telnix.cli intercept del --ids <id1>,<id2>,<id3>,<id4>
 ```
 
 ### 工作流 5：跨会话历史分析
@@ -1646,23 +1733,23 @@ python -m opennet.cli intercept del --ids <id1>,<id2>,<id3>,<id4>
 
 ```bash
 # 1. 看所有会话
-python -m opennet.cli sessions list
+python -m telnix.cli sessions list
 
 # 2. 看某会话概览
-python -m opennet.cli sessions show <session_id>
+python -m telnix.cli sessions show <session_id>
 
 # 3. 跨会话查询流量
-python -m opennet.cli packets list-all --host api.target.com --limit 200
+python -m telnix.cli packets list-all --host api.target.com --limit 200
 
 # 4. 跨会话搜索
-python -m opennet.cli packets search --body-regex 'sig=[a-f0-9]{32}' --header-regex 'Authorization: Bearer .+' --all
+python -m telnix.cli packets search --body-regex 'sig=[a-f0-9]{32}' --header-regex 'Authorization: Bearer .+' --all
 
 # 5. 跨会话 endpoints
-python -m opennet.cli packets endpoints --session <old_session_id> --limit 0
+python -m telnix.cli packets endpoints --session <old_session_id> --limit 0
 
 # 6. 清理旧数据（保留最近 N 条）
-python -m opennet.cli packets list-all --limit 1   # 看最新 id
-python -m opennet.cli packets clear --before-id <old_id>
+python -m telnix.cli packets list-all --limit 1   # 看最新 id
+python -m telnix.cli packets clear --before-id <old_id>
 ```
 
 ### 工作流 6：批量重放测服务端稳定性
@@ -1671,19 +1758,19 @@ python -m opennet.cli packets clear --before-id <old_id>
 
 ```bash
 # 1. 串行重放看每次响应是否一致
-python -m opennet.cli replay <flow_id> --repeat 10 --compare
+python -m telnix.cli replay <flow_id> --repeat 10 --compare
 # --compare 输出多次响应的 diff
 
 # 2. 并发重放测限流
-python -m opennet.cli replay <flow_id> --repeat 50 --parallel 10
+python -m telnix.cli replay <flow_id> --repeat 50 --parallel 10
 # 10 线程并发，as_completed 真流式输出
 
 # 3. 时序回放整会话测风控
-python -m opennet.cli replay-batch --session <id> --preserve-timing
+python -m telnix.cli replay-batch --session <id> --preserve-timing
 # 按原始时间间隔重放
 
 # 4. 选择性重放（只重放 POST）
-python -m opennet.cli replay-batch --session <id> --filter 'method=POST' --parallel 5
+python -m telnix.cli replay-batch --session <id> --filter 'method=POST' --parallel 5
 ```
 
 ---
@@ -1793,7 +1880,7 @@ Base URL：`http://127.0.0.1:18901/api`
 | POST | `/system/enable-proxy` | 开系统代理 |
 | POST | `/system/clear-proxy` | 关系统代理 |
 | POST | `/system/restart` | 重启后端（os.execv） |
-| POST | `/system/quit` | 退出 OpenNet |
+| POST | `/system/quit` | 退出 Telnix |
 
 ### 专注模式
 
@@ -1882,7 +1969,7 @@ Base URL：`http://127.0.0.1:18901/api`
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/system/restart` | 重启后端（os.execv，保留启动参数） |
-| POST | `/system/quit` | 退出 OpenNet（清代理+关服务） |
+| POST | `/system/quit` | 退出 Telnix（清代理+关服务） |
 | POST | `/system/clear-proxy` | 关闭系统代理 |
 | POST | `/system/enable-proxy` | 开启系统代理 |
 | POST | `/system/restart-as-admin` | 兼容旧接口：直接弹 UAC 提权（不经 GUI 确认） |
@@ -1925,14 +2012,14 @@ Base URL：`http://127.0.0.1:18901/api`
 4. **规则按 pattern 长度降序匹配**：更具体的规则优先。加宽泛规则（`*`）会吃掉所有流量，慎用。
 5. **`set-json` 全局替换**：字段名不含 `.` 时会递归遍历整个 JSON 树替换所有同名 key。数组里、嵌套对象里都会改。要精确改用 `set-json-path`。
 6. **dry-run 先行**：加规则前先 `--dry-run` 看 `matched_flows` 对不对，避免误伤其他请求。
-7. **--tail 是阻塞的**：会一直跑直到 Ctrl+C。agent 用时设个超时或用 `timeout 30 python -m opennet.cli packets list --tail`。
+7. **--tail 是阻塞的**：会一直跑直到 Ctrl+C。agent 用时设个超时或用 `timeout 30 python -m telnix.cli packets list --tail`。
 8. **二进制 body**：`request_body`/`response_body` 里二进制内容是 `base64:` 前缀的字符串，agent 要先 decode。
 9. **删除规则记 id**：`intercept add` 返回 `rule_id`，agent 要存下来，用完删掉避免残留。
 10. **进程归属**：每条流量带 `pid` 和 `process_name`，可用来按软件过滤。`process~=chrome.exe` 这种过滤很有用。
 11. **轮询用 `--since-id` 而非 `--tail`**：agent 场景用 `--since-id <max_id>` 增量拉取，非阻塞，每次拉完记下 stderr 里的 `max_id` 作为下次基线。`--tail` 是给人看的，agent 别用。
 12. **TCP/UDP 抓包需管理员权限 + pydivert**：`raw status` 返回 `admin=true` 且 `pydivert=true` 才能用。pydivert 没装先 `pip install pydivert`，WinDivert64.sys 驱动由 pydivert 自带首次运行加载。非管理员账号启动后端会 `admin=false`，需以管理员身份重启 Python 进程。
 13. **`protocol` 字段区分 HTTP/TCP/UDP**：HTTP 流量 `protocol=http`、有 `url/host/method`；TCP/UDP 流量 `protocol=tcp/udp`、`method=SEND/RECV`、`url=null`、`raw_data=base64:...`。写过滤表达式注意别混用 HTTP 字段。
-14. **HTTPS 证书 pinning 导致解密失败**：某些 app（如银行/游戏）做了证书 pinning，OpenNet 装根证书也解不开。表现：`packets list` 里看到 `CONNECT host:443` 但没后续 HTTP 请求，或客户端报 SSL 错误。这种情况无解，只能用 TCP/UDP 抓包看密文流量（`raw start --port 443`）。
+14. **HTTPS 证书 pinning 导致解密失败**：某些 app（如银行/游戏）做了证书 pinning，Telnix 装根证书也解不开。表现：`packets list` 里看到 `CONNECT host:443` 但没后续 HTTP 请求，或客户端报 SSL 错误。这种情况无解，只能用 TCP/UDP 抓包看密文流量（`raw start --port 443`）。
 15. **focus 按进程名含子进程**：`focus on --name x` 默认 psutil BFS 递归找所有后代 PID，多实例浏览器/游戏时可能匹配过多。需排除子进程加 `--no-children`。
 16. **replay 不走规则**：`replay 42` 直接发请求到目标服务器，不触发自动回复规则。改参数 replay 用 `--body/--method/--host/--port`，fuzz 用 `--fuzz 'key=1..100'`（上限 500）。
 17. **export 多种格式**：`--format python-requests` 生成可重放 Python 脚本，`--format postman` 生成 Postman Collection v2.1，`--format curl` 生成 bash 脚本。HAR 格式给浏览器 DevTools 用。
@@ -1941,7 +2028,7 @@ Base URL：`http://127.0.0.1:18901/api`
 20. **`capture --auto-stop N` 由后端定时**：参数传给后端常驻进程，agent CLI 退出也不影响。N 秒后后端自动 `capture stop` + 结束会话。比 `--max-duration`（仅提示）更可靠。
 21. **`modify_request` 改包有 diff 日志**：改请求头/请求体的规则应用后，会在 `log tail --category proxy` 里打印原始 vs 修改后的 headers + body（前 200 字节，hex + text 双视图）。agent 确认规则是否生效看这个日志。
 22. **`pinning_suspected` 在 `status` 里**：TLS 握手失败 + 证书相关错误的进程会被收集（按 host+pid+proc 去重，上限 50 条）。`status` 返回的 `pinning_suspected` 数组每项含 `host/pid/process_name/timestamp/error`。agent 抓不到 HTTPS payload 时先查这个字段。
-23. **focus 用 psutil 不依赖 wmic**：Win11 24H2+ 移除了 wmic，OpenNet 已改用 psutil 解析进程名 + 子进程（BFS 递归）。`focus on --name x` 在新版 Windows 仍能正常工作。
+23. **focus 用 psutil 不依赖 wmic**：Win11 24H2+ 移除了 wmic，Telnix 已改用 psutil 解析进程名 + 子进程（BFS 递归）。`focus on --name x` 在新版 Windows 仍能正常工作。
 24. **method/status/pid/process 过滤现已代理层生效**（§4.1 陷阱已修复）：`intercept add --match 'host~=x && method=POST && status=200 && pid=1234 && process=chrome.exe'` 中，`method`/`status`/`pid`/`process` 会自动提取到规则的 `method_filter`/`status_filter`/`pid_filter`/`process_filter` 字段，代理层 `find_matching_rule` 校验这些字段——非空时必须匹配才命中。同 URL 的不同方法/状态/进程不会再被误伤。`!=` 和数值比较（`>=`/`<=`）仍只做客户端过滤（dry-run 生效，真规则不检查）。详见 §4。
 25. **逆向分析三件套：diff/endpoints/timeline**：`packets diff <id1> <id2>` 对比两条流量字段差异（JSON body 自动格式化）；`packets endpoints` 提取唯一 API endpoint（path 模板归一化，画 API 地图）；`packets timeline` 按时间排序标注段落分隔。这三个命令是逆向 agent 摸清软件 API 结构的利器。
 26. **`processes` 看连接快照找目标 PID**：`processes --name x --with-connections` 能看某进程当前连了哪些服务器（raddr），配合 `focus on --host` 精准专注。`--tree` 看进程父子关系。
@@ -1966,15 +2053,15 @@ Base URL：`http://127.0.0.1:18901/api`
 45. **规则模板库（HTTP API）**：6 个内置模板（mock-404/mock-500/strip-auth/unlock-vip/bypass-pay/slow-response），`POST /templates/{name}/apply` 一键创建规则。见 §3.17。
 46. **环境快照（HTTP API）**：`GET /snapshot` 导出规则+focus+断点，`POST /snapshot` 导入。多目标切换/环境复现用。比 `intercept export/import` 范围更大（含 focus+断点）。见 §3.18。
 47. **流量分组（HTTP API）**：`POST /flows/groups` 创建分组（收藏夹），`GET /flows/groups/{id}` 查看含 flow 详情。分组只存 flow_ids 引用，删除分组不删流量。见 §3.19。
-48. **导入流量（HTTP API）**：`POST /import` 支持 JSON（OpenNet 原生）和 HAR（浏览器 DevTools）格式，自动创建新会话。前端 UI 在抓包/分析/搜索页都有导入按钮。见 §3.20。
+48. **导入流量（HTTP API）**：`POST /import` 支持 JSON（Telnix 原生）和 HAR（浏览器 DevTools）格式，自动创建新会话。前端 UI 在抓包/分析/搜索页都有导入按钮。见 §3.20。
 49. **多条件组合搜索**：`packets search` 支持 `--body-regex`/`--binary-hex`/`--header-regex`/`--method`/`--status`/`--pid`/`--process` 多条件 AND 组合（底层 `POST /flows/search`），不再只是单正则。可只用精确字段过滤（如 `--method POST --status 404`），无需正则。加 `--all` 跨所有会话搜索。见 §3.3。
 50. **批量创建规则**：`POST /auto-reply/rules/batch-create` 一次传 rules 数组，比逐条 POST 快。大批量导入规则用这个（CLI `intercept import` 已用此端点优化）。
 51. **流量标签 tag**：`packets tag <id> --add analyzed` 给流量打标签，`packets list --tag analyzed` 按标签过滤。适合长会话标记"已分析""可疑""关键接口"，切换会话/重启后不丢失（存 SQLite）。tags 逗号分隔，tag_note 备注可空。`--add`/`--remove` 多值逗号分隔，`--clear` 清空所有标签，`--note` 设备注（可与 `--add` 同时用）。`packets list --has-tags` 只看有标签的流量。见 §3.3。
-52. **agent 启动后端必用 `--no-browser`**：`python -m opennet --no-browser` 不自动开浏览器，避免干扰用户。等价环境变量 `OPENNET_NO_BROWSER=1`。`system restart` 和 `system restart-as-admin` 会透传此参数，重启后行为一致。见顶部「启动参数」。
+52. **agent 启动后端必用 `--no-browser`**：`python -m Telnix --no-browser` 不自动开浏览器，避免干扰用户。等价环境变量 `Telnix_NO_BROWSER=1`。`system restart` 和 `system restart-as-admin` 会透传此参数，重启后行为一致。见顶部「启动参数」。
 53. **`send` 从零发包**：`send --url ... --method ...` 构造任意 HTTP 请求发送，不走代理、不写入 flows 表，适合测试接口/调试 API。支持 `--header`/`--body`/`--body-file`/`--timeout`/`--headers-only`/`--body-only`/`--emit-curl`。见 §3.22。
 54. **管理员重启走 GUI 确认**：`system restart-as-admin` 会在桌面弹**原生 Windows 置顶 Yes/No 弹窗**（任务栏闪烁，默认聚焦「否」按钮防误按），用户同意才 UAC 提权。用户拒绝时 CLI 返回 `{"rejected_by_user": true, ...}` + 退出码 1，agent 可据此区分"用户拒绝"和"超时/错误"。见 §3.21。
 55. **用户设置存 settings.json**：GUI 偏好（列顺序/导航顺序/主题/缓存阈值等）存 `<data_dir>/settings.json`（原子写入 + 线程锁），不再用 SQLite。首次启动自动从 SQLite 迁移。用户可在设置页点「打开设置文件」用记事本直接编辑。
-56. **`agent start/end` 工作模式**：agent 接管会话前调 `agent start`，临时禁用所有自动回复规则 + 关 focus + 关断点 + **把 agent 进程（`TRAE SOLO CN.exe`）加入忽略列表防止抓自己的包**（备份原状到临时文件），做事，收工调 `agent end` 恢复原状 + 移除 agent 添加的忽略进程（保留用户原本的）。**`agent end` 不关代理、不退出 OpenNet**（用户可能依赖自动修改规则继续工作）。agent 应在 `end` 后询问用户是否关闭 OpenNet，用户同意才调 `system quit`（后端退出时 atexit 自动清代理）。见 §3.23。
+56. **`agent start/end` 工作模式**：agent 接管会话前调 `agent start`，临时禁用所有自动回复规则 + 关 focus + 关断点 + **把 agent 进程（`TRAE SOLO CN.exe`）加入忽略列表防止抓自己的包**（备份原状到临时文件），做事，收工调 `agent end` 恢复原状 + 移除 agent 添加的忽略进程（保留用户原本的）。**`agent end` 不关代理、不退出 Telnix**（用户可能依赖自动修改规则继续工作）。agent 应在 `end` 后询问用户是否关闭 Telnix，用户同意才调 `system quit`（后端退出时 atexit 自动清代理）。见 §3.23。
 
 ---
 
@@ -1988,7 +2075,7 @@ CLI 退出码语义明确，按退出码快速定位问题大类（详见 [§2 �
 |---|---|---|---|
 | `0` | 成功 | — | 继续下一步 |
 | `1` | 后端业务错误（500/规则不存在/会话不存在等） | `biz` | 读 stderr 的 `error` 字段，按 `hint`（如有）处理 |
-| `2` | 连接错误（后端未启动/网络不通） | `conn` | `cd src\host && python -m opennet` 启动后端 |
+| `2` | 连接错误（后端未启动/网络不通） | `conn` | `cd src\host && python -m Telnix` 启动后端 |
 | `3` | 参数错误（客户端校验失败） | `arg` | 读 stderr 的 `error` 字段，改命令参数后重试 |
 
 **解析建议**：
@@ -2000,16 +2087,16 @@ CLI 退出码语义明确，按退出码快速定位问题大类（详见 [§2 �
 
 | 现象 | 原因 | 解决 |
 |---|---|---|
-| CLI 退出码 2 | 后端没启动 | 启动后端：`cd src\host && python -m opennet`（agent 场景加 `--no-browser`） |
-| CLI 报连接失败但后端在跑 | 端口不对（误以为 18899） | OpenNet API 端口是 **18901**（不是 18899）。CLI 默认连 18901，检查 `OPENNET_API` 环境变量是否被误设为 18899 |
-| `bind 报 WSAEACCES=13` 启动失败 | 端口被 Windows 动态保留 / 已被占用 | OpenNet 已改用 18901 避开 18899/18900 保留段；若 18901 也被占，检查 `netstat -ano \| findstr 18901` 找占用进程 |
+| CLI 退出码 2 | 后端没启动 | 启动后端：`cd src\host && python -m Telnix`（agent 场景加 `--no-browser`） |
+| CLI 报连接失败但后端在跑 | 端口不对（误以为 18899） | Telnix API 端口是 **18901**（不是 18899）。CLI 默认连 18901，检查 `TELNIX_API` 环境变量是否被误设为 18899 |
+| `bind 报 WSAEACCES=13` 启动失败 | 端口被 Windows 动态保留 / 已被占用 | Telnix 已改用 18901 避开 18899/18900 保留段；若 18901 也被占，检查 `netstat -ano \| findstr 18901` 找占用进程 |
 | HTTPS 流量看不到 body | 证书没装 | `cert install` |
 | 规则不生效 | pattern 没匹配上 / 被更宽泛的规则抢先 | `intercept list` 看 pattern，注意长度降序 |
 | `set-json` 没改到 | 响应不是 JSON / key 不存在 | `packets get <id>` 看 `response_body` 实际结构 |
 | mock 返回了真实响应 | 规则 action 写错 / pattern 没匹配 | 查 `log tail --category proxy` 看匹配日志 |
-| 改完字段客户端还报错 | Content-Length 没更新 / 字段类型不对 | OpenNet 会自动更新 Content-Length；类型用 `--dry-run` 确认 value 类型 |
+| 改完字段客户端还报错 | Content-Length 没更新 / 字段类型不对 | Telnix 会自动更新 Content-Length；类型用 `--dry-run` 确认 value 类型 |
 | `raw start` 报 `pydivert=false` | pydivert 未安装 | `pip install pydivert`（驱动 WinDivert64.sys 随包附带，首次自动加载） |
-| `raw start` 报 `admin=false` | 后端非管理员运行 | `python -m opennet.cli system restart-as-admin` 触发 GUI 置顶弹窗，用户同意后 UAC 提权重启 |
+| `raw start` 报 `admin=false` | 后端非管理员运行 | `python -m telnix.cli system restart-as-admin` 触发 GUI 置顶弹窗，用户同意后 UAC 提权重启 |
 | `system restart-as-admin` 报 `rejected_by_user: true` | 用户在桌面弹窗点了「否」/超时未响应 | 提示用户同意，或让用户手动右键管理员身份启动后端 |
 | `raw start` 报 `driver load failed` | WinDivert64.sys 被杀软拦 / 旧残留 | 加白名单；或重启系统后重试；管理员运行 `sc stop WinDivert` 清理旧服务 |
 | HTTPS 抓到 CONNECT 但无 payload | 客户端证书 pinning | 无解，改用 `raw start --port 443` 抓密文 TCP 流量 |
@@ -2034,206 +2121,206 @@ CLI 退出码语义明确，按退出码快速定位问题大类（详见 [§2 �
 
 ```bash
 # 状态
-python -m opennet.cli status
-python -m opennet.cli cert status
-python -m opennet.cli proxy status
-python -m opennet.cli raw status
-python -m opennet.cli focus status
+python -m telnix.cli status
+python -m telnix.cli cert status
+python -m telnix.cli proxy status
+python -m telnix.cli raw status
+python -m telnix.cli focus status
 
 # 抓包（HTTP 层）
-python -m opennet.cli capture start
-python -m opennet.cli capture start --auto-stop 30          # 30 秒后自动停（后端定时）
-python -m opennet.cli capture stop
-python -m opennet.cli capture clear
-python -m opennet.cli capture pause                          # 暂停记录（保留会话）
-python -m opennet.cli capture resume                         # 恢复记录
+python -m telnix.cli capture start
+python -m telnix.cli capture start --auto-stop 30          # 30 秒后自动停（后端定时）
+python -m telnix.cli capture stop
+python -m telnix.cli capture clear
+python -m telnix.cli capture pause                          # 暂停记录（保留会话）
+python -m telnix.cli capture resume                         # 恢复记录
 
 # 抓包（TCP/UDP 网络层，WinDivert）
-python -m opennet.cli capture start --layer all
-python -m opennet.cli raw install                                       # 一键装 pydivert 驱动
-python -m opennet.cli raw start --port 443
-python -m opennet.cli raw start --pid 1234 --filter 'tcp or udp'
-python -m opennet.cli raw stop
-python -m opennet.cli capture stop --layer all
+python -m telnix.cli capture start --layer all
+python -m telnix.cli raw install                                       # 一键装 pydivert 驱动
+python -m telnix.cli raw start --port 443
+python -m telnix.cli raw start --pid 1234 --filter 'tcp or udp'
+python -m telnix.cli raw stop
+python -m telnix.cli capture stop --layer all
 
 # 看包
-python -m opennet.cli packets list --limit 50
-python -m opennet.cli packets list --since-id 42 --json-array   # 增量轮询
-python -m opennet.cli packets list --protocol tcp               # 只看 TCP/UDP
-python -m opennet.cli packets list --tail --emit-curl
-python -m opennet.cli packets list --filter 'host~=x && method=POST'
-python -m opennet.cli packets get 42
-python -m opennet.cli packets get 42 --hex --field raw_data     # 看 TCP/UDP 原始字节
-python -m opennet.cli packets get 42 --decode my_decoder.py     # 自定义解码器解析 body
-python -m opennet.cli packets delete 42
-python -m opennet.cli packets delete --ids 1,2,3
+python -m telnix.cli packets list --limit 50
+python -m telnix.cli packets list --since-id 42 --json-array   # 增量轮询
+python -m telnix.cli packets list --protocol tcp               # 只看 TCP/UDP
+python -m telnix.cli packets list --tail --emit-curl
+python -m telnix.cli packets list --filter 'host~=x && method=POST'
+python -m telnix.cli packets get 42
+python -m telnix.cli packets get 42 --hex --field raw_data     # 看 TCP/UDP 原始字节
+python -m telnix.cli packets get 42 --decode my_decoder.py     # 自定义解码器解析 body
+python -m telnix.cli packets delete 42
+python -m telnix.cli packets delete --ids 1,2,3
 
 # 流量标签（打标 / 按标签过滤，存 SQLite 切换会话不丢）
-python -m opennet.cli packets tag 42 --add analyzed --note "备注"
-python -m opennet.cli packets tag 42 --add suspicious,key --note "疑似签名字段"
-python -m opennet.cli packets tag 42 --remove analyzed
-python -m opennet.cli packets tag 42 --clear
-python -m opennet.cli packets tag --list                                       # 列出全局所有标签及每标签的 flow 数
-python -m opennet.cli packets list --tag suspicious                          # 按标签过滤
-python -m opennet.cli packets list-all --tag analyzed                        # 跨会话按标签过滤
-python -m opennet.cli packets list --has-tags                                # 只看有标签的
+python -m telnix.cli packets tag 42 --add analyzed --note "备注"
+python -m telnix.cli packets tag 42 --add suspicious,key --note "疑似签名字段"
+python -m telnix.cli packets tag 42 --remove analyzed
+python -m telnix.cli packets tag 42 --clear
+python -m telnix.cli packets tag --list                                       # 列出全局所有标签及每标签的 flow 数
+python -m telnix.cli packets list --tag suspicious                          # 按标签过滤
+python -m telnix.cli packets list-all --tag analyzed                        # 跨会话按标签过滤
+python -m telnix.cli packets list --has-tags                                # 只看有标签的
 
 # 逆向分析三件套：对比/API 地图/时间线
-python -m opennet.cli packets diff 42 43 --field response_body             # 对比两条流量字段差异
-python -m opennet.cli packets endpoints --limit 200                        # 唯一 endpoint 提取（API 地图）
-python -m opennet.cli packets endpoints --session 7 --keep-query --limit 0 # 指定会话+全量+保留 query 参数名
-python -m opennet.cli packets timeline --gap 2.0                           # 流量时间线（段落分隔）
-python -m opennet.cli packets timeline --session 7                         # 指定会话时间线
-python -m opennet.cli packets list --decode my_decoder.py --limit 50       # 批量解码
-python -m opennet.cli packets list --decode my_decoder.py --decode-field request_body  # 解码请求体
-python -m opennet.cli packets list-all --host x --decode my_decoder.py     # 跨会话批量解码
-python -m opennet.cli packets watch --filter 'host~=api.x.com && method=POST'  # 定向 tail 匹配的新流量
+python -m telnix.cli packets diff 42 43 --field response_body             # 对比两条流量字段差异
+python -m telnix.cli packets endpoints --limit 200                        # 唯一 endpoint 提取（API 地图）
+python -m telnix.cli packets endpoints --session 7 --keep-query --limit 0 # 指定会话+全量+保留 query 参数名
+python -m telnix.cli packets timeline --gap 2.0                           # 流量时间线（段落分隔）
+python -m telnix.cli packets timeline --session 7                         # 指定会话时间线
+python -m telnix.cli packets list --decode my_decoder.py --limit 50       # 批量解码
+python -m telnix.cli packets list --decode my_decoder.py --decode-field request_body  # 解码请求体
+python -m telnix.cli packets list-all --host x --decode my_decoder.py     # 跨会话批量解码
+python -m telnix.cli packets watch --filter 'host~=api.x.com && method=POST'  # 定向 tail 匹配的新流量
 
 # 跨流量搜索 + 统计
-python -m opennet.cli packets search --body-regex 'remainingUses.*\d{4,}'
-python -m opennet.cli packets search --binary-hex 'efbbbf'
-python -m opennet.cli packets search --binary-hex 'efbbbf' --offset 0:1024   # 只在前 1KB 搜
-python -m opennet.cli packets search --body-regex 'sig=[a-f0-9]{32}' --all   # 跨所有会话
-python -m opennet.cli packets search --method POST --status 200 --pid 1234 --process chrome.exe  # 多条件组合搜索
-python -m opennet.cli packets search --method GET --status 404               # 只用精确字段过滤（无需正则）
-python -m opennet.cli packets stats
-python -m opennet.cli packets stats --by endpoint                           # 按 endpoint 分组
-python -m opennet.cli packets stats --by endpoint --metrics size,duration   # + 百分位指标
-python -m opennet.cli packets stats --by content_type                        # 按 Content-Type 分组（跨会话全量）
-python -m opennet.cli packets stats --by process                             # 按进程名分组（跨会话全量）
+python -m telnix.cli packets search --body-regex 'remainingUses.*\d{4,}'
+python -m telnix.cli packets search --binary-hex 'efbbbf'
+python -m telnix.cli packets search --binary-hex 'efbbbf' --offset 0:1024   # 只在前 1KB 搜
+python -m telnix.cli packets search --body-regex 'sig=[a-f0-9]{32}' --all   # 跨所有会话
+python -m telnix.cli packets search --method POST --status 200 --pid 1234 --process chrome.exe  # 多条件组合搜索
+python -m telnix.cli packets search --method GET --status 404               # 只用精确字段过滤（无需正则）
+python -m telnix.cli packets stats
+python -m telnix.cli packets stats --by endpoint                           # 按 endpoint 分组
+python -m telnix.cli packets stats --by endpoint --metrics size,duration   # + 百分位指标
+python -m telnix.cli packets stats --by content_type                        # 按 Content-Type 分组（跨会话全量）
+python -m telnix.cli packets stats --by process                             # 按进程名分组（跨会话全量）
 
 # 逆向分析：依赖链 + 签名检测
-python -m opennet.cli packets trace 42                                       # 请求依赖链（token 传递追踪）
-python -m opennet.cli packets trace 42 --all                                 # 跨会话追踪 token 传递
-python -m opennet.cli packets analyze 42 43 44 --find-signature              # 签名字段自动检测
-python -m opennet.cli packets analyze 42 43 44 --all                         # 跨会话签名字段检测
+python -m telnix.cli packets trace 42                                       # 请求依赖链（token 传递追踪）
+python -m telnix.cli packets trace 42 --all                                 # 跨会话追踪 token 传递
+python -m telnix.cli packets analyze 42 43 44 --find-signature              # 签名字段自动检测
+python -m telnix.cli packets analyze 42 43 44 --all                         # 跨会话签名字段检测
 
 # 跨会话查询/清理（不依赖活动会话）
-python -m opennet.cli packets list-all --host api.example.com --limit 50
-python -m opennet.cli packets list-all --filter-path '/api/v1/' --limit 50     # 后端 SQL LIKE 过滤 path
-python -m opennet.cli packets list-all --filter-url 'example.com' --limit 50   # 后端 SQL LIKE 过滤 url
-python -m opennet.cli packets list-all --since-id 100 --json-array             # 增量轮询
-python -m opennet.cli packets clear --all                                      # 清空全部
-python -m opennet.cli packets clear --before-id 1000                           # 删除旧流量
+python -m telnix.cli packets list-all --host api.example.com --limit 50
+python -m telnix.cli packets list-all --filter-path '/api/v1/' --limit 50     # 后端 SQL LIKE 过滤 path
+python -m telnix.cli packets list-all --filter-url 'example.com' --limit 50   # 后端 SQL LIKE 过滤 url
+python -m telnix.cli packets list-all --since-id 100 --json-array             # 增量轮询
+python -m telnix.cli packets clear --all                                      # 清空全部
+python -m telnix.cli packets clear --before-id 1000                           # 删除旧流量
 
 # 单 flow 导出（逆向取证）
-python -m opennet.cli packets export 42 --format curl -o req.sh
-python -m opennet.cli packets export 42 --format python-requests -o req.py
-python -m opennet.cli packets export 42 --format csv -o req.csv                # CSV 单行带表头
+python -m telnix.cli packets export 42 --format curl -o req.sh
+python -m telnix.cli packets export 42 --format python-requests -o req.py
+python -m telnix.cli packets export 42 --format csv -o req.csv                # CSV 单行带表头
 
 # 拦截
-python -m opennet.cli intercept add --match '...' --action 'set-json k v' --name n --dry-run
-python -m opennet.cli intercept add --match 'host~=x && method=POST && status=200' --action 'set-json k v' --name n  # method/status 过滤代理层生效
-python -m opennet.cli intercept add --match '...' --action 'mock 200 {}' --name n
-python -m opennet.cli intercept add --match '...' --action 'mock-request {"u":1}' --name n  # 写死请求 body 转发到真实服务器
-python -m opennet.cli intercept add --match '...' --action 'set-request-json k v' --name n  # 改请求
-python -m opennet.cli intercept add --match '...' --action 'replace-bytes 10:414243' --name n  # 二进制
-python -m opennet.cli intercept add --match 'host~=x && path~=/login' --action 'delay 5000' --name 'slow-login'  # 响应延迟 5s
-python -m opennet.cli intercept add --match 'host~=x && path~=/pay' --action 'delay-request 2000' --name 'slow-pay'  # 请求延迟 2s
-python -m opennet.cli intercept add --match '...' --action 'set-json k v' --name n --idempotent  # §3.1 幂等创建（后端端点+客户端降级）
-python -m opennet.cli intercept list                                          # 含 hit_count 命中统计
-python -m opennet.cli intercept hits <rule_id>                                # 查看规则命中统计+最后命中流量详情
-python -m opennet.cli intercept del <id>
-python -m opennet.cli intercept toggle <id> --disable                       # 禁用规则（不删除）
-python -m opennet.cli intercept toggle <id> --enable                        # 启用规则
-python -m opennet.cli intercept toggle --all --disable                      # 批量禁用所有规则
-python -m opennet.cli intercept update <id> --note '新备注'                  # 修改规则备注
-python -m opennet.cli intercept update <id> --match 'host~=x' --enable      # 改匹配+启用
-python -m opennet.cli intercept export -o my_rules.json                    # 导出规则集
-python -m opennet.cli intercept import my_rules.json                       # 导入（merge 追加）
-python -m opennet.cli intercept import my_rules.json --mode replace        # 导入（先清空再导入）
-python -m opennet.cli intercept import big_rules.json --quiet              # 大批量导入只输出汇总
+python -m telnix.cli intercept add --match '...' --action 'set-json k v' --name n --dry-run
+python -m telnix.cli intercept add --match 'host~=x && method=POST && status=200' --action 'set-json k v' --name n  # method/status 过滤代理层生效
+python -m telnix.cli intercept add --match '...' --action 'mock 200 {}' --name n
+python -m telnix.cli intercept add --match '...' --action 'mock-request {"u":1}' --name n  # 写死请求 body 转发到真实服务器
+python -m telnix.cli intercept add --match '...' --action 'set-request-json k v' --name n  # 改请求
+python -m telnix.cli intercept add --match '...' --action 'replace-bytes 10:414243' --name n  # 二进制
+python -m telnix.cli intercept add --match 'host~=x && path~=/login' --action 'delay 5000' --name 'slow-login'  # 响应延迟 5s
+python -m telnix.cli intercept add --match 'host~=x && path~=/pay' --action 'delay-request 2000' --name 'slow-pay'  # 请求延迟 2s
+python -m telnix.cli intercept add --match '...' --action 'set-json k v' --name n --idempotent  # §3.1 幂等创建（后端端点+客户端降级）
+python -m telnix.cli intercept list                                          # 含 hit_count 命中统计
+python -m telnix.cli intercept hits <rule_id>                                # 查看规则命中统计+最后命中流量详情
+python -m telnix.cli intercept del <id>
+python -m telnix.cli intercept toggle <id> --disable                       # 禁用规则（不删除）
+python -m telnix.cli intercept toggle <id> --enable                        # 启用规则
+python -m telnix.cli intercept toggle --all --disable                      # 批量禁用所有规则
+python -m telnix.cli intercept update <id> --note '新备注'                  # 修改规则备注
+python -m telnix.cli intercept update <id> --match 'host~=x' --enable      # 改匹配+启用
+python -m telnix.cli intercept export -o my_rules.json                    # 导出规则集
+python -m telnix.cli intercept import my_rules.json                       # 导入（merge 追加）
+python -m telnix.cli intercept import my_rules.json --mode replace        # 导入（先清空再导入）
+python -m telnix.cli intercept import big_rules.json --quiet              # 大批量导入只输出汇总
 
 # 重放（支持改参数 / fuzz / 批量对比 / 并发 / 多字段组合）
-python -m opennet.cli replay 42
-python -m opennet.cli replay 42 --method PUT --host test.example.com --port 8443
-python -m opennet.cli replay 42 --body '{"x":1}' --header 'X-Test: 1'
-python -m opennet.cli replay 42 --fuzz 'user_id=1..100'
-python -m opennet.cli replay 42 --fuzz-file payloads.json --mode cartesian  # 多字段笛卡尔积 fuzz
-python -m opennet.cli replay 42 --fuzz-file payloads.json --mode zip        # zip 配对模式
-python -m opennet.cli replay 42 --repeat 5 --compare                       # 批量重放 + 响应 diff
-python -m opennet.cli replay 42 --repeat 20 --parallel 5                    # 5 线程并发重放 20 次
-python -m opennet.cli replay 42 --timeout 300                               # 自定义超时（慢接口）
+python -m telnix.cli replay 42
+python -m telnix.cli replay 42 --method PUT --host test.example.com --port 8443
+python -m telnix.cli replay 42 --body '{"x":1}' --header 'X-Test: 1'
+python -m telnix.cli replay 42 --fuzz 'user_id=1..100'
+python -m telnix.cli replay 42 --fuzz-file payloads.json --mode cartesian  # 多字段笛卡尔积 fuzz
+python -m telnix.cli replay 42 --fuzz-file payloads.json --mode zip        # zip 配对模式
+python -m telnix.cli replay 42 --repeat 5 --compare                       # 批量重放 + 响应 diff
+python -m telnix.cli replay 42 --repeat 20 --parallel 5                    # 5 线程并发重放 20 次
+python -m telnix.cli replay 42 --timeout 300                               # 自定义超时（慢接口）
 
 # 时序回放（按 session 整批重放）
-python -m opennet.cli replay-batch --session 7                              # 立即连续重放（串行）
-python -m opennet.cli replay-batch --session 7 --preserve-timing            # 按原始时间间隔重放
-python -m opennet.cli replay-batch --session 7 --parallel 5                 # 并发立即重放
-python -m opennet.cli replay-batch --session 7 --filter 'method=POST'       # 选择性时序回放（只重放 POST）
+python -m telnix.cli replay-batch --session 7                              # 立即连续重放（串行）
+python -m telnix.cli replay-batch --session 7 --preserve-timing            # 按原始时间间隔重放
+python -m telnix.cli replay-batch --session 7 --parallel 5                 # 并发立即重放
+python -m telnix.cli replay-batch --session 7 --filter 'method=POST'       # 选择性时序回放（只重放 POST）
 
 # 进程（找目标 PID / 看连接 / 进程树 / 忽略管理）
-python -m opennet.cli processes --name chrome
-python -m opennet.cli processes --name chrome --with-connections            # 看当前 TCP 连接
-python -m opennet.cli processes --name chrome --with-connections --include-listen  # 含 LISTEN 端口
-python -m opennet.cli processes --name svchost.exe --tree                   # 进程树
-python -m opennet.cli processes ignore --pid 1234                            # 忽略进程（按 PID）
-python -m opennet.cli processes ignore --name chrome.exe                     # 忽略进程（按名称，可多个）
-python -m opennet.cli processes unignore 3                                   # 取消忽略（按行 id）
-python -m opennet.cli processes ignored                                      # 列出已忽略进程
-python -m opennet.cli processes ignore-host --host "*.example.com"           # 忽略 host（通配符）
-python -m opennet.cli processes unignore-host 2                              # 取消忽略 host（按行 id）
-python -m opennet.cli processes ignored-hosts                                # 列出已忽略 host
+python -m telnix.cli processes --name chrome
+python -m telnix.cli processes --name chrome --with-connections            # 看当前 TCP 连接
+python -m telnix.cli processes --name chrome --with-connections --include-listen  # 含 LISTEN 端口
+python -m telnix.cli processes --name svchost.exe --tree                   # 进程树
+python -m telnix.cli processes ignore --pid 1234                            # 忽略进程（按 PID）
+python -m telnix.cli processes ignore --name chrome.exe                     # 忽略进程（按名称，可多个）
+python -m telnix.cli processes unignore 3                                   # 取消忽略（按行 id）
+python -m telnix.cli processes ignored                                      # 列出已忽略进程
+python -m telnix.cli processes ignore-host --host "*.example.com"           # 忽略 host（通配符）
+python -m telnix.cli processes unignore-host 2                              # 取消忽略 host（按行 id）
+python -m telnix.cli processes ignored-hosts                                # 列出已忽略 host
 
 # 会话管理
-python -m opennet.cli sessions list                    # 列出所有会话
-python -m opennet.cli sessions show 7                  # 会话详情（含 flow_count）
-python -m opennet.cli sessions delete 7                # 删除会话及其流量
+python -m telnix.cli sessions list                    # 列出所有会话
+python -m telnix.cli sessions show 7                  # 会话详情（含 flow_count）
+python -m telnix.cli sessions delete 7                # 删除会话及其流量
 
 # 专注模式
-python -m opennet.cli focus on --pid 1234
-python -m opennet.cli focus on --name chrome.exe
-python -m opennet.cli focus on --name chrome.exe --no-children
-python -m opennet.cli focus on --host '*.example.com'                      # 按 host 通配符专注
-python -m opennet.cli focus on --name chrome.exe --host '*.google.com'      # 进程+host 跨类 OR
-python -m opennet.cli focus off
+python -m telnix.cli focus on --pid 1234
+python -m telnix.cli focus on --name chrome.exe
+python -m telnix.cli focus on --name chrome.exe --no-children
+python -m telnix.cli focus on --host '*.example.com'                      # 按 host 通配符专注
+python -m telnix.cli focus on --name chrome.exe --host '*.google.com'      # 进程+host 跨类 OR
+python -m telnix.cli focus off
 
 # 断点（务必带 --timeout 避免卡死）
-python -m opennet.cli breakpoint status
-python -m opennet.cli breakpoint on --type request --timeout 30
-python -m opennet.cli breakpoint on --type response --timeout 30
-python -m opennet.cli breakpoint off --type request
-python -m opennet.cli breakpoint timeout --timeout 60
-python -m opennet.cli breakpoint release 42              # 放行单条
-python -m opennet.cli breakpoint drop 42                 # 丢弃单条
-python -m opennet.cli breakpoint release --all           # 批量放行所有 pending
-python -m opennet.cli breakpoint drop --all              # 批量丢弃所有 pending
+python -m telnix.cli breakpoint status
+python -m telnix.cli breakpoint on --type request --timeout 30
+python -m telnix.cli breakpoint on --type response --timeout 30
+python -m telnix.cli breakpoint off --type request
+python -m telnix.cli breakpoint timeout --timeout 60
+python -m telnix.cli breakpoint release 42              # 放行单条
+python -m telnix.cli breakpoint drop 42                 # 丢弃单条
+python -m telnix.cli breakpoint release --all           # 批量放行所有 pending
+python -m telnix.cli breakpoint drop --all              # 批量丢弃所有 pending
 
 # 导出（多种格式）
-python -m opennet.cli export --format har -o out.har
-python -m opennet.cli export --format python-requests -o replay.py
-python -m opennet.cli export --format postman -o collection.json
-python -m opennet.cli export --format curl -o replay.sh
-python -m opennet.cli export --format csv                    # 不指定 -o 按格式推导文件名 opennet_export.csv
+python -m telnix.cli export --format har -o out.har
+python -m telnix.cli export --format python-requests -o replay.py
+python -m telnix.cli export --format postman -o collection.json
+python -m telnix.cli export --format curl -o replay.sh
+python -m telnix.cli export --format csv                    # 不指定 -o 按格式推导文件名 Telnix_export.csv
 
 # 系统
-python -m opennet.cli proxy on
-python -m opennet.cli proxy off
-python -m opennet.cli cert status                            # 证书状态
-python -m opennet.cli cert install                           # 装根证书
-python -m opennet.cli cert remove                            # 卸载根证书
-python -m opennet.cli log tail --category proxy --level ERROR
-python -m opennet.cli log clear                              # 清空所有日志
-python -m opennet.cli log export -o logs.jsonl               # 导出日志为 JSONL
-python -m opennet.cli log export -o err.jsonl --level ERROR --category proxy  # 带过滤导出
-python -m opennet.cli system restart                         # 重启前后端（保留 --no-browser 等启动参数）
-python -m opennet.cli system quit                            # 退出 OpenNet（关代理+关服务）
-python -m opennet.cli system restart-as-admin                # 以管理员身份重启（GUI 用户确认 + UAC，TCP/UDP 抓包用）
+python -m telnix.cli proxy on
+python -m telnix.cli proxy off
+python -m telnix.cli cert status                            # 证书状态
+python -m telnix.cli cert install                           # 装根证书
+python -m telnix.cli cert remove                            # 卸载根证书
+python -m telnix.cli log tail --category proxy --level ERROR
+python -m telnix.cli log clear                              # 清空所有日志
+python -m telnix.cli log export -o logs.jsonl               # 导出日志为 JSONL
+python -m telnix.cli log export -o err.jsonl --level ERROR --category proxy  # 带过滤导出
+python -m telnix.cli system restart                         # 重启前后端（保留 --no-browser 等启动参数）
+python -m telnix.cli system quit                            # 退出 Telnix（关代理+关服务）
+python -m telnix.cli system restart-as-admin                # 以管理员身份重启（GUI 用户确认 + UAC，TCP/UDP 抓包用）
 
 # 发包（Composer，不走代理不写入 flows）
-python -m opennet.cli send --url https://api.example.com                          # GET
-python -m opennet.cli send --method POST --url https://api.example.com \
+python -m telnix.cli send --url https://api.example.com                          # GET
+python -m telnix.cli send --method POST --url https://api.example.com \
   --header 'Content-Type: application/json' --body '{"k":1}'                       # POST JSON
-python -m opennet.cli send --method POST --url https://api.example.com/upload \
+python -m telnix.cli send --method POST --url https://api.example.com/upload \
   --body-file payload.bin                                                          # 从文件读 body
-python -m opennet.cli send --url https://api.example.com --timeout 60             # 自定义超时
-python -m opennet.cli send --url https://api.example.com --headers-only           # 只输出响应头
-python -m opennet.cli send --url https://api.example.com --body-only              # 只输出响应体
-python -m opennet.cli send --method POST --url https://api.example.com \
+python -m telnix.cli send --url https://api.example.com --timeout 60             # 自定义超时
+python -m telnix.cli send --url https://api.example.com --headers-only           # 只输出响应头
+python -m telnix.cli send --url https://api.example.com --body-only              # 只输出响应体
+python -m telnix.cli send --method POST --url https://api.example.com \
   --header 'X-Test: 1' --body '{"k":1}' --emit-curl                                # 导出 curl 命令不发
 
 # 后端启动（agent 自动化场景必用 --no-browser）
-python -m opennet --no-browser                                                      # 不开浏览器
-OPENNET_NO_BROWSER=1 python -m opennet                                              # 等价环境变量
+python -m Telnix --no-browser                                                      # 不开浏览器
+Telnix_NO_BROWSER=1 python -m Telnix                                              # 等价环境变量
 
 # HTTP API（CLI 未覆盖的功能，用 curl 调）
 curl http://127.0.0.1:18901/api/templates                                    # 规则模板列表
@@ -2327,21 +2414,21 @@ agent 写解析代码时按命令查字段，避免逐个命令翻文档。`+` �
 
 ## 附录 C：MCP Server（IDE 集成用）
 
-OpenNet 提供 MCP (Model Context Protocol) 服务器，让 Claude Desktop / Cursor / VS Code 等 MCP 客户端直接调用 OpenNet 的抓包/拦截/改包能力。
+Telnix 提供 MCP (Model Context Protocol) 服务器，让 Claude Desktop / Cursor / VS Code 等 MCP 客户端直接调用 Telnix 的抓包/拦截/改包能力。
 
 ### C.1 启动
 
 ```bash
 # 方式1：模块直接运行（推荐）
-python -m opennet.mcp_server
+python -m Telnix.mcp_server
 
 # 方式2：安装后的入口点
-opennet-mcp
+Telnix-mcp
 
 # 自定义后端地址
-python -m opennet.mcp_server --base-url http://127.0.0.1:18901
+python -m Telnix.mcp_server --base-url http://127.0.0.1:18901
 # 或用环境变量
-set OPENNET_API=http://127.0.0.1:18901
+set TELNIX_API=http://127.0.0.1:18901
 ```
 
 ### C.2 客户端配置
@@ -2351,17 +2438,17 @@ set OPENNET_API=http://127.0.0.1:18901
 ```json
 {
   "mcpServers": {
-    "opennet": {
+    "Telnix": {
       "command": "python",
-      "args": ["-m", "opennet.mcp_server"],
+      "args": ["-m", "Telnix.mcp_server"],
       "cwd": ".\\src\\host",
-      "env": { "OPENNET_API": "http://127.0.0.1:18901" }
+      "env": { "TELNIX_API": "http://127.0.0.1:18901" }
     }
   }
 }
 ```
 
-**Cursor / VS Code**：参考各客户端的 MCP 配置文档，command 填 `python`，args 填 `["-m", "opennet.mcp_server"]`。
+**Cursor / VS Code**：参考各客户端的 MCP 配置文档，command 填 `python`，args 填 `["-m", "Telnix.mcp_server"]`。
 
 ### C.3 工具清单（73 个，100% 覆盖 CLI）
 

@@ -21,14 +21,16 @@ const DEFAULT_NAV = [
   { path: '/auto-reply', label: '自动修改', icon: 'SetUp' },
   { path: '/send', label: '发包', icon: 'Promotion' },
   { path: '/clash', label: 'Clash', icon: 'ClashIcon' },
+  { path: '/cool', label: 'CoolUI', icon: 'DataBoard' },
   { path: '/ai', label: 'AI 分析', icon: 'MagicStick' },
   { path: '/codec', label: '编解码', icon: 'Key' },
   { path: '/search', label: '搜索', icon: 'Search' },
   { path: '/raw', label: 'TCP/UDP', icon: 'Connection' },
+  { path: '/ws', label: 'WebSocket', icon: 'ChatLineRound' },
   { path: '/logs', label: '日志', icon: 'Document' },
   { path: '/settings', label: '设置', icon: 'Setting' },
 ]
-const NAV_ORDER_KEY = 'opennet_nav_order'
+const NAV_ORDER_KEY = 'telnix_nav_order'
 
 function loadNavItems() {
   // 按 localStorage 保存的顺序排列；新出现的项按 DEFAULT_NAV 中的相对位置插入
@@ -147,12 +149,36 @@ const certText = computed(() =>
 onMounted(() => {
   capture.startPolling()
   loadClashEnabled()
+  // 从后端 settings.json 应用主题（localStorage 为空时以 settings.json 为准）
+  applyThemeFromSettings()
   // 监听设置页的 Clash 开关事件，实时刷新侧边栏
-  window.addEventListener('opennet-clash-toggle', loadClashEnabled)
+  window.addEventListener('telnix-clash-toggle', loadClashEnabled)
 })
 
+// 启动时从 settings.json 同步主题到 localStorage + DOM
+// 解决：清浏览器缓存/换设备后 localStorage 丢失，settings.json 的主题不生效
+async function applyThemeFromSettings() {
+  try {
+    const s = await api.getSettings()
+    const remoteTheme = s.theme as string | undefined
+    const localTheme = localStorage.getItem('telnix_theme')
+    // localStorage 无主题时，用 settings.json 的主题（默认 dark）
+    const theme = localTheme || remoteTheme || 'dark'
+    if (!localTheme) {
+      localStorage.setItem('telnix_theme', theme)
+    }
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+  } catch {
+    /* 后端不可达时保留 main.ts 的默认 dark */
+  }
+}
+
 onUnmounted(() => {
-  window.removeEventListener('opennet-clash-toggle', loadClashEnabled)
+  window.removeEventListener('telnix-clash-toggle', loadClashEnabled)
 })
 
 // 路由切换时刷新 Clash 启用状态（设置页可能切换了开关）
@@ -204,8 +230,8 @@ async function onRestart() {
 async function onQuit() {
   try {
     await ElMessageBox.confirm(
-      '将退出 OpenNet（关闭前后端 + 清系统代理）。确认退出？',
-      '退出 OpenNet',
+      '将退出 Telnix（关闭前后端 + 清系统代理）。确认退出？',
+      '退出 Telnix',
       { confirmButtonText: '退出', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
@@ -213,7 +239,7 @@ async function onQuit() {
   }
   try {
     await api.quitService()
-    ElMessage.info('OpenNet 正在退出...')
+    ElMessage.info('Telnix 正在退出...')
   } catch (e: any) {
     ElMessage.error('退出失败：' + (e?.message || e))
   }
@@ -300,7 +326,7 @@ function onSystemCmd(cmd: string) {
       <div class="brand">
         <div class="brand-logo">ON</div>
         <div class="brand-text">
-          <div class="brand-name">OpenNet</div>
+          <div class="brand-name">Telnix</div>
           <div class="brand-sub">抓包工具</div>
         </div>
       </div>
@@ -327,7 +353,7 @@ function onSystemCmd(cmd: string) {
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="quit">
-                <el-icon><SwitchButton /></el-icon>&nbsp;退出 OpenNet
+                <el-icon><SwitchButton /></el-icon>&nbsp;退出 Telnix
               </el-dropdown-item>
               <el-dropdown-item command="toggle-proxy" divided>
                 <el-icon><component :is="systemProxyOn ? 'CircleClose' : 'Connection'" /></el-icon>&nbsp;{{ systemProxyOn ? '关闭系统代理' : '开启系统代理' }}
@@ -360,7 +386,7 @@ function onSystemCmd(cmd: string) {
           {{ certText }}
         </span>
         <div class="flex-1"></div>
-        <span class="sb-item text-dim">OpenNet · 系统全局代理 + SSL bump</span>
+        <span class="sb-item text-dim">Telnix · 系统全局代理 + SSL bump</span>
       </footer>
     </div>
   </div>

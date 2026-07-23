@@ -19,11 +19,11 @@ export const useCaptureStore = defineStore('capture', () => {
       // 检测后端重启：started_at 变化时清空前端流量缓存，
       // 避免旧缓存的 id 与后端重置后的 id 冲突导致重复/乱序
       if (s.started_at) {
-        const prev = localStorage.getItem('opennet_backend_started_at')
+        const prev = localStorage.getItem('telnix_backend_started_at')
         if (prev && prev !== String(s.started_at)) {
           clearFlowCache()
         }
-        localStorage.setItem('opennet_backend_started_at', String(s.started_at))
+        localStorage.setItem('telnix_backend_started_at', String(s.started_at))
       }
       // 抓包切换保护期：保护期内不覆盖 capturing（避免后端尚未完成状态切换时
       // 把乐观更新的 capturing=true 覆盖回 false，导致"闪一下变回去"）

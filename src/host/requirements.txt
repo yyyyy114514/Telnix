@@ -5,3 +5,10 @@ psutil>=5.9
 cryptography>=42.0
 pyinstaller>=6.0
 brotli>=1.1
+h2>=4.1.0
+
+# 可选依赖：mitmproxy 引擎（~50MB，不强制安装）
+# 安装后在设置页可将代理引擎切换为 mitmproxy 以获得更强的 HTTPS 拦截能力
+# 未安装时代码自动回退到内置线程引擎，不影响正常使用
+# pip install mitmproxy
+mitmproxy>=10.0  # optional

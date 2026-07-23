@@ -13,6 +13,8 @@ const props = defineProps<{
   flowColumns?: string[]
   // 多选工具栏悬浮显示延时（秒），用户滚动列表后隐藏，N 秒不操作再显示。默认 1 秒。
   multiSelectBarDelay?: number
+  // 自动滚动+多选按钮靠右（仅抓包页启用，其他页保持默认左对齐）
+  actionsRight?: boolean
 }>()
 const emit = defineEmits<{
   'ignore-process': [proc: ProcessInfo]
@@ -351,7 +353,7 @@ type ColDef = {
 const COL_DEFS: ColDef[] = [
   { key: 'id', label: '#', width: '60px', always: true, cellClass: 'col-id text-dim', text: (f) => idWithScheme(f) },
   { key: 'status', label: '结果', width: '56px', cellClass: 'col-code', text: (f) => String(f.status_code ?? '...'), statusColor: (f) => statusClass(f.status_code) },
-  { key: 'method', label: '方法', width: '64px', cellClass: 'col-method text-muted', text: (f) => f.method || '' },
+  { key: 'method', label: '方法', width: '72px', cellClass: 'col-method text-muted', text: (f) => f.method || '' },
   { key: 'protocol', label: '协议', width: '54px', cellClass: 'col-proto text-muted', text: (f) => protocolLabel(f) },
   { key: 'host', label: 'Host', width: '1.4fr', always: true, cellClass: 'col-host', text: (f) => f.host || '' },
   { key: 'url', label: 'URL', width: '2.2fr', always: true, cellClass: 'col-url text-muted', text: (f) => f.path || '' },
@@ -360,8 +362,9 @@ const COL_DEFS: ColDef[] = [
   { key: 'proc', label: '进程', width: '1fr', always: true, cellClass: 'col-proc text-muted', text: (f) => f.process_name || '-' },
   { key: 'size', label: '大小', width: '70px', cellClass: 'col-size text-muted', text: (f) => formatSize(f.size) },
   { key: 'duration', label: '耗时', width: '64px', cellClass: 'col-time text-muted', text: (f) => f.duration_ms !== null ? f.duration_ms + 'ms' : '' },
+  { key: 'ip_region', label: 'IP 属地', width: '90px', cellClass: 'col-ip-region text-muted', text: (f) => (f.ip_region && !f.ip_region.startsWith('base64:')) ? f.ip_region : '-' },
 ]
-const COL_ORDER_KEY = 'opennet_col_order'
+const COL_ORDER_KEY = 'telnix_col_order'
 
 function loadColOrder(): string[] {
   const saved: string[] = JSON.parse(localStorage.getItem(COL_ORDER_KEY) || '[]')
@@ -458,10 +461,15 @@ function extractContentType(flow: any): string {
 
 function protocolLabel(flow: any): string {
   const proto = flow.protocol || flow.scheme || 'http'
-  if (proto === 'https') return 'HTTPS'
   if (proto === 'tcp') return 'TCP'
   if (proto === 'udp') return 'UDP'
-  return 'HTTP'
+  if (proto === 'ws') return 'WS'
+  if (proto === 'dns') return 'DNS'
+  // HTTP/HTTPS：附带显示 HTTP 版本（HTTP/2 → HTTPS/2）
+  const ver = flow.http_version || ''
+  const isH2 = ver === 'HTTP/2'
+  if (proto === 'https') return isH2 ? 'HTTPS/2' : 'HTTPS'
+  return isH2 ? 'HTTP/2' : 'HTTP'
 }
 
 function statusClass(code: number | null): string {
@@ -1021,8 +1029,10 @@ const COPY_FIELD_DEFS: { key: string; label: string; field: string }[] = [
   { key: 'process', label: '进程', field: 'process_name' },
   { key: 'size', label: '大小', field: 'size' },
   { key: 'duration', label: '耗时', field: 'duration_ms' },
+  { key: 'remote_ip', label: '对端 IP', field: 'remote_ip' },
+  { key: 'ip_region', label: 'IP 属地', field: 'ip_region' },
 ]
-const COPY_PREF_KEY = 'opennet_copy_fields'
+const COPY_PREF_KEY = 'telnix_copy_fields'
 // 默认复制项：url 和 curl
 function loadCopyFields(): string[] {
   const saved = localStorage.getItem(COPY_PREF_KEY)
@@ -1148,6 +1158,7 @@ onMounted(() => {
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
+      <div v-if="actionsRight" class="flex-1"></div>
       <el-tooltip :content="store.autoScroll ? (store.autoScrollPaused ? `自动滚动：暂停中（${store.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="top">
         <el-button size="small" :type="store.autoScroll ? (store.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="store.autoScroll = !store.autoScroll">
           <el-icon><Bottom /></el-icon>
@@ -1260,6 +1271,7 @@ onMounted(() => {
                 <el-option label="HTTP" value="http" />
                 <el-option label="TCP" value="tcp" />
                 <el-option label="UDP" value="udp" />
+                <el-option label="WS" value="ws" />
               </el-select>
             </div>
             <div class="fp-row">
@@ -1634,7 +1646,7 @@ onMounted(() => {
   padding: 6px 10px;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 8px;
+  border-radius: var(--on-radius-lg);
   box-shadow: 0 4px 16px rgba(0,0,0,0.45);
   font-size: 12px;
 }
@@ -1644,7 +1656,7 @@ onMounted(() => {
   padding-right: 4px;
 }
 .float-bar-enter-active, .float-bar-leave-active {
-  transition: opacity .18s ease, transform .18s ease;
+  transition: opacity .15s ease, transform .15s ease;
 }
 .float-bar-enter-from, .float-bar-leave-to {
   opacity: 0; transform: translateY(-6px);
@@ -1658,7 +1670,7 @@ onMounted(() => {
   padding: 10px 12px;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 8px;
+  border-radius: var(--on-radius-lg);
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   min-width: 220px;
   z-index: 21;
@@ -1669,11 +1681,12 @@ onMounted(() => {
 .filter-bar {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-bottom: 1px solid var(--on-border-light);
+  background: var(--on-bg-elevated);
 }
 .filter-badge {
   display: inline-block;
   width: 6px; height: 6px;
-  border-radius: 50%;
+  border-radius: var(--on-radius-full);
   background: var(--on-accent, #2dd4bf);
   margin-left: 2px;
   vertical-align: middle;
@@ -1686,7 +1699,7 @@ onMounted(() => {
   min-width: 340px;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 8px;
+  border-radius: var(--on-radius-lg);
   box-shadow: 0 6px 24px rgba(0,0,0,0.5);
   font-size: 12.5px;
   overflow: hidden;
@@ -1735,7 +1748,7 @@ onMounted(() => {
 }
 .vertical-tags :deep(.el-select__tags::-webkit-scrollbar-thumb) {
   background: var(--on-border);
-  border-radius: 3px;
+  border-radius: var(--on-radius-sm);
 }
 .vertical-tags :deep(.el-select__tags .el-tag) {
   width: 100%;
@@ -1781,14 +1794,14 @@ onMounted(() => {
 .col-check { display: flex; align-items: center; justify-content: center; }
 .fl-row > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-url { color: var(--on-text-muted); }
-.empty-text { text-align: center; padding: 30px; }
+.empty-text { text-align: center; padding: 30px; color: var(--on-text-dim); }
 
 /* 右键菜单 */
 .ctx-menu {
   position: fixed; z-index: 9999;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 6px;
+  border-radius: var(--on-radius-md);
   padding: 4px 0;
   min-width: 160px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
@@ -1811,7 +1824,7 @@ onMounted(() => {
   /* left/top 由 JS 绑定 submenuPos */
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 6px;
+  border-radius: var(--on-radius-md);
   padding: 4px 0;
   min-width: 160px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);

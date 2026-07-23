@@ -5,15 +5,15 @@ import { api } from '../api/client'
 // 需要同步到 settings.json 的 localStorage key 映射
 // key = localStorage 键名，value = settings.json 中的字段名
 const PREFS_MAP: Record<string, string> = {
-  opennet_theme: 'theme',
-  opennet_list_no_select: 'list_no_select',
-  opennet_nav_order: 'nav_order',
-  opennet_col_order: 'col_order',
-  opennet_copy_fields: 'copy_fields',
-  opennet_cache_threshold: 'cache_threshold',
-  opennet_cache_autoclean: 'cache_autoclean',
-  opennet_auto_scroll: 'auto_scroll',
-  opennet_auto_scroll_delay: 'auto_scroll_delay',
+  telnix_theme: 'theme',
+  telnix_list_no_select: 'list_no_select',
+  telnix_nav_order: 'nav_order',
+  telnix_col_order: 'col_order',
+  telnix_copy_fields: 'copy_fields',
+  telnix_cache_threshold: 'cache_threshold',
+  telnix_cache_autoclean: 'cache_autoclean',
+  telnix_auto_scroll: 'auto_scroll',
+  telnix_auto_scroll_delay: 'auto_scroll_delay',
 }
 
 let syncTimer: number | null = null

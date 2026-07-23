@@ -16,7 +16,7 @@ const router = useRouter()
 const route = useRoute()
 const flows = useFlowsStore()
 
-type GroupBy = 'host' | 'process' | 'content_type' | 'status_code'
+type GroupBy = 'host' | 'process' | 'content_type' | 'status_code' | 'ip_region'
 const groupBy = ref<GroupBy>('host')
 // 请求分析 vs 响应分析：影响右侧详情显示内容
 const analyzeMode = ref<'request' | 'response'>('response')
@@ -182,6 +182,8 @@ function groupKey(f: Flow): string {
       if (code < 500) return '4xx 客户端错误'
       return '5xx 服务器错误'
     }
+    case 'ip_region':
+      return f.ip_region || '(未知属地)'
   }
 }
 
@@ -562,6 +564,7 @@ onMounted(async () => {
         <el-radio-button value="process">按进程</el-radio-button>
         <el-radio-button value="content_type">按 Content-Type</el-radio-button>
         <el-radio-button value="status_code">按状态码</el-radio-button>
+        <el-radio-button value="ip_region">按 IP 属地</el-radio-button>
       </el-radio-group>
       <div class="flex-1"></div>
       <!-- 排序切换（所有视图模式都显示，影响列表分组顺序和图表顺序） -->

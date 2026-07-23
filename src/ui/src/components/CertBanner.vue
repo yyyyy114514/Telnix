@@ -8,7 +8,7 @@ const capture = useCaptureStore()
 async function install() {
   try {
     await ElMessageBox.confirm(
-      '将向系统证书存储安装 OpenNet 根证书以启用 HTTPS 解密（SSL bump）。继续？',
+      '将向系统证书存储安装 Telnix 根证书以启用 HTTPS 解密（SSL bump）。继续？',
       '安装证书',
       { confirmButtonText: '安装', cancelButtonText: '取消', type: 'warning' }
     )

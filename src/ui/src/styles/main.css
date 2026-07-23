@@ -1,7 +1,14 @@
-/* OpenNet 全局样式 - 网络工程师控制台主题（亮/暗双主题） */
+/* Telnix 全局样式 - 网络工程师控制台主题（亮/暗双主题） */
 
 /* ===== 亮色主题（默认） ===== */
 :root {
+  /* 圆角系统（设计 token） */
+  --on-radius-sm: 4px;     /* 小按钮、标签、code */
+  --on-radius-md: 6px;     /* 面板、nav-item、输入框 */
+  --on-radius-lg: 8px;     /* dialog、popup、卡片 */
+  --on-radius-xl: 12px;    /* 大卡片 */
+  --on-radius-full: 9999px;/* 圆形 badge */
+
   /* 颜色系统 */
   --on-bg: #ffffff;
   --on-bg-elevated: #f6f8fa;
@@ -22,6 +29,32 @@
   --on-warn: #9a6700;
   --on-error: #cf222e;
   --on-pending: #6e7681;
+
+  /* 扩展色板（丰富配色） */
+  --on-purple: #8b5cf6;
+  --on-purple-glow: rgba(139, 92, 246, 0.12);
+  --on-pink: #ec4899;
+  --on-pink-glow: rgba(236, 72, 153, 0.12);
+  --on-cyan: #06b6d4;
+  --on-cyan-glow: rgba(6, 182, 212, 0.12);
+  --on-indigo: #6366f1;
+  --on-indigo-glow: rgba(99, 102, 241, 0.12);
+  --on-amber: #f59e0b;
+  --on-amber-glow: rgba(245, 158, 11, 0.12);
+  --on-emerald: #10b981;
+  --on-emerald-glow: rgba(16, 185, 129, 0.12);
+
+  /* 渐变 */
+  --on-gradient-accent: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%);
+  --on-gradient-purple: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%);
+  --on-gradient-blue: linear-gradient(135deg, #0969da 0%, #4ca5ff 100%);
+  --on-gradient-warm: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+
+  /* 阴影 */
+  --on-shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+  --on-shadow-md: 0 4px 12px rgba(0,0,0,0.10);
+  --on-shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
+  --on-shadow-accent: 0 2px 8px rgba(13, 148, 136, 0.25);
 
   /* 断点色 */
   --on-bp-request: #9a6700;
@@ -94,6 +127,32 @@ html.dark {
   --on-warn: #e3b341;
   --on-error: #ff6b61;
   --on-pending: #9ba6b3;
+
+  /* 扩展色板（暗色丰富配色） */
+  --on-purple: #a78bfa;
+  --on-purple-glow: rgba(167, 139, 250, 0.15);
+  --on-pink: #f472b6;
+  --on-pink-glow: rgba(244, 114, 182, 0.15);
+  --on-cyan: #22d3ee;
+  --on-cyan-glow: rgba(34, 211, 238, 0.15);
+  --on-indigo: #818cf8;
+  --on-indigo-glow: rgba(129, 140, 248, 0.15);
+  --on-amber: #fbbf24;
+  --on-amber-glow: rgba(251, 191, 36, 0.15);
+  --on-emerald: #34d399;
+  --on-emerald-glow: rgba(52, 211, 153, 0.15);
+
+  /* 渐变 */
+  --on-gradient-accent: linear-gradient(135deg, #0d9488 0%, #2dd4bf 100%);
+  --on-gradient-purple: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%);
+  --on-gradient-blue: linear-gradient(135deg, #0969da 0%, #4ca5ff 100%);
+  --on-gradient-warm: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+
+  /* 阴影 */
+  --on-shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+  --on-shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+  --on-shadow-lg: 0 8px 24px rgba(0,0,0,0.5);
+  --on-shadow-accent: 0 2px 8px rgba(45, 212, 191, 0.3);
 
   /* 断点色 */
   --on-bp-request: #e3b341;
@@ -217,7 +276,7 @@ html, body, #app {
 code {
   background: var(--on-code-bg);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--on-radius-sm);
   font-size: 0.92em;
   font-family: var(--on-font-mono);
   color: var(--on-text);
@@ -270,7 +329,7 @@ pre code {
 .panel {
   background: var(--on-bg-elevated);
   border: 1px solid var(--on-border-light);
-  border-radius: 6px;
+  border-radius: var(--on-radius-md);
 }
 
 /* 高亮代码块 */
@@ -292,26 +351,132 @@ pre code {
 .el-table__body tr.current-row > td { background-color: var(--on-accent-glow) !important; }
 .el-table th.el-table__cell { background-color: var(--on-bg-elevated) !important; color: var(--on-text-muted); font-weight: 600; }
 
-.el-button--primary { --el-button-bg-color: var(--on-accent-dim); --el-button-border-color: var(--on-accent-dim); --el-button-hover-bg-color: var(--on-accent); --el-button-hover-border-color: var(--on-accent); }
+/* 按钮：渐变 + 阴影 + 过渡 */
+.el-button--primary {
+  --el-button-bg-color: var(--on-accent-dim);
+  --el-button-border-color: var(--on-accent-dim);
+  --el-button-hover-bg-color: var(--on-accent);
+  --el-button-hover-border-color: var(--on-accent);
+  box-shadow: var(--on-shadow-accent);
+  transition: all .2s ease;
+}
+.el-button--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(13, 148, 136, 0.35);
+}
+.el-button--primary:active { transform: translateY(0); }
+.el-button--success {
+  box-shadow: 0 2px 8px rgba(26, 127, 55, 0.2);
+  transition: all .2s ease;
+}
+.el-button--success:hover { transform: translateY(-1px); }
+.el-button--warning {
+  box-shadow: 0 2px 8px rgba(154, 103, 0, 0.2);
+  transition: all .2s ease;
+}
+.el-button--warning:hover { transform: translateY(-1px); }
+.el-button--danger {
+  box-shadow: 0 2px 8px rgba(207, 34, 46, 0.2);
+  transition: all .2s ease;
+}
+.el-button--danger:hover { transform: translateY(-1px); }
+.el-button:active { transform: translateY(0); }
+/* 默认按钮 hover 增强 */
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info):hover {
+  border-color: var(--on-accent-dim);
+  color: var(--on-accent);
+  background-color: var(--on-accent-glow);
+}
 
-.el-tabs__item { color: var(--on-text-muted); font-size: 12.5px; height: 34px; }
-.el-tabs__item.is-active { color: var(--on-accent); }
-.el-tabs__active-bar { background-color: var(--on-accent); }
+/* 标签页 */
+.el-tabs__item { color: var(--on-text-muted); font-size: 12.5px; height: 34px; transition: color .15s; }
+.el-tabs__item.is-active { color: var(--on-accent); font-weight: 600; }
+.el-tabs__item:hover { color: var(--on-accent-dim); }
+.el-tabs__active-bar { background-color: var(--on-accent); height: 2px; border-radius: 1px; }
 .el-tabs__nav-wrap::after { background-color: var(--on-border-light); }
 
+/* 输入框 */
 .el-input__wrapper, .el-select .el-input__wrapper, .el-textarea__inner {
   background-color: var(--on-bg) !important;
   box-shadow: 0 0 0 1px var(--on-border) inset !important;
+  border-radius: var(--on-radius-md) !important;
+  transition: box-shadow .15s !important;
 }
-.el-input__wrapper.is-focus, .el-textarea__inner:focus { box-shadow: 0 0 0 1px var(--on-accent) inset !important; }
+.el-input__wrapper.is-focus, .el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--on-accent) inset, 0 0 0 3px var(--on-accent-glow) inset !important;
+}
 
-.el-dialog { background: var(--on-bg-elevated) !important; border: 1px solid var(--on-border); border-radius: 8px; }
+/* 对话框 */
+.el-dialog {
+  background: var(--on-bg-elevated) !important;
+  border: 1px solid var(--on-border);
+  border-radius: var(--on-radius-lg);
+  box-shadow: var(--on-shadow-lg) !important;
+}
 .el-dialog__title { color: var(--on-text); }
+.el-dialog__header { border-bottom: 1px solid var(--on-border-light); }
 
-.el-switch.is-checked .el-switch__core { background-color: var(--on-accent-dim) !important; border-color: var(--on-accent-dim) !important; }
+/* 开关 */
+.el-switch.is-checked .el-switch__core {
+  background-color: var(--on-accent-dim) !important;
+  border-color: var(--on-accent-dim) !important;
+}
+
+/* Tag 样式增强 */
+.el-tag {
+  border-radius: var(--on-radius-sm);
+  font-weight: 500;
+  transition: all .15s;
+}
+.el-tag--small { font-size: 11px; }
+
+/* Tooltip */
+.el-popper.is-dark {
+  background: var(--on-bg-elevated) !important;
+  border: 1px solid var(--on-border) !important;
+  color: var(--on-text) !important;
+  box-shadow: var(--on-shadow-md) !important;
+  border-radius: var(--on-radius-md) !important;
+}
+.el-popper.is-dark .el-popper__arrow::before {
+  background: var(--on-bg-elevated) !important;
+  border-color: var(--on-border) !important;
+}
+
+/* 消息提示增强 */
+.el-message {
+  border-radius: var(--on-radius-md) !important;
+  box-shadow: var(--on-shadow-md) !important;
+  backdrop-filter: blur(8px);
+}
 
 /* 拖拽分隔条 */
 .splitter-v { cursor: col-resize; width: 4px; background: var(--on-border-light); transition: background .15s; flex-shrink: 0; }
 .splitter-v:hover, .splitter-v.active { background: var(--on-accent-dim); }
 .splitter-h { cursor: row-resize; height: 4px; background: var(--on-border-light); transition: background .15s; flex-shrink: 0; }
 .splitter-h:hover, .splitter-h.active { background: var(--on-accent-dim); }
+
+/* 全局过渡 */
+.el-button, .el-tag, .el-tabs__item, .el-input__wrapper, .el-select .el-input__wrapper {
+  transition: all .2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 选中行渐变左边框 */
+.fl-row.selected, .wl-row.selected, .rl-row.selected {
+  background: linear-gradient(90deg, var(--on-accent-glow) 0%, transparent 100%) !important;
+  border-left: 2px solid var(--on-accent);
+}
+
+/* 空状态 */
+.empty-detail, .empty-text {
+  color: var(--on-text-dim);
+  user-select: none;
+}
+
+/* 卡片样式 */
+.card {
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border-light);
+  border-radius: var(--on-radius-lg);
+  box-shadow: var(--on-shadow-sm);
+}

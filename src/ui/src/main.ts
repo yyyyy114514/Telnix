@@ -6,6 +6,8 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import 'highlight.js/styles/atom-one-dark.css'
 import hljs from 'highlight.js/lib/common'
 import hljsVuePlugin from '@highlightjs/vue-plugin'
+// Monaco Editor worker 配置：必须在 monaco-editor 导入之前执行
+import './monaco-setup'
 import App from './App.vue'
 import router from './router'
 import ClashIcon from './components/ClashIcon.vue'
@@ -14,7 +16,7 @@ import { vCodeAssist } from './directives/codeAssist'
 import { initPrefsSync } from './stores/prefs'
 
 // 主题切换：从 localStorage 读取，默认 dark（保留原深色体验）
-const savedTheme = localStorage.getItem('opennet_theme') || 'dark'
+const savedTheme = localStorage.getItem('telnix_theme') || 'dark'
 if (savedTheme === 'dark') {
   document.documentElement.classList.add('dark')
 } else {
@@ -23,7 +25,7 @@ if (savedTheme === 'dark') {
 
 // 流量列表禁选文字：从 localStorage 读取，默认开启
 // 设置页可调，开启后双击包不会选中文字（详细信息仍可选）
-if (localStorage.getItem('opennet_list_no_select') !== 'false') {
+if (localStorage.getItem('telnix_list_no_select') !== 'false') {
   document.documentElement.classList.add('list-no-select')
 }
 

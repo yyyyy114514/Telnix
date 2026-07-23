@@ -8,9 +8,11 @@ import LogView from '../views/LogView.vue'
 import CodecView from '../views/CodecView.vue'
 import AnalyzeView from '../views/AnalyzeView.vue'
 import RawCaptureView from '../views/RawCaptureView.vue'
+import WebSocketView from '../views/WebSocketView.vue'
 import SearchView from '../views/SearchView.vue'
 import SendView from '../views/SendView.vue'
 import ClashView from '../views/ClashView.vue'
+import CoolUIView from '../views/CoolUIView.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -24,9 +26,11 @@ const router = createRouter({
     { path: '/logs', name: 'logs', component: LogView },
     { path: '/codec', name: 'codec', component: CodecView },
     { path: '/raw', name: 'raw', component: RawCaptureView },
+    { path: '/ws', name: 'ws', component: WebSocketView },
     { path: '/search', name: 'search', component: SearchView },
     { path: '/send', name: 'send', component: SendView },
     { path: '/clash', name: 'clash', component: ClashView },
+    { path: '/cool', name: 'cool', component: CoolUIView },
   ],
 })
 

@@ -1,4 +1,4 @@
-# OpenNet Build Script
+# Telnix Build Script
 # Usage: .\build.ps1
 
 $projectPath = (Resolve-Path $PSScriptRoot).Path
@@ -6,7 +6,7 @@ $uiPath = Join-Path $projectPath 'src\ui'
 $distPath = Join-Path $uiPath 'dist'
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "OpenNet Build Script" -ForegroundColor Cyan
+Write-Host "Telnix Build Script" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -21,7 +21,7 @@ Write-Host "[1/4] Killing stale processes..." -ForegroundColor Yellow
 
 $targets = Get-WmiObject Win32_Process | Where-Object {
     ($_.Name -match 'node\.exe|python\.exe') -and
-    ($_.CommandLine -like "*$projectPath*" -or $_.CommandLine -like "*opennet*")
+    ($_.CommandLine -like "*$projectPath*" -or $_.CommandLine -like "*telnix*")
 }
 
 if ($targets) {

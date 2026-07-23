@@ -30,7 +30,7 @@ const sending = ref(false)
 const response = ref<any>(null)
 
 // ---------- 表单状态持久化（切换页面不丢失） ----------
-const FORM_KEY = 'opennet_send_form'
+const FORM_KEY = 'telnix_send_form'
 let formPersistTimer: number | null = null
 
 function loadForm() {
@@ -80,13 +80,13 @@ function clearAll() {
 
 // 历史记录
 const history = ref<HistoryItem[]>([])
-const HISTORY_KEY = 'opennet_send_history'
+const HISTORY_KEY = 'telnix_send_history'
 const HISTORY_MAX = 50
 let historyIdCounter = 1
 
 // 收藏的请求模板
 const templates = ref<any[]>([])
-const TEMPLATE_KEY = 'opennet_send_templates'
+const TEMPLATE_KEY = 'telnix_send_templates'
 
 function loadHistory() {
   try {
@@ -433,7 +433,7 @@ function formatTime(ts: number): string {
 }
 
 // ---------- 底部历史/模板区域可拖动改变高度 ----------
-const BOTTOM_HEIGHT_KEY = 'opennet_send_bottom_height'
+const BOTTOM_HEIGHT_KEY = 'telnix_send_bottom_height'
 const bottomHeight = ref(220)  // 默认 220px
 const isResizing = ref(false)
 let resizeStartY = 0

@@ -98,7 +98,7 @@ async function startAnalyze() {
     waitMsg?.close()
     const msg = e?.message || String(e)
     if (msg === 'not found') {
-      ElMessage.error('后端未找到 AI 分析接口，请重启后端（python -m opennet）后再试')
+      ElMessage.error('后端未找到 AI 分析接口，请重启后端（python -m telnix）后再试')
     } else {
       ElMessage.error('分析失败：' + msg)
     }
@@ -122,7 +122,7 @@ async function startFreeChat() {
   } catch (e: any) {
     const msg = e?.message || String(e)
     if (msg === 'not found') {
-      ElMessage.error('后端未找到 AI 分析接口，请重启后端（python -m opennet）后再试')
+      ElMessage.error('后端未找到 AI 分析接口，请重启后端（python -m telnix）后再试')
     } else {
       ElMessage.error('创建失败：' + msg)
     }

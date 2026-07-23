@@ -52,6 +52,12 @@ export interface Flow {
   raw_data?: string | null // base64: 前缀的原始字节（TCP/UDP）
   src_port?: number | null
   dst_port?: number | null
+  remote_ip?: string | null // 对端 IP（IP 属地分析）
+  ip_region?: string | null // IP 属地（格式化后的字符串）
+  cert_info?: string | null // TLS 证书信息 JSON 字符串
+  tags?: string // 逗号分隔标签
+  tag_note?: string // 标签备注
+  http_version?: string // HTTP/1.1 | HTTP/2
 }
 
 /** 流量列表结果 */
@@ -80,11 +86,13 @@ export interface AutoReplyRule {
   enabled: boolean
   match_mode: string // wildcard | exact | regex
   pattern: string
-  action: string // mock | mock_request | modify_request | modify_response
+  // mock | mock_request | modify_request | modify_response | script
+  action: string
   mock_status?: number
   mock_headers?: string | Record<string, string>
   mock_body?: string
-  modify_rules?: ModifyRule[]
+  // modify_* 动作为 ModifyRule[]；script 动作为 Python 脚本源码字符串
+  modify_rules?: ModifyRule[] | string
   note?: string
   // mock_request：写死请求（用预设请求转发到目标服务器，返回真实响应）
   mock_method?: string
@@ -163,6 +171,23 @@ export interface FlowStats {
   by_method: { method: string; c: number }[]
   by_status: { status_code: number; c: number }[]
   by_protocol: { protocol: string; c: number }[]
+}
+
+/** 多维聚合统计（CoolUI 仪表盘用） */
+export interface FlowOverview {
+  total: number
+  total_bytes: number
+  incoming_bytes: number
+  outgoing_bytes: number
+  success_count: number
+  error_count: number
+  avg_duration_ms: number
+  by_protocol: { key: string; count: number }[]
+  by_method: { key: string; count: number }[]
+  by_status_range: { key: string; count: number }[]
+  by_host: { key: string; count: number; bytes: number }[]
+  by_process: { key: string; count: number; bytes: number }[]
+  by_ip_region: { key: string; count: number }[]
 }
 
 /** Hex dump 结果 */
@@ -295,6 +320,8 @@ export const api = {
   // 全量分组统计（不分页，用于统计图显示所有数据比例）
   getFlowsStats: (groupBy: string = 'host', host?: string, process?: string) =>
     get('/flows/stats', { group_by: groupBy, host, process }),
+  // 多维聚合统计（CoolUI 仪表盘用，一次返回所有维度）
+  getFlowsOverview: () => get<FlowOverview>('/flows/overview'),
   clearAllFlows: (mode: string = 'all', beforeId?: number) =>
     post('/flows/clear', { mode, before_id: beforeId }),
 
@@ -308,6 +335,21 @@ export const api = {
   getPendingAdminActions: () => get<{ items: any[] }>('/system/pending-admin-actions'),
   respondAdminRequest: (rid: string, response: 'accept' | 'reject') =>
     post(`/system/admin-request/${rid}/respond`, { response }),
+
+  // 可选依赖安装（mitmproxy 等）
+  installDep: (pkg: string) => post('/system/install-dep', { package: pkg }),
+  installDepStatus: () => get<{
+    status: 'idle' | 'running' | 'success' | 'failed'
+    package?: string
+    started_at?: number | null
+    finished_at?: number | null
+    log?: string
+    return_code?: number | null
+    mitmproxy_available?: boolean
+    mitmproxy_version?: string | null
+    note?: string
+  }>('/system/install-dep/status'),
+  installDepCancel: () => post('/system/install-dep/cancel'),
 
   // AI
   aiAnalyze: (body: { flow_ids: number[] }) =>

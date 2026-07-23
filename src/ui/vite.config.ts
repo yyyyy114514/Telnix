@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import path from 'path'
 
 // Vite 配置：开发代理 /api 到后端 FastAPI
 export default defineConfig({
@@ -12,6 +13,10 @@ export default defineConfig({
       // element-plus/es/ 下成百上千个 .mjs 组件文件（在 Windows 上间歇性卡死）。
       // 产物会稍大，但构建可稳定完成。完整打包已含所有组件和 locale，API 完全一致。
       'element-plus': 'element-plus/dist/index.full.mjs',
+      // Monaco Python 语言定义：绕过 monaco-editor 的 exports 字段
+      //（exports 把 `./*` 映射到 `./esm/vs/*.js`，导致 Rollup 无法解析子路径）
+      'monaco-editor/esm/vs/languages/definitions/python/python.js':
+        path.resolve(__dirname, 'node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js'),
     },
   },
   server: {

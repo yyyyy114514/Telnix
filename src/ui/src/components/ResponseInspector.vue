@@ -81,8 +81,9 @@ const cacheRows = computed(() => {
 })
 
 const tabs = computed(() => {
-  // TCP/UDP 流量没有 HTTP headers/json/preview，只显示 Hex
-  if (props.flow.protocol === 'tcp' || props.flow.protocol === 'udp') {
+  // TCP/UDP/WS 流量没有 HTTP headers/json/preview，只显示 Hex
+  if (props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
+      || props.flow.protocol === 'ws') {
     return [{ name: 'hex', label: 'Hex' }]
   }
   const list = [
@@ -97,14 +98,30 @@ const tabs = computed(() => {
   return list
 })
 
-// TCP/UDP 流量默认选中 Hex（覆盖原有 autoSwitchPreview 逻辑）
+// 选项卡自动切换逻辑：
+// - WS 流量：默认不选任何 tab（需求4）
+// - autoSwitch 开启时：HTTP→Preview，TCP/UDP→Hex
+// - autoSwitch 关闭时：保持当前 tab，如果当前 tab 在新流量中不存在则不选
 watch(
   () => props.flow.id,
   () => {
-    if (props.flow.protocol === 'tcp' || props.flow.protocol === 'udp') {
+    const proto = props.flow.protocol
+    // WS/TCP/UDP 流量默认选中 Hex
+    if (proto === 'ws' || proto === 'tcp' || proto === 'udp') {
       activeTab.value = 'hex'
-    } else if (props.autoSwitchPreview !== false) {
+      return
+    }
+    // HTTP 流量
+    if (props.autoSwitchPreview !== false) {
       activeTab.value = 'preview'
+    } else {
+      // 保持当前 tab，如果当前 tab 不在可用列表中则不选
+      const availableTabs = ['preview', 'headers', 'json', 'raw', 'hex']
+      if (props.enabledTabs.includes('cache')) availableTabs.push('cache')
+      if (props.enabledTabs.includes('xml')) availableTabs.push('xml')
+      if (!availableTabs.includes(activeTab.value)) {
+        activeTab.value = ''
+      }
     }
   }
 )
@@ -133,7 +150,8 @@ const statusClass = computed(() => {
 })
 
 // TCP/UDP 流量没有 HTTP headers/json/preview
-const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp')
+const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
+  || props.flow.protocol === 'ws')
 </script>
 
 <template>

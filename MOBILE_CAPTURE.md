@@ -1,6 +1,6 @@
 # 手机抓包教程（安卓）
 
-OpenNet 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charles 相同。
+Telnix 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charles 相同。
 不依赖 VPNService，需要手机配 WiFi 代理指向电脑。
 
 > 适用：HTTP/HTTPS 抓包。TCP/UDP/SSH 等非代理协议不在此方案覆盖范围。
@@ -10,7 +10,7 @@ OpenNet 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charle
 ## 准备工作
 
 1. 电脑和手机连同一 WiFi
-2. 电脑已启动 OpenNet，且 HTTPS 根证书已安装（设置页「HTTPS 证书」段显示已安装）
+2. 电脑已启动 Telnix，且 HTTPS 根证书已安装（设置页「HTTPS 证书」段显示已安装）
 3. 手机和电脑能互相 ping 通（部分公共 WiFi 隔离客户端，需用热点）
 
 ## 步骤 1：开启局域网监听
@@ -19,7 +19,7 @@ OpenNet 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charle
 
 开关会写 `proxy_listen_host=0.0.0.0`，需要**重启后端**生效：
 - 侧边栏底部点「重启服务」，或
-- CLI：`python -m opennet.cli system restart`
+- CLI：`python -m Telnix.cli system restart`
 
 > 默认 127.0.0.1 只允许本机连，开启后手机才能连上代理。
 
@@ -28,14 +28,14 @@ OpenNet 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charle
 Windows 防火墙默认会拦外部连接。以管理员身份执行：
 
 ```powershell
-python -m opennet.cli system firewall-allow
+python -m Telnix.cli system firewall-allow
 ```
 
 会添加两条入站规则：
-- `OpenNet-Proxy-8888`（代理端口 8888）
-- `OpenNet-API-18901`（API 端口 18901，证书下载用）
+- `Telnix-Proxy-8888`（代理端口 8888）
+- `Telnix-API-18901`（API 端口 18901，证书下载用）
 
-查询状态：`python -m opennet.cli system firewall-status`
+查询状态：`python -m Telnix.cli system firewall-status`
 
 ## 步骤 3：手机配 WiFi 代理
 
@@ -45,14 +45,14 @@ python -m opennet.cli system firewall-allow
 4. 端口：`8888`
 5. 保存
 
-验证：手机浏览器访问 `http://example.com`，OpenNet 抓包页能看到流量，说明代理通了。
+验证：手机浏览器访问 `http://example.com`，Telnix 抓包页能看到流量，说明代理通了。
 
 ## 步骤 4：下载并安装根证书
 
 设置页 →「手机抓包（安卓）」→ 点「手机抓包向导」按钮 → 弹窗里有二维码和 URL。
 
 两种方式下载证书到手机：
-- **扫码**：手机浏览器扫码，直接下载 `opennet_root.pem`
+- **扫码**：手机浏览器扫码，直接下载 `Telnix_root.pem`
 - **手动访问**：手机浏览器打开 `http://电脑IP:18901/api/cert/root.pem`
 
 安装证书（不同品牌路径略有差异）：
@@ -63,7 +63,7 @@ python -m opennet.cli system firewall-allow
 
 ## 步骤 5：开始抓包
 
-1. OpenNet 抓包页点「开始」
+1. Telnix 抓包页点「开始」
 2. 手机操作目标 App
 3. 抓包页可看到 HTTPS 解密后的明文请求/响应
 
@@ -82,9 +82,9 @@ Android 7.0（API 24）开始，App 默认只信任系统证书，不再信任�
 
 ```bash
 # 1. 把证书转为系统证书格式（文件名是证书 hash）
-openssl x509 -inform PEM -subject_hash_old -in opennet_root.pem | head -1
+openssl x509 -inform PEM -subject_hash_old -in Telnix_root.pem | head -1
 # 假设输出 c8750f0d
-cp opennet_root.pem c8750f0d.0
+cp Telnix_root.pem c8750f0d.0
 
 # 2. adb push 到临时目录
 adb push c8750f0d.0 /sdcard/
@@ -135,19 +135,19 @@ reboot
 ### 代理通了但 HTTPS 抓不到
 
 1. 确认根证书已下载并安装
-2. 确认 OpenNet 设置页显示「根证书已安装」
+2. 确认 Telnix 设置页显示「根证书已安装」
 3. 安卓 7+ 大概率是系统证书问题，参考上面的方案 A/B/C
 
 ### App 报「网络连接失败」但 HTTP 能抓
 
-App 可能开启了证书 pinning（如银行、支付宝、微信）。这种 App 拒绝任何中间人证书，OpenNet 无法解密。
+App 可能开启了证书 pinning（如银行、支付宝、微信）。这种 App 拒绝任何中间人证书，Telnix 无法解密。
 只能：
 - 抓 HTTP 明文部分（如果有）
 - 用 Frida 等工具绕过 pinning（超出本教程范围）
 
 ### 抓到自己电脑的包
 
-把 OpenNet 自身的进程加入忽略列表，避免循环抓包：
+把 Telnix 自身的进程加入忽略列表，避免循环抓包：
 - 设置页 →「忽略规则」→ 添加进程名 `python.exe`、`Trae Solo CN.exe` 等
 
 ---

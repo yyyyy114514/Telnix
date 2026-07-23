@@ -21,6 +21,8 @@ const flows = ref<Flow[]>([])
 const selectedId = ref<number | null>(null)
 const selectedHex = ref('')
 const hexField = ref<'raw_data' | 'request_body' | 'response_body'>('raw_data')
+// 当前已加载的最大 flow id，用于增量轮询
+const maxFlowId = ref(0)
 // 安装 pydivert 状态
 const installingPydivert = ref(false)
 // 管理员重启中
@@ -540,6 +542,49 @@ async function loadFlows() {
     const all = [...(res.flows || []), ...(res2.flows || [])]
     all.sort((a, b) => b.id - a.id)
     flows.value = all.slice(0, 200)
+    // 列表已降序，第一条就是最大 id
+    maxFlowId.value = flows.value[0]?.id || 0
+  } catch { /* ignore */ }
+}
+
+// 增量轮询：用 since_id 分别拉取 tcp/udp 新流量，合并去重后插入顶部
+async function pollNewFlows() {
+  if (!maxFlowId.value) {
+    // 无历史，先全量加载
+    await loadFlows()
+    return
+  }
+  let sid = capture.status.session_id
+  if (!sid) {
+    try {
+      const sessions: any = await api.getSessions()
+      const list = sessions?.sessions || sessions || []
+      if (Array.isArray(list) && list.length) {
+        sid = list[0].id
+      }
+    } catch { /* ignore */ }
+  }
+  if (!sid) return
+  try {
+    const [resTcp, resUdp] = await Promise.all([
+      api.getFlows(sid, { since_id: maxFlowId.value, limit: 200, protocol: 'tcp' }),
+      api.getFlows(sid, { since_id: maxFlowId.value, limit: 200, protocol: 'udp' }),
+    ])
+    const list: Flow[] = [...(resTcp.flows || []), ...(resUdp.flows || [])]
+    if (!list.length) return
+    // 去重：过滤掉列表中已存在的 id
+    const existIds = new Set(flows.value.map(f => f.id))
+    const deduped = list.filter(f => !existIds.has(f.id))
+    if (!deduped.length) {
+      const newMax = list.reduce((m, f) => f.id > m ? f.id : m, 0)
+      if (newMax > maxFlowId.value) maxFlowId.value = newMax
+      return
+    }
+    // 后端返回按 id DESC，合并后再排一次保证降序
+    deduped.sort((a, b) => b.id - a.id)
+    flows.value = [...deduped, ...flows.value]
+    const newMax = deduped[0].id
+    if (newMax > maxFlowId.value) maxFlowId.value = newMax
   } catch { /* ignore */ }
 }
 
@@ -576,7 +621,7 @@ async function onToggle() {
   }
 }
 
-// 以管理员身份重启 OpenNet
+// 以管理员身份重启 Telnix
 async function restartAsAdmin() {
   restartingAsAdmin.value = true
   try {
@@ -662,9 +707,10 @@ function formatTime(ts: string): string {
 onMounted(() => {
   loadStatus()
   loadFlows()
+  // 增量轮询：用 since_id 只拉新流量，降低流量大时的开销
   pollTimer = window.setInterval(() => {
     loadStatus()
-    if (rawStatus.value.running) loadFlows()
+    if (rawStatus.value.running) pollNewFlows()
   }, 2000)
   document.addEventListener('click', onGlobalClick)
 })
@@ -728,7 +774,7 @@ onUnmounted(() => {
     <!-- 非管理员警告条 -->
     <div v-if="!rawStatus.is_admin" class="raw-warn-bar">
       <el-icon><WarningFilled /></el-icon>
-      <span>TCP/UDP 抓包需要管理员权限。当前非管理员运行，点击右侧「管理员重启」以管理员身份重启 OpenNet。</span>
+      <span>TCP/UDP 抓包需要管理员权限。当前非管理员运行，点击右侧「管理员重启」以管理员身份重启 Telnix。</span>
     </div>
     <!-- pydivert 未装警告条 -->
     <div v-else-if="!rawStatus.pydivert_installed" class="raw-warn-bar">
@@ -1042,7 +1088,7 @@ onUnmounted(() => {
 <style scoped>
 .raw-view-page { background: var(--on-bg); position: relative; }
 .raw-toolbar {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; border-bottom: 1px solid var(--on-border-light);
   background: var(--on-bg-elevated);
 }
@@ -1080,7 +1126,7 @@ onUnmounted(() => {
 .rl-row.checked { background: rgba(45, 212, 191, 0.08); }
 .rl-row > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-check { display: flex; align-items: center; justify-content: center; }
-.empty-text { text-align: center; padding: 30px; }
+.empty-text { text-align: center; padding: 30px; color: var(--on-text-dim); }
 .raw-detail-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .empty-detail {
   flex: 1; display: flex; flex-direction: column;
@@ -1106,7 +1152,7 @@ onUnmounted(() => {
 .filter-badge {
   display: inline-block;
   width: 6px; height: 6px;
-  border-radius: 50%;
+  border-radius: var(--on-radius-full);
   background: var(--on-accent, #2dd4bf);
   margin-left: 2px;
   vertical-align: middle;
@@ -1119,7 +1165,7 @@ onUnmounted(() => {
   min-width: 340px;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 8px;
+  border-radius: var(--on-radius-lg);
   box-shadow: 0 6px 24px rgba(0,0,0,0.5);
   font-size: 12.5px;
   overflow: hidden;
@@ -1178,7 +1224,7 @@ onUnmounted(() => {
 }
 .vertical-tags :deep(.el-select__tags::-webkit-scrollbar-thumb) {
   background: var(--on-border);
-  border-radius: 3px;
+  border-radius: var(--on-radius-sm);
 }
 .vertical-tags :deep(.el-select__tags .el-tag) {
   width: 100%;
@@ -1206,7 +1252,7 @@ onUnmounted(() => {
   padding: 6px 10px;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 8px;
+  border-radius: var(--on-radius-lg);
   box-shadow: 0 4px 16px rgba(0,0,0,0.45);
   font-size: 12px;
 }
@@ -1216,7 +1262,7 @@ onUnmounted(() => {
   padding-right: 4px;
 }
 .float-bar-enter-active, .float-bar-leave-active {
-  transition: opacity .18s ease, transform .18s ease;
+  transition: opacity .15s ease, transform .15s ease;
 }
 .float-bar-enter-from, .float-bar-leave-to {
   opacity: 0; transform: translateY(-6px);
@@ -1230,7 +1276,7 @@ onUnmounted(() => {
   padding: 10px 12px;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 8px;
+  border-radius: var(--on-radius-lg);
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   min-width: 220px;
   z-index: 21;
@@ -1243,7 +1289,7 @@ onUnmounted(() => {
   position: fixed; z-index: 9999;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 6px;
+  border-radius: var(--on-radius-md);
   padding: 4px 0;
   min-width: 160px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
@@ -1264,7 +1310,7 @@ onUnmounted(() => {
   position: absolute; left: 100%; top: 0;
   background: var(--on-bg-elevated, #1e1e2e);
   border: 1px solid var(--on-border, #333344);
-  border-radius: 6px;
+  border-radius: var(--on-radius-md);
   padding: 4px 0;
   min-width: 140px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);

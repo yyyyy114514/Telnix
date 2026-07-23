@@ -2,9 +2,31 @@ import { defineStore } from 'pinia'
 import { ref, shallowRef, computed, triggerRef } from 'vue'
 import { api, type Flow } from '../api/client'
 
-const CACHE_KEY = 'opennet_flows_cache'
-const CACHE_THRESHOLD_KEY = 'opennet_cache_threshold'
-const CACHE_AUTOCLEAN_KEY = 'opennet_cache_autoclean'
+// SSE 推送：替代 500ms 轮询，新 flow 入库后立即推送，UI 延迟 <50ms
+// EventSource 自动重连，无需手动管理。后端 /flows/stream 推送 lite 字段。
+let sseSource: EventSource | null = null
+
+const CACHE_KEY = 'telnix_flows_cache'
+const CACHE_THRESHOLD_KEY = 'telnix_cache_threshold'
+const CACHE_AUTOCLEAN_KEY = 'telnix_cache_autoclean'
+
+// 性能优化：缓存时只保留 lite 字段，去掉大 body（request_body/response_body/
+// request_headers/response_headers/raw_data），减少 localStorage 序列化体积和耗时。
+// 选中详情时会单独 GET /flows/{id} 补齐，不影响功能。
+const CACHE_LITE_FIELDS: (keyof Flow)[] = [
+  'id', 'session_id', 'timestamp', 'pid', 'process_name', 'method', 'url',
+  'scheme', 'host', 'path', 'status_code', 'duration_ms', 'size',
+  'breakpoint_status', 'protocol', 'src_port', 'dst_port', 'remote_ip',
+  'ip_region', 'tags', 'tag_note', 'http_version',
+]
+
+function toLiteFlow(f: Flow): Partial<Flow> {
+  const lite: any = {}
+  for (const k of CACHE_LITE_FIELDS) {
+    lite[k] = (f as any)[k]
+  }
+  return lite
+}
 
 /** 计算 localStorage 中流量缓存的大小（字节） */
 export function getCacheSize(): number {
@@ -21,7 +43,7 @@ export function getCacheSize(): number {
 export function clearFlowCache() {
   localStorage.removeItem(CACHE_KEY)
   // 通知 flows store 清空内存中的列表（避免循环依赖，用事件解耦）
-  window.dispatchEvent(new CustomEvent('opennet:flows-cache-cleared'))
+  window.dispatchEvent(new CustomEvent('telnix:flows-cache-cleared'))
 }
 
 /** 自动清理：超过阈值时删除最早的流量 */
@@ -91,20 +113,20 @@ export const useFlowsStore = defineStore('flows', () => {
   const filterProtocols = ref<string[]>([])
 
   // 自动滚动（从 localStorage 恢复，默认开启，延迟默认 10 秒）
-  const autoScroll = ref(localStorage.getItem('opennet_auto_scroll') !== 'false')
-  const autoScrollDelay = ref(Number(localStorage.getItem('opennet_auto_scroll_delay')) || 10)
+  const autoScroll = ref(localStorage.getItem('telnix_auto_scroll') !== 'false')
+  const autoScrollDelay = ref(Number(localStorage.getItem('telnix_auto_scroll_delay')) || 10)
   const autoScrollPaused = ref(false) // 用户滚动时暂停
 
   // 自动滚动设置持久化
   function persistAutoScroll() {
-    localStorage.setItem('opennet_auto_scroll', autoScroll.value ? 'true' : 'false')
-    localStorage.setItem('opennet_auto_scroll_delay', String(autoScrollDelay.value))
+    localStorage.setItem('telnix_auto_scroll', autoScroll.value ? 'true' : 'false')
+    localStorage.setItem('telnix_auto_scroll_delay', String(autoScrollDelay.value))
   }
 
   // 跨页携带：供 AI 分析使用的选中流量
   const aiFlowIds = ref<number[]>([])
 
-  // 性能优化：debounce saveToCache，避免每次增量轮询都全量 stringify 阻塞主线程
+  // 性能优化：debounce saveToCache 到 2 秒，避免每次增量轮询都全量 stringify 阻塞主线程
   let saveTimer: number | null = null
   function saveToCache() {
     if (saveTimer != null) {
@@ -113,7 +135,9 @@ export const useFlowsStore = defineStore('flows', () => {
     saveTimer = window.setTimeout(() => {
       saveTimer = null
       try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify(flows.value))
+        // 性能优化：只缓存 lite 字段，去掉大 body 字段，序列化体积减少 80%+
+        const liteFlows = flows.value.map(toLiteFlow)
+        localStorage.setItem(CACHE_KEY, JSON.stringify(liteFlows))
         // 检查是否需要自动清理
         const threshold = parseFloat(localStorage.getItem(CACHE_THRESHOLD_KEY) || '10')
         const autoClean = localStorage.getItem(CACHE_AUTOCLEAN_KEY) !== 'false'
@@ -123,7 +147,7 @@ export const useFlowsStore = defineStore('flows', () => {
       } catch {
         /* localStorage 满了，忽略 */
       }
-    }, 1000)
+    }, 2000)
   }
 
   // 立即保存（用于 clear 等需要立即持久化的场景）
@@ -133,7 +157,8 @@ export const useFlowsStore = defineStore('flows', () => {
       saveTimer = null
     }
     try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify(flows.value))
+      const liteFlows = flows.value.map(toLiteFlow)
+      localStorage.setItem(CACHE_KEY, JSON.stringify(liteFlows))
     } catch {
       /* ignore */
     }
@@ -259,6 +284,19 @@ export const useFlowsStore = defineStore('flows', () => {
     selectedId.value = id
     // 清除 override，让 selectedFlow 走列表查找
     selectedFlowOverride.value = null
+    // SSE 推送的 flow 是 lite 字段（缺少 request_headers/response_headers 等），
+    // 选中时自动从后端拉取完整数据，确保 Inspector 能显示标签内容
+    if (id != null) {
+      const f = flowIndex.get(id)
+      if (f && f.request_headers === undefined) {
+        // lite flow，异步拉取完整数据并原地更新
+        api.getFlow(id).then((full: Flow) => {
+          // 原地 mutate flow 对象（shallowRef 模式下需 triggerRef）
+          Object.assign(f, full)
+          triggerRef(flows)
+        }).catch(() => { /* 静默 */ })
+      }
+    }
   }
 
   /** 跨页跳转用：直接注入 flow 对象，不依赖列表查找。
@@ -314,6 +352,59 @@ export const useFlowsStore = defineStore('flows', () => {
     triggerRef(flows)
   }
 
+  // ============ SSE 推送（替代 500ms 轮询）============
+  // 后端 /flows/stream 在新 flow 入库后立即推送 lite 字段，
+  // 前端收到后直接插入列表顶部，无需轮询。
+  // EventSource 自动重连（默认 3 秒）。SSE 连接时后端先推送 init 事件同步基线。
+  function startSSE() {
+    if (sseSource) return
+    try {
+      sseSource = new EventSource('/api/flows/stream')
+      sseSource.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (msg.type === 'init') {
+            // 后端推送当前 max_id，用于检测 SSE 连接期间漏掉的 flow
+            // 如果 maxFlowId < 后端 max_id，说明有漏掉的 flow，用增量查询补齐
+            const serverMax = msg.max_id || 0
+            if (serverMax > maxFlowId.value) {
+              // SSE 重连后可能有漏掉的 flow，用增量查询补齐
+              pollNewFlows()
+            } else {
+              maxFlowId.value = serverMax
+            }
+          } else if (msg.type === 'flow') {
+            const flow: Flow = msg.flow
+            if (!flow || typeof flow.id !== 'number') return
+            // 去重：flow 已在列表中则跳过（防止重复推送）
+            if (flowIndex.has(flow.id)) return
+            // 插入列表顶部（SSE 推送按 id 递增，直接 unshift 保持降序）
+            flows.value.unshift(flow)
+            flowIndex.set(flow.id, flow)
+            triggerRef(flows)
+            if (flow.id > maxFlowId.value) maxFlowId.value = flow.id
+            saveToCache()
+          }
+        } catch {
+          /* ignore parse error */
+        }
+      }
+      sseSource.onerror = () => {
+        // EventSource 会自动重连，无需手动处理
+        // 重连后 onmessage 收到 init 事件会自动补齐漏掉的 flow
+      }
+    } catch {
+      sseSource = null
+    }
+  }
+
+  function stopSSE() {
+    if (sseSource) {
+      sseSource.close()
+      sseSource = null
+    }
+  }
+
   // 初始化时恢复缓存（同步更新 maxFlowId，避免首次轮询用 0 拉全量导致重复）
   restoreFromCache()
 
@@ -326,7 +417,7 @@ export const useFlowsStore = defineStore('flows', () => {
     selectedId.value = null
     selectedFlowOverride.value = null
   }
-  window.addEventListener('opennet:flows-cache-cleared', onCacheCleared)
+  window.addEventListener('telnix:flows-cache-cleared', onCacheCleared)
 
   return {
     flows,
@@ -359,5 +450,7 @@ export const useFlowsStore = defineStore('flows', () => {
     restoreFromCache,
     touchFlows,
     patchFlows,
+    startSSE,
+    stopSSE,
   }
 })

@@ -1,29 +1,29 @@
-# OpenNet MCP Server
+# Telnix MCP Server
 
-把 OpenNet 的抓包、拦截、改包、重放能力暴露为 MCP (Model Context Protocol) 工具，让 Claude Desktop、Cursor、VS Code Continue 等 MCP 客户端直接调用。
+把 Telnix 的抓包、拦截、改包、重放能力暴露为 MCP (Model Context Protocol) 工具，让 Claude Desktop、Cursor、VS Code Continue 等 MCP 客户端直接调用。
 
 ## 它解决什么问题
 
 传统工作流中，AI 助手想帮你分析抓包数据，需要你手动复制粘贴流量内容。接入 MCP Server 后，AI 可以直接调用 `packets_list` 拉流量、调用 `intercept_add` 创建改包规则、调用 `packets_diff` 对比两次请求差异 —— 全程不需要你切换窗口。
 
-73 个工具覆盖 OpenNet CLI 的全部功能，从基础的抓包控制到高级的签名字段检测、依赖链追踪都能用。
+73 个工具覆盖 Telnix CLI 的全部功能，从基础的抓包控制到高级的签名字段检测、依赖链追踪都能用。新增 5 个工具（settings × 3 + system_install_dep × 2），总计 **78 个**。
 
 ## 架构
 
 ```
 ┌─────────────────┐     stdio (JSON-RPC)     ┌──────────────────┐
-│  MCP 客户端      │ ◄──────────────────────► │  opennet.mcp_server │
+│  MCP 客户端      │ ◄──────────────────────► │  telnix.mcp_server │
 │  (Claude/Cursor) │                          │  (Python 进程)      │
 └─────────────────┘                          └────────┬─────────┘
                                                       │ HTTP API
                                                       ▼
                                              ┌──────────────────┐
-                                             │  OpenNet 后端      │
+                                             │  Telnix 后端      │
                                              │  (127.0.0.1:18901) │
                                              └──────────────────┘
 ```
 
-MCP Server 是一个独立的 Python 进程，通过 stdio 与 MCP 客户端通信，通过 HTTP 调用 OpenNet 后端 API。它不直接操作数据库或文件系统（`agent_start/end` 的状态备份除外），所有数据操作都走后端 API，保证与 CLI 行为一致。
+MCP Server 是一个独立的 Python 进程，通过 stdio 与 MCP 客户端通信，通过 HTTP 调用 Telnix 后端 API。它不直接操作数据库或文件系统（`agent_start/end` 的状态备份除外），所有数据操作都走后端 API，保证与 CLI 行为一致。
 
 ## 环境要求
 
@@ -31,8 +31,8 @@ MCP Server 是一个独立的 Python 进程，通过 stdio 与 MCP 客户端通�
 |---|---|
 | Python | 3.10+ |
 | MCP SDK | `mcp>=1.2`（`pip install "mcp[cli]"`） |
-| OpenNet 后端 | 运行中，默认监听 `127.0.0.1:18901` |
-| 操作系统 | Windows（OpenNet 后端依赖 WinDivert，仅支持 Windows） |
+| Telnix 后端 | 运行中，默认监听 `127.0.0.1:18901` |
+| 操作系统 | Windows（完整支持）；macOS / Linux（HTTP/HTTPS 抓包可用，TCP/UDP 抓包依赖 WinDivert 暂不支持） |
 
 确认后端在跑：
 
@@ -44,7 +44,7 @@ netstat -ano | findstr ":18901.*LISTENING"
 
 ```powershell
 cd .\src\host
-python -m opennet --no-browser
+python -m telnix --no-browser
 ```
 
 `--no-browser` 避免自动打开浏览器干扰你的工作。
@@ -63,10 +63,10 @@ pip install "mcp[cli]"
 
 ```powershell
 cd .\src\host
-python -m opennet.mcp_server
+python -m telnix.mcp_server
 ```
 
-看到 stderr 输出 `[opennet-mcp] starting, base_url=http://127.0.0.1:18901` 就说明启动成功。按 Ctrl+C 退出（它会在 MCP 客户端启动时自动拉起）。
+看到 stderr 输出 `[telnix-mcp] starting, base_url=http://127.0.0.1:18901` 就说明启动成功。按 Ctrl+C 退出（它会在 MCP 客户端启动时自动拉起）。
 
 ### 第三步：配置客户端
 
@@ -75,35 +75,35 @@ python -m opennet.mcp_server
 ```json
 {
   "mcpServers": {
-    "opennet": {
+    "Telnix": {
       "command": "python",
-      "args": ["-m", "opennet.mcp_server"],
+      "args": ["-m", "telnix.mcp_server"],
       "cwd": ".\\src\\host",
       "env": {
-        "OPENNET_API": "http://127.0.0.1:18901"
+        "TELNIX_API": "http://127.0.0.1:18901"
       }
     }
   }
 }
 ```
 
-重启 Claude Desktop，在对话里说"列出 OpenNet 的所有工具"，它会调用 `tools/list` 返回 73 个工具。
+重启 Claude Desktop，在对话里说"列出 Telnix 的所有工具"，它会调用 `tools/list` 返回 78 个工具。
 
 ## 启动参数
 
 ```powershell
 # 模块直接运行（推荐）
-python -m opennet.mcp_server
+python -m telnix.mcp_server
 
 # 安装后的入口点（pip install -e . 之后可用）
-opennet-mcp
+telnix-mcp
 
 # 指定后端地址
-python -m opennet.mcp_server --base-url http://127.0.0.1:18901
+python -m telnix.mcp_server --base-url http://127.0.0.1:18901
 
 # 用环境变量指定后端地址
-set OPENNET_API=http://127.0.0.1:18901
-python -m opennet.mcp_server
+set TELNIX_API=http://127.0.0.1:18901
+python -m telnix.mcp_server
 ```
 
 `--base-url` 优先级高于环境变量。两个都没设则用默认值 `http://127.0.0.1:18901`。
@@ -120,12 +120,12 @@ python -m opennet.mcp_server
 ```json
 {
   "mcpServers": {
-    "opennet": {
+    "Telnix": {
       "command": "python",
-      "args": ["-m", "opennet.mcp_server"],
+      "args": ["-m", "telnix.mcp_server"],
       "cwd": ".\\src\\host",
       "env": {
-        "OPENNET_API": "http://127.0.0.1:18901"
+        "TELNIX_API": "http://127.0.0.1:18901"
       }
     }
   }
@@ -137,12 +137,12 @@ python -m opennet.mcp_server
 ```json
 {
   "mcpServers": {
-    "opennet": {
+    "Telnix": {
       "command": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-      "args": ["-m", "opennet.mcp_server"],
+      "args": ["-m", "telnix.mcp_server"],
       "cwd": ".\\src\\host",
       "env": {
-        "OPENNET_API": "http://127.0.0.1:18901"
+        "TELNIX_API": "http://127.0.0.1:18901"
       }
     }
   }
@@ -156,12 +156,12 @@ python -m opennet.mcp_server
 ```json
 {
   "mcpServers": {
-    "opennet": {
+    "Telnix": {
       "command": "python",
-      "args": ["-m", "opennet.mcp_server"],
+      "args": ["-m", "telnix.mcp_server"],
       "cwd": ".\\src\\host",
       "env": {
-        "OPENNET_API": "http://127.0.0.1:18901"
+        "TELNIX_API": "http://127.0.0.1:18901"
       }
     }
   }
@@ -178,12 +178,12 @@ python -m opennet.mcp_server
 {
   "experimental": {
     "mcpServers": {
-      "opennet": {
+      "Telnix": {
         "command": "python",
-        "args": ["-m", "opennet.mcp_server"],
+        "args": ["-m", "telnix.mcp_server"],
         "cwd": ".\\src\\host",
         "env": {
-          "OPENNET_API": "http://127.0.0.1:18901"
+          "TELNIX_API": "http://127.0.0.1:18901"
         }
       }
     }
@@ -196,18 +196,18 @@ python -m opennet.mcp_server
 任何支持 MCP stdio 传输的客户端都能接入。核心配置：
 
 - **command**: `python`
-- **args**: `["-m", "opennet.mcp_server"]`
-- **cwd**: `.\src\host`（确保能找到 opennet 包）
-- **env**: `{"OPENNET_API": "http://127.0.0.1:18901"}`
+- **args**: `["-m", "telnix.mcp_server"]`
+- **cwd**: `.\src\host`（确保能找到 telnix 包）
+- **env**: `{"TELNIX_API": "http://127.0.0.1:18901"}`
 
 ### 后端不在默认端口时
 
-如果 OpenNet 后端跑在其他端口（比如 18902），改 env 或加 `--base-url`：
+如果 Telnix 后端跑在其他端口（比如 18902），改 env 或加 `--base-url`：
 
 ```json
 {
   "env": {
-    "OPENNET_API": "http://127.0.0.1:18902"
+    "TELNIX_API": "http://127.0.0.1:18902"
   }
 }
 ```
@@ -216,13 +216,13 @@ python -m opennet.mcp_server
 
 ```json
 {
-  "args": ["-m", "opennet.mcp_server", "--base-url", "http://127.0.0.1:18902"]
+  "args": ["-m", "telnix.mcp_server", "--base-url", "http://127.0.0.1:18902"]
 }
 ```
 
 ## 工具清单
 
-73 个工具，按功能分 11 类。
+78 个工具，按功能分 12 类。
 
 ### 状态与抓包控制（6 个）
 
@@ -302,6 +302,15 @@ python -m opennet.mcp_server
 | `focus_status` / `focus_on` / `focus_off` | 专注模式（只抓指定进程/host） |
 | `raw_capture_status` / `raw_capture_start` / `raw_capture_stop` / `raw_capture_install` | TCP/UDP 原始抓包 |
 | `system_restart` / `system_quit` / `system_restart_as_admin` | 系统控制（重启/退出/管理员提权） |
+| `system_install_dep` / `system_install_dep_status` | 可选依赖安装（如 mitmproxy） |
+
+### 设置管理（3 个）
+
+| 工具 | 说明 |
+|---|---|
+| `settings_get` | 读取所有设置或单个 key（`key` 省略返回全部） |
+| `settings_set` | 写入单个设置项（value 自动 JSON 反序列化 bool/数字/list/dict） |
+| `settings_proxy_engine` | 查看/切换代理引擎：builtin（默认线程）/ async（asyncio）/ mitmproxy（需先 `system_install_dep`）。切换后需调 `system_restart` 生效 |
 
 ### 进程管理（7 个）
 
@@ -361,7 +370,7 @@ python -m opennet.mcp_server
 {
   "ok": false,
   "error": "无法连接后端 http://127.0.0.1:18901: [Errno 111] Connection refused",
-  "hint": "后端未启动？运行: cd src\\host && python -m opennet"
+  "hint": "后端未启动？运行: cd src\\host && python -m telnix"
 }
 ```
 
@@ -576,21 +585,21 @@ AI 工作流：
 
 | CLI 命令 | MCP 工具 |
 |---|---|
-| `opennet status` | `get_status` |
-| `opennet capture start` | `capture_start` |
-| `opennet packets list` | `packets_list` |
-| `opennet packets list-all` | `packets_list_all` |
-| `opennet packets get N` | `packets_get(flow_id=N)` |
-| `opennet packets search` | `packets_search` |
-| `opennet packets watch` | `packets_list(since_id=N)` 循环轮询 |
-| `opennet intercept add` | `intercept_add` |
-| `opennet intercept list` | `intercept_list` |
-| `opennet replay N` | `replay(flow_id=N)` |
-| `opennet send` | `send_request` |
-| `opennet proxy on` | `proxy_on` |
-| `opennet cert install` | `cert_install` |
-| `opennet system restart` | `system_restart` |
-| `opennet agent start` | `agent_start` |
+| `telnix status` | `get_status` |
+| `telnix capture start` | `capture_start` |
+| `telnix packets list` | `packets_list` |
+| `telnix packets list-all` | `packets_list_all` |
+| `telnix packets get N` | `packets_get(flow_id=N)` |
+| `telnix packets search` | `packets_search` |
+| `telnix packets watch` | `packets_list(since_id=N)` 循环轮询 |
+| `telnix intercept add` | `intercept_add` |
+| `telnix intercept list` | `intercept_list` |
+| `telnix replay N` | `replay(flow_id=N)` |
+| `telnix send` | `send_request` |
+| `telnix proxy on` | `proxy_on` |
+| `telnix cert install` | `cert_install` |
+| `telnix system restart` | `system_restart` |
+| `telnix agent start` | `agent_start` |
 
 ## 故障排查
 
@@ -599,8 +608,8 @@ AI 工作流：
 检查清单：
 
 1. `python` 是否在 PATH：`where python`
-2. `opennet.mcp_server` 模块是否能导入：`python -c "import opennet.mcp_server"`
-3. `cwd` 是否正确：配置文件里的 `cwd` 必须指向 `src\host` 目录（包含 `opennet` 包的目录）
+2. `telnix.mcp_server` 模块是否能导入：`python -c "import telnix.mcp_server"`
+3. `cwd` 是否正确：配置文件里的 `cwd` 必须指向 `src\host` 目录（包含 `telnix` 包的目录）
 4. 看 Claude Desktop 的日志：`%APPDATA%\Claude\logs/`
 
 ### 工具调用返回"无法连接后端"
@@ -613,7 +622,7 @@ AI 工作流：
 
 ```powershell
 cd .\src\host
-python -m opennet --no-browser
+python -m telnix --no-browser
 ```
 
 ### 工具调用返回"需要管理员权限"
@@ -654,7 +663,7 @@ UAC 弹窗 3 分钟内没人点。调 `system_restart_as_admin` 重试，确保�
 {"ok": false, "error": "用户拒绝了管理员重启请求", "rejected_by_user": true}
 ```
 
-用户在 GUI 弹窗里点了"拒绝"。需要用户同意后重试，或手动以管理员身份启动 OpenNet。
+用户在 GUI 弹窗里点了"拒绝"。需要用户同意后重试，或手动以管理员身份启动 Telnix。
 
 ## 设计原则与限制
 
@@ -672,13 +681,13 @@ UAC 弹窗 3 分钟内没人点。调 `system_restart_as_admin` 重试，确保�
 - 大流量场景（>50000 条）下 `packets_list_all` / `replay_batch` 可能较慢，建议用 `host`/`since_id` 参数缩小范围
 - `packets_analyze` 的签名字段检测是启发式算法，会漏报（复杂签名算法）和误报（正常变化的业务字段），需要人工复核
 - `packets_trace` 的依赖链追踪基于字符串精确匹配，如果值被编码/加密则追踪不到
-- 不支持同时连接多个 OpenNet 后端实例（`BASE_URL` 是全局变量）
+- 不支持同时连接多个 Telnix 后端实例（`BASE_URL` 是全局变量）
 
 ## 开发者笔记
 
 ### 修改工具
 
-所有工具定义在 `src/host/opennet/mcp_server.py`。添加新工具只需：
+所有工具定义在 `src/host/telnix/mcp_server.py`。添加新工具只需：
 
 ```python
 @mcp.tool()
@@ -703,14 +712,14 @@ FastMCP 会自动从类型注解和 docstring 生成 MCP 工具 schema。
 启动时加环境变量看 HTTP 请求：
 
 ```powershell
-set OPENNET_MCP_DEBUG=1
-python -m opennet.mcp_server
+set TELNIX_MCP_DEBUG=1
+python -m telnix.mcp_server
 ```
 
 或直接用 MCP Inspector 测试：
 
 ```powershell
-npx @modelcontextprotocol/inspector python -m opennet.mcp_server
+npx @modelcontextprotocol/inspector python -m telnix.mcp_server
 ```
 
 ### 测试
@@ -719,7 +728,7 @@ npx @modelcontextprotocol/inspector python -m opennet.mcp_server
 
 ```powershell
 cd .\src\host
-python -c "from opennet.mcp_server import mcp; t=mcp._tool_manager._tools; print(f'{len(t)} tools'); [print(' ', n) for n in sorted(t)]"
+python -c "from telnix.mcp_server import mcp; t=mcp._tool_manager._tools; print(f'{len(t)} tools'); [print(' ', n) for n in sorted(t)]"
 ```
 
 端到端测试（模拟 MCP 客户端调用）：
@@ -727,11 +736,11 @@ python -c "from opennet.mcp_server import mcp; t=mcp._tool_manager._tools; print
 ```python
 import json, subprocess, sys
 proc = subprocess.Popen(
-    [sys.executable, "-m", "opennet.mcp_server"],
+    [sys.executable, "-m", "telnix.mcp_server"],
     cwd=r".\src\host",
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     text=True, encoding="utf-8",
-    env={**__import__("os").environ, "OPENNET_API": "http://127.0.0.1:18901"},
+    env={**__import__("os").environ, "TELNIX_API": "http://127.0.0.1:18901"},
 )
 def send(msg):
     proc.stdin.write(json.dumps(msg) + "\n")
@@ -755,8 +764,8 @@ print(resp["result"]["content"][0]["text"])
 
 ```toml
 [project.scripts]
-opennet = "opennet.__main__:main"
-opennet-mcp = "opennet.mcp_server:main"
+telnix = "telnix.__main__:main"
+telnix-mcp = "telnix.mcp_server:main"
 ```
 
-`pip install -e .` 之后可以直接用 `opennet-mcp` 命令启动。
+`pip install -e .` 之后可以直接用 `telnix-mcp` 命令启动。

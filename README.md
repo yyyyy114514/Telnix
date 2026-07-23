@@ -1,11 +1,11 @@
-# OpenNet
+# Telnix
 
 > 完全由 [GLM-5.2](https://chatglm.cn) 构建的 Fiddler 式 HTTP/HTTPS 抓包代理工具。
 > FastAPI 后端 + Vue 3 前端 + SQLite 存储，原生 Windows 支持，单命令启动。
 
 ---
 
-- [OpenNet](#opennet)
+- [Telnix](#telnix)
   - [快速开始](#快速开始)
     - [环境要求](#环境要求)
     - [MCP配置\&使用](#mcp配置使用)
@@ -13,6 +13,7 @@
     - [一键安装](#一键安装)
     - [一键运行](#一键运行)
     - [TCP/UDP 抓包（需要管理员）](#tcpudp-抓包需要管理员)
+    - [可选：安装 mitmproxy 引擎](#可选安装-mitmproxy-引擎)
   - [项目特色](#项目特色)
     - [1. 完全由 GLM-5.2 构建](#1-完全由-glm-52-构建)
     - [2. 强大的自动修改（拦截改包）](#2-强大的自动修改拦截改包)
@@ -32,12 +33,12 @@
 
 ### 环境要求
 
-| 项         | 要求                                                    |
-| ---------- | ------------------------------------------------------- |
-| 操作系统   | Windows 10 / 11（依赖 WinDivert，暂不支持 macOS/Linux） |
-| Python     | 3.10+                                                   |
-| Node.js    | 18+（仅构建前端需要，运行已构建产物不需要）             |
-| 管理员权限 | TCP/UDP 原始抓包需要；HTTP/HTTPS 抓包不需要             |
+| 项         | 要求                                                                  |
+| ---------- | --------------------------------------------------------------------- |
+| 操作系统   | Windows 10 / 11（完整支持）；macOS / Linux（HTTP/HTTPS 抓包可用，TCP/UDP 抓包依赖 WinDivert 暂不支持） |
+| Python     | 3.10+                                                                 |
+| Node.js    | 18+（仅构建前端需要，运行已构建产物不需要）                           |
+| 管理员权限 | TCP/UDP 原始抓包需要；HTTP/HTTPS 抓包不需要                           |
 
 ### MCP配置&使用
 
@@ -51,8 +52,8 @@
 
 ```powershell
 # 克隆仓库
-git clone https://github.com/yyyyy114514/Opennet.git
-cd Opennet
+git clone https://github.com/yyyyy114514/Telnix.git
+cd Telnix
 
 # 一键安装所有依赖（Python + Node）
 .\install.ps1
@@ -70,13 +71,20 @@ cd ..\ui
 npm install
 ```
 
+macOS / Linux 用户可使用对应的依赖安装脚本：
+
+```bash
+./scripts/install-deps-linux.sh   # Linux
+./scripts/install-deps-mac.sh     # macOS
+```
+
 ### 一键运行
 
 ```powershell
 # 构建前端（首次运行或前端有改动时需要）
 .\build.ps1
 
-# 启动 OpenNet（自动开代理 + 装证书 + 打开浏览器）
+# 启动 Telnix（自动开代理 + 装证书 + 打开浏览器）
 .\run.ps1
 
 # 或不打开浏览器
@@ -87,7 +95,7 @@ npm install
 
 ```powershell
 cd src\host
-python -m opennet
+python -m telnix
 ```
 
 启动后访问 http://127.0.0.1:18901 即可使用。
@@ -97,10 +105,28 @@ python -m opennet
 TCP/UDP 原始抓包依赖 WinDivert，需要管理员权限。在 CLI 里执行：
 
 ```powershell
-python -m opennet.cli system restart-as-admin
+python -m telnix.cli system restart-as-admin
 ```
 
 会弹 UAC 提权窗口，同意后后端以管理员身份重启。
+
+> 注：macOS / Linux 平台无 WinDivert，TCP/UDP 原始抓包功能不可用（HTTP/HTTPS 抓包不受影响）。
+
+### 可选：安装 mitmproxy 引擎
+
+Telnix 默认使用内置线程代理引擎（零依赖、稳定）。如需更强的 HTTPS 拦截能力，可切换到 mitmproxy 引擎：
+
+**方式一：设置页一键安装**
+
+打开设置页 → 抓包行为 → 代理引擎，mitmproxy 未安装时旁边会显示「安装 mitmproxy」按钮，点击即可在线安装（约 50MB）。安装完成后点侧边栏底部「重启服务」让新引擎生效。
+
+**方式二：命令行手动安装**
+
+```powershell
+pip install mitmproxy
+```
+
+安装完成后在设置页将代理引擎切换为 mitmproxy，重启后端即可生效。未安装 mitmproxy 时代码自动回退到内置线程引擎，不影响正常使用。
 
 ------
 
@@ -137,9 +163,9 @@ delay 2000                            # 延迟 2 秒响应
 
 ### 3. 解决痛点的 Clash 集成
 
-**痛点**：抓包时若走 Clash 代理，Clash 会劫持系统代理，OpenNet 抓不到；关掉 Clash 又连不上被墙的 API。
+**痛点**：抓包时若走 Clash 代理，Clash 会劫持系统代理，Telnix 抓不到；关掉 Clash 又连不上被墙的 API。
 
-**OpenNet 的方案**：内置 Clash/Mihomo 上游代理集成。OpenNet 始终作为系统代理，出站连接可选走 Clash 的 mixed-port（默认 7890）。这样：
+**Telnix 的方案**：内置 Clash/Mihomo 上游代理集成。Telnix 始终作为系统代理，出站连接可选走 Clash 的 mixed-port（默认 7890）。这样：
 
 - 抓包与翻墙同时进行，互不干扰
 - 一键在"直连 / 走 Clash"之间切换
@@ -160,9 +186,9 @@ delay 2000                            # 延迟 2 秒响应
 
 ### 5. MCP + Agent CLI 赋能
 
-OpenNet 不只是 GUI 工具，还为 AI Agent 提供了完整的编程接口：
+Telnix 不只是 GUI 工具，还为 AI Agent 提供了完整的编程接口：
 
-#### MCP Server（73 个工具）
+#### MCP Server（78 个工具）
 
 把抓包、拦截、改包、重放能力暴露为 MCP (Model Context Protocol) 工具，让 Claude Desktop / Cursor / VS Code Continue 等 MCP 客户端直接调用。AI 可以：
 
@@ -191,7 +217,7 @@ OpenNet 不只是 GUI 工具，还为 AI Agent 提供了完整的编程接口：
 
 ### 6. 使用简单
 
-- **一键启动**：`python -m opennet` 自动开代理、装证书、启前端
+- **一键启动**：`python -m telnix` 自动开代理、装证书、启前端
 - **HTTPS 开箱即用**：首次启动自动签发根证书并安装到系统信任存储
 - **手机抓包向导**：扫码下载证书、自动计算安卓 7+ 系统证书哈希、教程链接
 - **深色/浅色主题**：一键切换，CodeMirror 编辑器跟随主题
@@ -204,14 +230,16 @@ OpenNet 不只是 GUI 工具，还为 AI Agent 提供了完整的编程接口：
 ## 项目结构
 
 ```
-opennet/
+telnix/
 ├── src/
 │   ├── host/                  # Python 后端
-│   │   ├── opennet/
+│   │   ├── telnix/
 │   │   │   ├── api/           # FastAPI 路由（20+ 模块）
 │   │   │   ├── proxy/         # 代理服务器核心
-│   │   │   │   ├── server.py        # HTTP/HTTPS 抓包代理
-│   │   │   │   ├── raw_capture.py   # TCP/UDP 原始抓包（WinDivert）
+│   │   │   │   ├── server.py        # HTTP/HTTPS 抓包代理（builtin 线程引擎，默认）
+│   │   │   │   ├── async_proxy.py   # asyncio 代理引擎（G 方案，实验性）
+│   │   │   │   ├── mitmproxy_engine.py # mitmproxy 引擎（H 方案，可选依赖）
+│   │   │   │   ├── raw_capture.py   # TCP/UDP 原始抓包（WinDivert，仅 Windows）
 │   │   │   │   ├── ssl_bump.py      # SSL Bump 动态签发证书
 │   │   │   │   ├── breakpoint.py    # 断点管理
 │   │   │   │   └── process_lookup.py # PID 反查
@@ -219,7 +247,7 @@ opennet/
 │   │   │   ├── clash/         # Clash 集成
 │   │   │   ├── ai/            # DeepSeek AI 分析
 │   │   │   ├── cli.py         # Agent CLI
-│   │   │   ├── mcp_server.py  # MCP Server（73 个工具）
+│   │   │   ├── mcp_server.py  # MCP Server（78 个工具）
 │   │   │   ├── db.py          # SQLite 存储
 │   │   │   └── __main__.py    # 入口
 │   │   ├── pyproject.toml
@@ -233,6 +261,7 @@ opennet/
 │       └── package.json
 ├── installer/                 # Inno Setup 安装包脚本
 ├── docs/                      # 文档截图
+├── scripts/                   # 跨平台依赖安装脚本（linux/mac）
 ├── build.ps1                  # 一键构建脚本
 ├── install.ps1                # 一键安装依赖脚本
 ├── run.ps1                    # 一键运行脚本
@@ -246,13 +275,13 @@ opennet/
 - [CLASH_SET.md](CLASH_SET.md) — Clash / Mihomo 集成设置教程
 - [MOBILE_CAPTURE.md](MOBILE_CAPTURE.md) — 安卓手机抓包教程
 - [README_AI.md](README_AI.md) — Agent CLI 完整用法（AI 友好的 NDJSON / 非交互模式）
-- [README_MCP.md](README_MCP.md) — MCP Server 73 个工具清单与客户端接入配置
+- [README_MCP.md](README_MCP.md) — MCP Server 78 个工具清单与客户端接入配置
 
 ---
 
 ## 性能优化
 
-OpenNet 在性能上做了大量优化，确保高并发场景下不卡顿：
+Telnix 在性能上做了大量优化，确保高并发场景下不卡顿：
 
 - **后端线程池**：每个客户端连接独立线程，避免 asyncio 在 Windows 上的 IOCP 问题
 - **连接复用**：keep-alive 连接池（默认 32 个 per key），避免重复 TCP+TLS 握手
@@ -266,7 +295,7 @@ OpenNet 在性能上做了大量优化，确保高并发场景下不卡顿：
 
 ## 技术栈
 
-**后端**：Python 3.10+ / FastAPI / Uvicorn / SQLite (WAL) / psutil / cryptography / WinDivert / pydivert
+**后端**：Python 3.10+ / FastAPI / Uvicorn / SQLite (WAL) / psutil / cryptography / WinDivert / pydivert / h2（HTTP/2）/ mitmproxy（可选引擎）
 
 **前端**：Vue 3 / Vite 5 / Element Plus / Pinia / CodeMirror 6 / highlight.js / axios
 

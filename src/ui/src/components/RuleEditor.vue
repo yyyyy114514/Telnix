@@ -2,6 +2,7 @@
 import { ref, watch, computed } from 'vue'
 import type { AutoReplyRule, ModifyRule } from '../api/client'
 import CodeEditor from './CodeEditor.vue'
+import MonacoEditor from './MonacoEditor.vue'
 
 // 自动修改规则编辑器对话框
 const props = defineProps<{
@@ -14,6 +15,36 @@ const emit = defineEmits<{
 }>()
 
 const form = ref<AutoReplyRule>(emptyRule())
+
+// Python 脚本默认模板（用户新建 script 规则时填充，引导上手）
+const SCRIPT_TEMPLATE = `# Telnix Python 脚本
+# 可用钩子：on_request（转发前）/ on_response（返回客户端前）
+# ctx 属性：host / path / method / url / scheme / pid / process_name
+#           request_headers(dict) / request_body(bytes)
+#           on_response 额外有：status_code / response_headers / response_body
+# 修改方法：ctx.set_request_header / set_request_body / set_response_header / set_response_body / set_status_code
+# 返回 None：应用修改后继续；{"drop": True}：拒绝；{"mock": True, "status": 200, "headers": {}, "body": b""}：伪造响应
+
+def on_request(ctx):
+    # 例：给所有请求加自定义头
+    ctx.set_request_header("X-Custom", "telnix")
+    # 例：根据路径修改请求体
+    # if ctx.path.startswith("/api/login"):
+    #     import json
+    #     data = json.loads(ctx.request_body)
+    #     data["source"] = "telnix"
+    #     ctx.set_request_body(json.dumps(data).encode("utf-8"))
+    return None
+
+def on_response(ctx):
+    # 例：把响应中的 status 改成 200
+    # import json
+    # data = json.loads(ctx.response_body)
+    # if data.get("code") == -1:
+    #     data["code"] = 0
+    #     ctx.set_response_body(json.dumps(data).encode("utf-8"))
+    return None
+`
 
 function emptyRule(): AutoReplyRule {
   return {
@@ -37,6 +68,10 @@ watch(
     if (props.modelValue) {
       form.value = props.rule ? JSON.parse(JSON.stringify(props.rule)) : emptyRule()
       if (!form.value.modify_rules) form.value.modify_rules = []
+      // script action 时 modify_rules 应为 string（Python 脚本源码）
+      if (form.value.action === 'script' && typeof form.value.modify_rules !== 'string') {
+        form.value.modify_rules = SCRIPT_TEMPLATE
+      }
       // mock_headers 从后端返回的是 dict，编辑时转成字符串
       if (form.value.mock_headers && typeof form.value.mock_headers === 'object') {
         form.value.mock_headers = JSON.stringify(form.value.mock_headers, null, 2)
@@ -46,36 +81,52 @@ watch(
   { deep: false }
 )
 
+// action 切换时初始化对应字段
+watch(() => form.value.action, (newAction, oldAction) => {
+  if (newAction === 'script') {
+    // 切到 script：若 modify_rules 不是字符串则填模板
+    if (typeof form.value.modify_rules !== 'string' || !form.value.modify_rules.trim()) {
+      form.value.modify_rules = SCRIPT_TEMPLATE
+    }
+  } else if (oldAction === 'script') {
+    // 从 script 切走：modify_rules 置空 list
+    if (typeof form.value.modify_rules === 'string') {
+      form.value.modify_rules = []
+    }
+  }
+})
+
 const isMock = computed(() => form.value.action === 'mock')
 const isMockReq = computed(() => form.value.action === 'mock_request')
 const isModifyResp = computed(() => form.value.action === 'modify_response')
 const isModifyReq = computed(() => form.value.action === 'modify_request')
+const isScript = computed(() => form.value.action === 'script')
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']
 
 // 响应体字段替换规则
 const bodyRules = computed(() =>
-  (form.value.modify_rules || []).filter(
+  ((form.value.modify_rules as ModifyRule[]) || []).filter(
     (m) => m.target === 'response_body' && m.op !== 'append'
   )
 )
 // 响应头规则
 const headerRules = computed(() =>
-  (form.value.modify_rules || []).filter((m) => m.target === 'response_header')
+  ((form.value.modify_rules as ModifyRule[]) || []).filter((m) => m.target === 'response_header')
 )
 // 请求体字段替换规则
 const reqBodyRules = computed(() =>
-  (form.value.modify_rules || []).filter(
+  ((form.value.modify_rules as ModifyRule[]) || []).filter(
     (m) => m.target === 'request_body' && m.op !== 'append'
   )
 )
 // 请求头规则
 const reqHeaderRules = computed(() =>
-  (form.value.modify_rules || []).filter((m) => m.target === 'request_header')
+  ((form.value.modify_rules as ModifyRule[]) || []).filter((m) => m.target === 'request_header')
 )
 
 function addBodyRule() {
-  form.value.modify_rules!.push({
+  ;(form.value.modify_rules as ModifyRule[]).push({
     target: 'response_body',
     op: 'replace',
     key: '',
@@ -83,7 +134,7 @@ function addBodyRule() {
   })
 }
 function addHeaderRule() {
-  form.value.modify_rules!.push({
+  ;(form.value.modify_rules as ModifyRule[]).push({
     target: 'response_header',
     op: 'replace',
     key: '',
@@ -91,7 +142,7 @@ function addHeaderRule() {
   })
 }
 function addReqBodyRule() {
-  form.value.modify_rules!.push({
+  ;(form.value.modify_rules as ModifyRule[]).push({
     target: 'request_body',
     op: 'replace',
     key: '',
@@ -99,7 +150,7 @@ function addReqBodyRule() {
   })
 }
 function addReqHeaderRule() {
-  form.value.modify_rules!.push({
+  ;(form.value.modify_rules as ModifyRule[]).push({
     target: 'request_header',
     op: 'replace',
     key: '',
@@ -107,14 +158,14 @@ function addReqHeaderRule() {
   })
 }
 function removeModify(i: number) {
-  form.value.modify_rules!.splice(i, 1)
+  ;(form.value.modify_rules as ModifyRule[]).splice(i, 1)
 }
 // 根据 modify_rules 中的实际位置删除
 function removeModifyByIdx(list: ModifyRule[], idx: number) {
   const target = list[idx]
   if (!target) return
-  const realIdx = form.value.modify_rules!.indexOf(target)
-  if (realIdx >= 0) form.value.modify_rules!.splice(realIdx, 1)
+  const realIdx = (form.value.modify_rules as ModifyRule[]).indexOf(target)
+  if (realIdx >= 0) (form.value.modify_rules as ModifyRule[]).splice(realIdx, 1)
 }
 
 function save() {
@@ -206,12 +257,14 @@ const opOptions = [
           <el-option label="请求字段修改" value="modify_request" />
           <el-option label="响应 Mock" value="mock" />
           <el-option label="请求 Mock" value="mock_request" />
+          <el-option label="Python 脚本" value="script" />
         </el-select>
         <div class="field-hint">
           <code>响应字段修改</code> 服务器返回后改字段；
           <code>请求字段修改</code> 转发前改请求头/体；
           <code>响应 Mock</code> 不请求服务器，直接返回预设响应；
-          <code>请求 Mock</code> 用预设请求转发到目标服务器，返回真实响应。
+          <code>请求 Mock</code> 用预设请求转发到目标服务器，返回真实响应；
+          <code>Python 脚本</code> 写 Python 代码处理复杂逻辑（on_request/on_response）。
         </div>
       </el-form-item>
 
@@ -409,6 +462,25 @@ const opOptions = [
             <el-button size="small" @click="addReqHeaderRule">
               <el-icon><Plus /></el-icon>&nbsp;添加请求头规则
             </el-button>
+          </div>
+        </el-form-item>
+      </template>
+
+      <!-- Python 脚本配置 -->
+      <template v-if="isScript">
+        <el-form-item label="脚本">
+          <div class="script-section">
+            <div class="section-hint">
+              定义 <code>on_request(ctx)</code> / <code>on_response(ctx)</code> 函数处理请求/响应。
+              <br />脚本在独立 worker 子进程运行，可 <code>import json/re/...</code>，单次调用超时 5 秒。
+              <br />返回 <code>{"drop": True}</code> 拒绝请求；返回 <code>{"mock": True, "status": 200, "headers": {}, "body": b""}</code> 伪造响应。
+            </div>
+            <MonacoEditor
+              :model-value="(form.modify_rules as string) || ''"
+              @update:model-value="(v: string) => (form.modify_rules = v)"
+              language="python"
+              height="420px"
+            />
           </div>
         </el-form-item>
       </template>

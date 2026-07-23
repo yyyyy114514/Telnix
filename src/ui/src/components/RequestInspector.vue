@@ -6,6 +6,7 @@ import HeaderView from './HeaderView.vue'
 import JsonView from './JsonView.vue'
 import RawView from './RawView.vue'
 import HexView from './HexView.vue'
+import CertInfoView from './CertInfoView.vue'
 
 // 请求检查器：多标签页，断点时可编辑
 const props = defineProps<{
@@ -26,9 +27,20 @@ watch(
   () => {
     headersStr.value = props.flow.request_headers || ''
     bodyStr.value = props.flow.request_body || ''
-    // TCP/UDP 流量没有 HTTP headers，默认选中 Hex
-    if (props.flow.protocol === 'tcp' || props.flow.protocol === 'udp') {
+    const proto = props.flow.protocol
+    // WS/TCP/UDP 流量默认选中 Hex
+    if (proto === 'ws' || proto === 'tcp' || proto === 'udp') {
       activeTab.value = 'hex'
+      return
+    }
+    // HTTP 流量：保持当前 tab，如果当前 tab 不在可用列表中则回到 headers
+    const availableTabs = ['headers', 'json', 'raw', 'hex']
+    if (props.enabledTabs.includes('cookies')) availableTabs.push('cookies')
+    if (props.enabledTabs.includes('auth')) availableTabs.push('auth')
+    if (props.enabledTabs.includes('xml')) availableTabs.push('xml')
+    if (props.enabledTabs.includes('cert') && props.flow.cert_info) availableTabs.push('cert')
+    if (!availableTabs.includes(activeTab.value)) {
+      activeTab.value = 'headers'
     }
   },
   { immediate: true }
@@ -83,8 +95,9 @@ const cookieRows = computed(() => {
 
 // 标签页列表
 const tabs = computed(() => {
-  // TCP/UDP 流量没有 HTTP headers/json，只显示 Hex
-  if (props.flow.protocol === 'tcp' || props.flow.protocol === 'udp') {
+  // TCP/UDP/WS 流量没有 HTTP headers/json，只显示 Hex
+  if (props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
+      || props.flow.protocol === 'ws') {
     return [{ name: 'hex', label: 'Hex' }]
   }
   const list = [
@@ -96,6 +109,10 @@ const tabs = computed(() => {
   if (props.enabledTabs.includes('cookies')) list.push({ name: 'cookies', label: 'Cookies' })
   if (props.enabledTabs.includes('auth')) list.push({ name: 'auth', label: 'Auth' })
   if (props.enabledTabs.includes('xml')) list.push({ name: 'xml', label: 'XML' })
+  // 证书 tab：需在设置中开启且 flow.cert_info 非空时显示（默认关闭）
+  if (props.enabledTabs.includes('cert') && props.flow.cert_info) {
+    list.push({ name: 'cert', label: '证书' })
+  }
   return list
 })
 
@@ -111,8 +128,9 @@ const isJson = computed(() => {
   }
 })
 
-// TCP/UDP 流量没有 HTTP headers/json
-const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp')
+// TCP/UDP/WS 流量没有 HTTP headers/json
+const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
+  || props.flow.protocol === 'ws')
 </script>
 
 <template>
@@ -161,6 +179,9 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
         <el-tab-pane v-if="enabledTabs.includes('xml')" label="XML" name="xml" lazy>
           <JsonView :model-value="bodyStr" :editable="editable" lang="xml" @update:model-value="onBody" />
         </el-tab-pane>
+        <el-tab-pane v-if="enabledTabs.includes('cert') && flow.cert_info" label="证书" name="cert" lazy>
+          <CertInfoView :cert-info="flow.cert_info" />
+        </el-tab-pane>
       </template>
     </el-tabs>
   </div>
@@ -177,6 +198,7 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
   font-family: var(--on-font-mono); font-weight: 700; font-size: 11px;
   padding: 2px 6px; border-radius: 3px; color: var(--on-accent);
   background: var(--on-accent-glow); border: 1px solid var(--on-accent-dim);
+  white-space: nowrap; flex-shrink: 0;
 }
 .m-get { color: var(--on-ok); background: rgba(63,185,80,0.12); border-color: rgba(63,185,80,0.4); }
 .m-post { color: var(--on-redirect); background: rgba(88,166,255,0.12); border-color: rgba(88,166,255,0.4); }

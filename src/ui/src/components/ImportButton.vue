@@ -56,7 +56,7 @@ async function saveCurrentSession() {
     const url = URL.createObjectURL(blob)
     const ts = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
-    const fname = `opennet_${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`
+    const fname = `telnix_${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`
     const a = document.createElement('a')
     a.href = url
     a.download = fname

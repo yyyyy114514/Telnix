@@ -16,14 +16,16 @@ const certInstalled = ref(false)
 const saving = ref(false)
 const cacheSize = ref(0)
 const cacheThreshold = ref(10)
+// mitmproxy 引擎是否可用（后端 /settings 接口注入，前端据此禁用选项）
+const mitmproxyAvailable = ref(false)
 
 // 主题模式（dark/light），从 localStorage 读取，默认 dark
 const themeMode = ref<'dark' | 'light'>(
-  (localStorage.getItem('opennet_theme') as 'dark' | 'light') || 'dark'
+  (localStorage.getItem('telnix_theme') as 'dark' | 'light') || 'dark'
 )
 function onThemeChange(val: any) {
   const mode = val as string
-  localStorage.setItem('opennet_theme', mode)
+  localStorage.setItem('telnix_theme', mode)
   if (mode === 'dark') {
     document.documentElement.classList.add('dark')
   } else {
@@ -46,6 +48,7 @@ const optionalTabs = [
   { key: 'cache', label: 'Cache' },
   { key: 'auth', label: 'Auth' },
   { key: 'xml', label: 'XML' },
+  { key: 'cert', label: '证书' },
 ]
 
 // 流量列表可选列（默认全不显示，核心列 # / Host / URL / 进程 永远显示）
@@ -57,6 +60,8 @@ const optionalColumns = [
   { key: 'pid', label: 'PID' },
   { key: 'size', label: '大小' },
   { key: 'duration', label: '耗时' },
+  { key: 'remote_ip', label: '对端 IP' },
+  { key: 'ip_region', label: 'IP 属地' },
 ]
 
 // 右键复制可选项（# 不参与复制）
@@ -73,8 +78,10 @@ const copyFieldOptions = [
   { key: 'process', label: '进程' },
   { key: 'size', label: '大小' },
   { key: 'duration', label: '耗时' },
+  { key: 'remote_ip', label: '对端 IP' },
+  { key: 'ip_region', label: 'IP 属地' },
 ]
-const COPY_PREF_KEY = 'opennet_copy_fields'
+const COPY_PREF_KEY = 'telnix_copy_fields'
 const enabledCopyFields = ref<string[]>(['url', 'curl'])
 // 流量列表行禁选文字（默认开启）
 const listNoSelect = ref(true)
@@ -87,7 +94,7 @@ function loadCopyPrefs() {
       if (Array.isArray(arr)) enabledCopyFields.value = arr
     }
   } catch { /* ignore */ }
-  listNoSelect.value = localStorage.getItem('opennet_list_no_select') !== 'false'
+  listNoSelect.value = localStorage.getItem('telnix_list_no_select') !== 'false'
 }
 function toggleCopyField(key: string) {
   const idx = enabledCopyFields.value.indexOf(key)
@@ -100,7 +107,7 @@ function copyFieldOn(key: string): boolean {
 }
 function onListNoSelectChange(val: any) {
   listNoSelect.value = val as boolean
-  localStorage.setItem('opennet_list_no_select', String(listNoSelect.value))
+  localStorage.setItem('telnix_list_no_select', String(listNoSelect.value))
   // 立即应用到 DOM
   document.documentElement.classList.toggle('list-no-select', listNoSelect.value)
 }
@@ -284,7 +291,7 @@ async function onClashToggle(val: any) {
     }
     clashEnabled.value = !!val
     // 通知 App.vue 立即刷新侧边栏（无需手动刷新页面）
-    window.dispatchEvent(new Event('opennet-clash-toggle'))
+    window.dispatchEvent(new Event('telnix-clash-toggle'))
     if (val) {
       ElMessage.success('Clash 页已启用')
     } else {
@@ -412,7 +419,7 @@ async function downloadCert() {
     const objUrl = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = objUrl
-    a.download = 'opennet_root.pem'
+    a.download = 'telnix_root.pem'
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
@@ -432,7 +439,7 @@ async function downloadAndroidCert() {
     if (!resp.ok) throw new Error('下载失败：HTTP ' + resp.status)
     // 从 Content-Disposition 提取文件名（后端已计算为 <hash>.0）
     const cd = resp.headers.get('content-disposition') || ''
-    let fname = 'opennet_android.0'
+    let fname = 'telnix_android.0'
     const m = /filename="?([^";]+)"?/.exec(cd)
     if (m) fname = m[1]
     const blob = await resp.blob()
@@ -466,7 +473,7 @@ async function onLanToggle(val: any) {
     await api.saveSettings({ proxy_listen_host: form.value.proxy_listen_host } as Settings)
     if (val) {
       ElMessageBox.alert(
-        '已开启局域网监听，但需要重启 OpenNet 后端才能生效。\n\n请到侧边栏底部点「重启服务」，或调 CLI `system restart`。',
+        '已开启局域网监听，但需要重启 Telnix 后端才能生效。\n\n请到侧边栏底部点「重启服务」，或调 CLI `system restart`。',
         '提示',
         { confirmButtonText: '知道了' }
       )
@@ -478,15 +485,110 @@ async function onLanToggle(val: any) {
   }
 }
 
+// 代理引擎切换：保存设置并提示重启后端生效
+async function onProxyEngineChange(val: any) {
+  try {
+    await doSave()
+    ElMessageBox.alert(
+      '代理引擎已切换，需要重启 Telnix 后端才能生效。\n\n请到侧边栏底部点「重启服务」，或调 CLI `system restart`。',
+      '提示',
+      { confirmButtonText: '知道了' }
+    )
+  } catch (e: any) {
+    ElMessage.error('保存失败: ' + e.message)
+  }
+}
+
+// ---------- mitmproxy 安装 ----------
+// 安装状态：idle / running / success / failed
+const mitmInstallStatus = ref<'idle' | 'running' | 'success' | 'failed'>('idle')
+const mitmInstallLog = ref('')
+const mitmInstallVisible = ref(false)
+let mitmInstallPollTimer: number | null = null
+
+async function startInstallMitmproxy() {
+  // 二次确认
+  try {
+    await ElMessageBox.confirm(
+      '将通过 pip 安装 mitmproxy（约 50MB，含依赖）。安装完成后需重启 Telnix 才能生效。继续？',
+      '安装 mitmproxy',
+      { confirmButtonText: '安装', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.installDep('mitmproxy')
+    mitmInstallStatus.value = 'running'
+    mitmInstallLog.value = ''
+    mitmInstallVisible.value = true
+    startMitmInstallPolling()
+  } catch (e: any) {
+    ElMessage.error('启动安装失败：' + (e?.message || e))
+  }
+}
+
+function startMitmInstallPolling() {
+  if (mitmInstallPollTimer !== null) return
+  mitmInstallPollTimer = window.setInterval(async () => {
+    try {
+      const r = await api.installDepStatus()
+      mitmInstallStatus.value = r.status
+      mitmInstallLog.value = r.log || ''
+      if (r.status === 'success' || r.status === 'failed') {
+        stopMitmInstallPolling()
+        if (r.status === 'success') {
+          // 同步 mitmproxy 可用性：后端当前进程可能已能 import（部分情况下生效）
+          mitmproxyAvailable.value = !!r.mitmproxy_available
+          if (r.mitmproxy_available) {
+            ElMessage.success('mitmproxy 安装成功，已可切换为代理引擎')
+          } else {
+            ElMessage.warning('mitmproxy 安装成功，但需重启 Telnix 才能加载到当前进程')
+          }
+        } else {
+          ElMessage.error('mitmproxy 安装失败，请查看日志')
+        }
+      }
+    } catch { /* ignore polling errors */ }
+  }, 1500)
+}
+
+function stopMitmInstallPolling() {
+  if (mitmInstallPollTimer !== null) {
+    clearInterval(mitmInstallPollTimer)
+    mitmInstallPollTimer = null
+  }
+}
+
+function closeMitmInstallDialog() {
+  mitmInstallVisible.value = false
+  // 关闭时若仍在运行，后台继续轮询（不阻塞 UI）
+}
+
+async function checkMitmInstallStatusOnce() {
+  // 进入设置页时检查是否有未完成的安装任务
+  try {
+    const r = await api.installDepStatus()
+    if (r.status === 'running') {
+      mitmInstallStatus.value = 'running'
+      mitmInstallLog.value = r.log || ''
+      mitmInstallVisible.value = true
+      startMitmInstallPolling()
+    }
+  } catch { /* ignore */ }
+}
+
 async function load() {
   // 先从 localStorage 立即恢复（避免页面空白等待后端）
   try {
-    const cached = localStorage.getItem('opennet_settings_cache')
+    const cached = localStorage.getItem('telnix_settings_cache')
     if (cached) {
       const s = JSON.parse(cached)
       form.value = { ...s }
       form.value.inspector_tabs = Array.isArray(s.inspector_tabs) ? s.inspector_tabs : []
       form.value.flow_columns = Array.isArray(s.flow_columns) ? s.flow_columns : []
+      // proxy_engine 默认 builtin
+      if (!form.value.proxy_engine) form.value.proxy_engine = 'builtin'
       // autoScroll/autoScrollDelay 由 store 自己从 localStorage 持久化，不在这里覆盖
     }
   } catch { /* ignore */ }
@@ -504,9 +606,13 @@ async function load() {
     if (form.value.clash_mixed_port == null) form.value.clash_mixed_port = 0
     // proxy_listen_host 默认 127.0.0.1（仅本机）
     if (!form.value.proxy_listen_host) form.value.proxy_listen_host = '127.0.0.1'
+    // proxy_engine 默认 builtin（内置线程代理）
+    if (!form.value.proxy_engine) form.value.proxy_engine = 'builtin'
+    // mitmproxy 可用性（后端注入，控制下拉选项是否可选）
+    mitmproxyAvailable.value = !!s.mitmproxy_available
     // autoScroll/autoScrollDelay 由 store 自己持久化，不从后端覆盖
     // 同步到 localStorage
-    localStorage.setItem('opennet_settings_cache', JSON.stringify(s))
+    localStorage.setItem('telnix_settings_cache', JSON.stringify(s))
   } catch {
     /* ignore */
   }
@@ -517,8 +623,8 @@ async function load() {
     /* ignore */
   }
   // 加载缓存设置
-  cacheThreshold.value = parseFloat(localStorage.getItem('opennet_cache_threshold') || '10')
-  cacheAutoClean.value = localStorage.getItem('opennet_cache_autoclean') !== 'false'
+  cacheThreshold.value = parseFloat(localStorage.getItem('telnix_cache_threshold') || '10')
+  cacheAutoClean.value = localStorage.getItem('telnix_cache_autoclean') !== 'false'
   refreshCacheSize()
   await loadIgnored()
   loaded.value = true
@@ -546,10 +652,10 @@ async function doSave() {
     form.value.auto_scroll_delay = flows.autoScrollDelay
     await api.saveSettings(form.value)
     // 同步到 localStorage（本地持久化，切换页面立即可用）
-    localStorage.setItem('opennet_settings_cache', JSON.stringify(form.value))
+    localStorage.setItem('telnix_settings_cache', JSON.stringify(form.value))
     // 保存缓存设置到 localStorage
-    localStorage.setItem('opennet_cache_threshold', String(cacheThreshold.value))
-    localStorage.setItem('opennet_cache_autoclean', String(cacheAutoClean.value))
+    localStorage.setItem('telnix_cache_threshold', String(cacheThreshold.value))
+    localStorage.setItem('telnix_cache_autoclean', String(cacheAutoClean.value))
     // 同步 GUI 偏好（列顺序/导航顺序/主题等）到 settings.json
     syncPrefs(false)
     // 文本框修改已保存，清除 dirty 标志
@@ -579,8 +685,8 @@ function showSavedTip() {
 // 监听缓存设置变化（纯 localStorage 持久化，不需要后端保存）
 watch([cacheThreshold, cacheAutoClean], () => {
   if (!loaded.value) return
-  localStorage.setItem('opennet_cache_threshold', String(cacheThreshold.value))
-  localStorage.setItem('opennet_cache_autoclean', String(cacheAutoClean.value))
+  localStorage.setItem('telnix_cache_threshold', String(cacheThreshold.value))
+  localStorage.setItem('telnix_cache_autoclean', String(cacheAutoClean.value))
 })
 // 自动滚动开关/暂停秒数：立即持久化到 localStorage（store 单例，切换页面不丢失）
 watch(() => flows.autoScroll, (v) => {
@@ -596,7 +702,7 @@ watch(() => flows.autoScrollDelay, (v) => {
 
 async function installCert() {
   try {
-    await ElMessageBox.confirm('将安装 OpenNet 根证书以启用 HTTPS 解密。继续？', '安装证书', {
+    await ElMessageBox.confirm('将安装 Telnix 根证书以启用 HTTPS 解密。继续？', '安装证书', {
       confirmButtonText: '安装', cancelButtonText: '取消', type: 'warning',
     })
   } catch {
@@ -651,9 +757,9 @@ async function reset() {
   cacheThreshold.value = 10
   cacheAutoClean.value = true
   // 清除本地缓存，避免重置后又被旧缓存覆盖
-  localStorage.removeItem('opennet_settings_cache')
-  localStorage.setItem('opennet_cache_threshold', String(cacheThreshold.value))
-  localStorage.setItem('opennet_cache_autoclean', String(cacheAutoClean.value))
+  localStorage.removeItem('telnix_settings_cache')
+  localStorage.setItem('telnix_cache_threshold', String(cacheThreshold.value))
+  localStorage.setItem('telnix_cache_autoclean', String(cacheAutoClean.value))
   textDirty.value = false
   // 手动保存到后端（不再有 watch 自动触发）
   autoSave(true)
@@ -682,6 +788,8 @@ onMounted(() => {
   loadThrottle()
   // 应用初始禁选状态
   document.documentElement.classList.toggle('list-no-select', listNoSelect.value)
+  // 检查是否有未完成的 mitmproxy 安装任务（恢复窗口）
+  checkMitmInstallStatusOnce()
 })
 
 // 左侧锚点导航分组（顺序与右侧 section 实际渲染顺序一致）
@@ -782,6 +890,37 @@ function onScroll() {
         <div class="section" id="sec-capture">
           <div class="section-title"><el-icon><Aim /></el-icon>&nbsp;抓包行为</div>
           <el-form label-width="160px" size="default">
+            <el-form-item label="代理引擎">
+              <el-select v-model="form.proxy_engine" style="max-width: 260px" @change="onProxyEngineChange">
+                <el-option value="builtin" label="内置线程（默认）" />
+                <el-option value="async" label="asyncio（实验性）" />
+                <el-option value="mitmproxy" label="mitmproxy（高性能）" :disabled="!mitmproxyAvailable" />
+              </el-select>
+              <span class="hint text-dim" style="margin-left: 12px">
+                <span v-if="!mitmproxyAvailable" style="color:#e6a23c">mitmproxy 未安装，</span>
+                切换后需重启后端生效
+              </span>
+              <el-button
+                v-if="!mitmproxyAvailable"
+                type="warning"
+                size="small"
+                plain
+                style="margin-left: 8px"
+                :loading="mitmInstallStatus === 'running'"
+                @click="startInstallMitmproxy"
+              >
+                <el-icon><Download /></el-icon>&nbsp;安装 mitmproxy
+              </el-button>
+              <el-button
+                v-if="mitmInstallStatus !== 'idle' && mitmInstallStatus !== 'running'"
+                size="small"
+                link
+                style="margin-left: 4px"
+                @click="mitmInstallVisible = true"
+              >
+                查看安装日志
+              </el-button>
+            </el-form-item>
             <el-form-item label="自动滚动">
               <el-switch v-model="flows.autoScroll" @change="autoSave(true)" />
               <span class="hint text-dim" style="margin-left: 12px">新流量到达时自动滚动到顶部</span>
@@ -790,9 +929,9 @@ function onScroll() {
               <el-input-number v-model="flows.autoScrollDelay" :min="1" :max="60" :step="1" controls-position="right" @change="textDirty = true" />
               <span class="hint text-dim" style="margin-left: 12px">用户手动滚动后暂停自动滚动 N 秒，默认 10 秒</span>
             </el-form-item>
-            <el-form-item label="响应自动切Preview">
+            <el-form-item label="选项卡自动切换">
               <el-switch v-model="form.auto_switch_preview" :active-value="'1'" :inactive-value="'0'" @change="autoSave(true)" />
-              <span class="hint text-dim" style="margin-left: 12px">切换流量时响应视图自动回到 Preview，关闭则保持当前视图</span>
+              <span class="hint text-dim" style="margin-left: 12px">切换流量时自动回到默认选项卡，关闭则保持当前选项卡（无对应选项时清空）</span>
             </el-form-item>
             <el-form-item label="多选工具栏延时">
               <el-input-number v-model="form.multi_select_bar_delay" :min="0" :max="10" :step="0.5" controls-position="right" @change="textDirty = true" />
@@ -926,8 +1065,8 @@ function onScroll() {
               </span>
             </el-form-item>
             <div class="hint text-dim" style="margin-left: 160px">
-              外接模式：OpenNet 不启动 Mihomo，只连接已运行的 Clash Verge / Mihomo 客户端。
-              订阅和节点配置在 Clash 客户端管理，OpenNet 只读取和切换。
+              外接模式：Telnix 不启动 Mihomo，只连接已运行的 Clash Verge / Mihomo 客户端。
+              订阅和节点配置在 Clash 客户端管理，Telnix 只读取和切换。
             </div>
           </el-form>
         </div>
@@ -1169,7 +1308,7 @@ function onScroll() {
             <div class="step-content">
               <div class="step-title">安装证书</div>
               <div class="step-desc">
-                下载的 <code>opennet_root.pem</code> 在手机「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」中选择安装。<br/>
+                下载的 <code>telnix_root.pem</code> 在手机「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」中选择安装。<br/>
                 <span style="color:#e6a23c">⚠ 安卓 7+ 默认不信任用户证书，HTTPS 抓包可能需要 root 后导入系统证书，或对目标 App 改 networkSecurityConfig。</span>
               </div>
               <div class="android-sys-cert" v-if="mobileSetup.android_cert_url">
@@ -1212,12 +1351,36 @@ function onScroll() {
             <div class="step-content">
               <div class="step-title">开始抓包</div>
               <div class="step-desc">
-                OpenNet 抓包页点「开始」，手机操作 App，流量即可在抓包页看到。
+                Telnix 抓包页点「开始」，手机操作 App，流量即可在抓包页看到。
               </div>
             </div>
           </div>
         </template>
       </div>
+    </el-dialog>
+
+    <!-- mitmproxy 安装日志 -->
+    <el-dialog
+      v-model="mitmInstallVisible"
+      title="mitmproxy 安装进度"
+      width="640px"
+      align-center
+      :close-on-click-modal="false"
+      class="install-log-dialog"
+    >
+      <div class="install-status-row">
+        <el-tag v-if="mitmInstallStatus === 'running'" type="warning">安装中…</el-tag>
+        <el-tag v-else-if="mitmInstallStatus === 'success'" type="success">安装成功</el-tag>
+        <el-tag v-else-if="mitmInstallStatus === 'failed'" type="danger">安装失败</el-tag>
+        <el-tag v-else type="info">空闲</el-tag>
+        <span class="hint text-dim" style="margin-left: 12px">
+          安装完成后请点侧边栏底部「重启服务」让 mitmproxy 加载到当前进程
+        </span>
+      </div>
+      <pre class="install-log mono">{{ mitmInstallLog || '（等待日志输出…）' }}</pre>
+      <template #footer>
+        <el-button @click="closeMitmInstallDialog">关闭</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -1399,5 +1562,27 @@ function onScroll() {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
+}
+
+/* mitmproxy 安装日志 */
+.install-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.install-log {
+  max-height: 360px;
+  overflow: auto;
+  background: var(--on-bg-hover, #1a1a2a);
+  border: 1px solid var(--on-border-light, #333);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--on-text, #ddd);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
 }
 </style>

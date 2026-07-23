@@ -42,7 +42,7 @@ async function loadProcesses() {
 async function loadSettings() {
   // 本地缓存立即恢复（避免切换页面时列延迟显示）
   try {
-    const cached = localStorage.getItem('opennet_settings_cache')
+    const cached = localStorage.getItem('telnix_settings_cache')
     if (cached) {
       const s = JSON.parse(cached)
       if (Array.isArray(s.flow_columns)) flowColumns.value = s.flow_columns
@@ -65,7 +65,7 @@ async function loadSettings() {
     }
     // autoScroll/autoScrollDelay 由 store 自己持久化，不从后端覆盖（避免切换页面时被旧后端值重置）
     // 更新本地缓存
-    localStorage.setItem('opennet_settings_cache', JSON.stringify(s))
+    localStorage.setItem('telnix_settings_cache', JSON.stringify(s))
   } catch {
     /* ignore */
   }
@@ -104,9 +104,11 @@ async function onFlowsChanged() {
 
 function startPolling() {
   if (pollTimer !== null) return
-  // 500ms 增量轮询：降低流量显示延迟（用户感知 1 秒太慢）
-  // 增量拉取（since_id）开销很小，500ms 不会影响性能
-  pollTimer = window.setInterval(pollFlows, 500)
+  // SSE 推送：新 flow 立即推送到前端，UI 延迟 <50ms（替代 500ms 轮询）
+  flows.startSSE()
+  // 兜底轮询：5 秒一次，防止 SSE 异常断开未重连时漏掉流量
+  // 也用于触发 loadProcesses（进程列表每 3 秒刷新）
+  pollTimer = window.setInterval(pollFlows, 5000)
 }
 
 function stopPolling() {
@@ -114,6 +116,7 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  flows.stopSSE()
 }
 
 async function onToggleCapture() {
@@ -344,7 +347,7 @@ async function onExport(format: string) {
     const url = URL.createObjectURL(blob)
     const ts = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
-    const fname = `opennet_${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.${ext}`
+    const fname = `telnix_${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.${ext}`
     const a = document.createElement('a')
     a.href = url
     a.download = fname
@@ -462,6 +465,7 @@ onUnmounted(() => {
           :processes="processes"
           :flow-columns="flowColumns"
           :multi-select-bar-delay="multiSelectBarDelay"
+          actions-right
           @ignore-process="onIgnoreProcess"
           @ignore-host="onIgnoreHost"
           @replay="onCtxReplay"

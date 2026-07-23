@@ -1,10 +1,10 @@
-# OpenNet 一键安装脚本
+# Telnix 一键安装脚本
 # Usage: .\install.ps1
 #
 # 安装内容：
 #   1. Python 后端依赖（src\host\pip install -e .）
 #   2. Node.js 前端依赖（src\ui\npm install）
-#   3. 构建前端产物（src\ui\dist → src\host\opennet\web）
+#   3. 构建前端产物（src\ui\dist → src\host\telnix\web）
 
 param(
     [switch]$SkipUi,      # 跳过前端（只装后端）
@@ -16,7 +16,7 @@ $projectRoot = (Resolve-Path $PSScriptRoot).Path
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  OpenNet Installer" -ForegroundColor Cyan
+Write-Host "  Telnix Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -112,9 +112,9 @@ Write-Host "  Installation complete!" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor White
-Write-Host "  1. Start OpenNet:  .\run.ps1" -ForegroundColor White
+Write-Host "  1. Start Telnix:  .\run.ps1" -ForegroundColor White
 Write-Host "  2. Open browser:   http://127.0.0.1:18901" -ForegroundColor White
 Write-Host ""
 Write-Host "For TCP/UDP capture (admin required):" -ForegroundColor Gray
-Write-Host "  python -m opennet.cli system restart-as-admin" -ForegroundColor Gray
+Write-Host "  python -m telnix.cli system restart-as-admin" -ForegroundColor Gray
 Write-Host ""
