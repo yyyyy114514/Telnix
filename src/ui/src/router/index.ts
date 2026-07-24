@@ -12,7 +12,9 @@ import WebSocketView from '../views/WebSocketView.vue'
 import SearchView from '../views/SearchView.vue'
 import SendView from '../views/SendView.vue'
 import ClashView from '../views/ClashView.vue'
-import CoolUIView from '../views/CoolUIView.vue'
+// CoolUI 已下线（保留文件，仅注释路由）
+// import CoolUIView from '../views/CoolUIView.vue'
+import DnsHijackView from '../views/DnsHijackView.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -30,7 +32,9 @@ const router = createRouter({
     { path: '/search', name: 'search', component: SearchView },
     { path: '/send', name: 'send', component: SendView },
     { path: '/clash', name: 'clash', component: ClashView },
-    { path: '/cool', name: 'cool', component: CoolUIView },
+    // CoolUI 已下线（保留文件，仅注释路由）
+    // { path: '/cool', name: 'cool', component: CoolUIView },
+    { path: '/dns-hijack', name: 'dns-hijack', component: DnsHijackView },
   ],
 })
 

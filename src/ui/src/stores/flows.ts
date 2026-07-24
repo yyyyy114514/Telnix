@@ -127,6 +127,7 @@ export const useFlowsStore = defineStore('flows', () => {
   const aiFlowIds = ref<number[]>([])
 
   // 性能优化：debounce saveToCache 到 2 秒，避免每次增量轮询都全量 stringify 阻塞主线程
+  // 实际 stringify 操作用 requestIdleCallback 延迟到空闲期执行，避免阻塞 SSE onmessage
   let saveTimer: number | null = null
   function saveToCache() {
     if (saveTimer != null) {
@@ -134,18 +135,24 @@ export const useFlowsStore = defineStore('flows', () => {
     }
     saveTimer = window.setTimeout(() => {
       saveTimer = null
-      try {
-        // 性能优化：只缓存 lite 字段，去掉大 body 字段，序列化体积减少 80%+
-        const liteFlows = flows.value.map(toLiteFlow)
-        localStorage.setItem(CACHE_KEY, JSON.stringify(liteFlows))
-        // 检查是否需要自动清理
-        const threshold = parseFloat(localStorage.getItem(CACHE_THRESHOLD_KEY) || '10')
-        const autoClean = localStorage.getItem(CACHE_AUTOCLEAN_KEY) !== 'false'
-        if (autoClean && threshold > 0) {
-          autoCleanCache(threshold)
+      // 用 requestIdleCallback 把 stringify 移到空闲期，避免阻塞 SSE 消息处理
+      const doSave = () => {
+        try {
+          const liteFlows = flows.value.map(toLiteFlow)
+          localStorage.setItem(CACHE_KEY, JSON.stringify(liteFlows))
+          const threshold = parseFloat(localStorage.getItem(CACHE_THRESHOLD_KEY) || '10')
+          const autoClean = localStorage.getItem(CACHE_AUTOCLEAN_KEY) !== 'false'
+          if (autoClean && threshold > 0) {
+            autoCleanCache(threshold)
+          }
+        } catch {
+          /* localStorage 满了，忽略 */
         }
-      } catch {
-        /* localStorage 满了，忽略 */
+      }
+      if ('requestIdleCallback' in window) {
+        (window as any).requestIdleCallback(doSave, { timeout: 5000 })
+      } else {
+        doSave()
       }
     }, 2000)
   }
@@ -243,7 +250,9 @@ export const useFlowsStore = defineStore('flows', () => {
     if (polling) return 0
     polling = true
     try {
-      const res: any = await api.getAllFlows({ since_id: maxFlowId.value, limit: 200 })
+      // 性能优化：用 lite=true 只拉轻量字段（不含 body/headers），减少 80%+ 传输量和主线程反序列化开销
+      // 选中详情时会单独 GET /flows/{id} 补齐
+      const res: any = await api.getAllFlows({ since_id: maxFlowId.value, limit: 200, lite: true })
       const list: Flow[] = res.flows || []
       if (!list.length) return 0
       // 后端返回按 id DESC（最大 id 在前），直接插入顶部即可保持降序
@@ -320,6 +329,12 @@ export const useFlowsStore = defineStore('flows', () => {
     total.value = 0
     maxFlowId.value = 0
     selectedId.value = null
+    // 清空 SSE 待处理批次，丢弃 clear 之前已发出的旧 flow 事件
+    sseBatch = []
+    sseBatchScheduled = false
+    // 重启 SSE 连接：丢弃浏览器缓冲中的旧事件，重新同步基线
+    stopSSE()
+    startSSE()
     clearFlowCache()
   }
 
@@ -356,6 +371,31 @@ export const useFlowsStore = defineStore('flows', () => {
   // 后端 /flows/stream 在新 flow 入库后立即推送 lite 字段，
   // 前端收到后直接插入列表顶部，无需轮询。
   // EventSource 自动重连（默认 3 秒）。SSE 连接时后端先推送 init 事件同步基线。
+  // 性能优化：批量攒批处理，避免逐条 unshift + triggerRef 导致的高频重渲染
+  let sseBatch: Flow[] = []
+  let sseBatchScheduled = false
+  function flushSSEBatch() {
+    sseBatchScheduled = false
+    if (!sseBatch.length) return
+    const batch = sseBatch
+    sseBatch = []
+    // 去重 + 按 id DESC 排序（保持列表降序）
+    const deduped = batch.filter(f => !flowIndex.has(f.id))
+    if (!deduped.length) return
+    deduped.sort((a, b) => b.id - a.id)
+    flows.value.unshift(...deduped)
+    for (const f of deduped) flowIndex.set(f.id, f)
+    triggerRef(flows)
+    const newMax = deduped[0].id
+    if (newMax > maxFlowId.value) maxFlowId.value = newMax
+    saveToCache()
+  }
+  function scheduleSSEBatch() {
+    if (sseBatchScheduled) return
+    sseBatchScheduled = true
+    // 用 microtask 攒批：同一 tick 内的多个 SSE 消息合并为一次渲染
+    Promise.resolve().then(flushSSEBatch)
+  }
   function startSSE() {
     if (sseSource) return
     try {
@@ -365,25 +405,21 @@ export const useFlowsStore = defineStore('flows', () => {
           const msg = JSON.parse(ev.data)
           if (msg.type === 'init') {
             // 后端推送当前 max_id，用于检测 SSE 连接期间漏掉的 flow
-            // 如果 maxFlowId < 后端 max_id，说明有漏掉的 flow，用增量查询补齐
             const serverMax = msg.max_id || 0
             if (serverMax > maxFlowId.value) {
               // SSE 重连后可能有漏掉的 flow，用增量查询补齐
               pollNewFlows()
-            } else {
-              maxFlowId.value = serverMax
             }
+            // 只升不降：避免后端重启后 maxFlowId 被清零导致兜底轮询失效
+            if (serverMax > maxFlowId.value) maxFlowId.value = serverMax
           } else if (msg.type === 'flow') {
             const flow: Flow = msg.flow
             if (!flow || typeof flow.id !== 'number') return
             // 去重：flow 已在列表中则跳过（防止重复推送）
             if (flowIndex.has(flow.id)) return
-            // 插入列表顶部（SSE 推送按 id 递增，直接 unshift 保持降序）
-            flows.value.unshift(flow)
-            flowIndex.set(flow.id, flow)
-            triggerRef(flows)
-            if (flow.id > maxFlowId.value) maxFlowId.value = flow.id
-            saveToCache()
+            // 攒批处理：加入待处理队列，microtask 中统一 flush
+            sseBatch.push(flow)
+            scheduleSSEBatch()
           }
         } catch {
           /* ignore parse error */

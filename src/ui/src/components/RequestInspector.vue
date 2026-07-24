@@ -38,7 +38,7 @@ watch(
     if (props.enabledTabs.includes('cookies')) availableTabs.push('cookies')
     if (props.enabledTabs.includes('auth')) availableTabs.push('auth')
     if (props.enabledTabs.includes('xml')) availableTabs.push('xml')
-    if (props.enabledTabs.includes('cert') && props.flow.cert_info) availableTabs.push('cert')
+    if (props.flow.cert_info) availableTabs.push('cert')
     if (!availableTabs.includes(activeTab.value)) {
       activeTab.value = 'headers'
     }
@@ -109,8 +109,8 @@ const tabs = computed(() => {
   if (props.enabledTabs.includes('cookies')) list.push({ name: 'cookies', label: 'Cookies' })
   if (props.enabledTabs.includes('auth')) list.push({ name: 'auth', label: 'Auth' })
   if (props.enabledTabs.includes('xml')) list.push({ name: 'xml', label: 'XML' })
-  // 证书 tab：需在设置中开启且 flow.cert_info 非空时显示（默认关闭）
-  if (props.enabledTabs.includes('cert') && props.flow.cert_info) {
+  // 证书 tab：flow.cert_info 非空时自动显示
+  if (props.flow.cert_info) {
     list.push({ name: 'cert', label: '证书' })
   }
   return list
@@ -128,16 +128,30 @@ const isJson = computed(() => {
   }
 })
 
-// TCP/UDP/WS 流量没有 HTTP headers/json
+// TCP/UDP/WS 流量没有 HTTP headers/json/preview
 const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
   || props.flow.protocol === 'ws')
+
+const statusClass = computed(() => {
+  const c = props.flow.status_code
+  if (c === null) return 'status-null'
+  if (c < 300) return 'status-2xx'
+  if (c < 400) return 'status-3xx'
+  if (c < 500) return 'status-4xx'
+  return 'status-5xx'
+})
 </script>
 
 <template>
   <div class="inspector-pane full flex flex-col">
     <div class="pane-title">
       <span class="method-tag" :class="'m-' + flow.method.toLowerCase()">{{ flow.method }}</span>
+      <span v-if="flow.status_code" class="status-tag" :class="statusClass">{{ flow.status_code }}</span>
       <span class="pane-url mono" title="右键复制 URL" @contextmenu="onUrlContextMenu">{{ flow.url }}</span>
+      <span class="pane-meta mono">
+        {{ flow.size ? (flow.size + ' B') : '' }}
+        <span v-if="flow.duration_ms !== null"> · {{ flow.duration_ms }} ms</span>
+      </span>
     </div>
     <el-tabs v-model="activeTab" class="flex-1 insp-tabs">
       <template v-if="isTcpUdp">
@@ -179,7 +193,7 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
         <el-tab-pane v-if="enabledTabs.includes('xml')" label="XML" name="xml" lazy>
           <JsonView :model-value="bodyStr" :editable="editable" lang="xml" @update:model-value="onBody" />
         </el-tab-pane>
-        <el-tab-pane v-if="enabledTabs.includes('cert') && flow.cert_info" label="证书" name="cert" lazy>
+        <el-tab-pane v-if="flow.cert_info" label="证书" name="cert" lazy>
           <CertInfoView :cert-info="flow.cert_info" />
         </el-tab-pane>
       </template>
@@ -204,7 +218,27 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
 .m-post { color: var(--on-redirect); background: rgba(88,166,255,0.12); border-color: rgba(88,166,255,0.4); }
 .m-put { color: var(--on-warn); background: rgba(210,153,34,0.12); border-color: rgba(210,153,34,0.4); }
 .m-delete { color: var(--on-error); background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.4); }
-.pane-url { color: var(--on-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-tag {
+  font-family: var(--on-font-mono); font-weight: 700; font-size: 11px;
+  padding: 2px 6px; border-radius: 3px; border: 1px solid currentColor;
+  white-space: nowrap; flex-shrink: 0;
+}
+.status-2xx { color: var(--on-ok); }
+.status-3xx { color: var(--on-redirect); }
+.status-4xx { color: var(--on-warn); }
+.status-5xx { color: var(--on-error); }
+.status-null { color: var(--on-text-dim); }
+.pane-url {
+  color: var(--on-text-muted); white-space: nowrap;
+  overflow-x: auto; overflow-y: hidden;
+  flex: 1 1 auto; min-width: 60px;
+  scrollbar-width: none;
+}
+.pane-url::-webkit-scrollbar { height: 0; }
+.pane-url:hover::-webkit-scrollbar { height: 4px; }
+.pane-url:hover::-webkit-scrollbar-thumb { background: var(--on-border-light, rgba(128,128,128,.3)); border-radius: 2px; }
+.pane-url:hover::-webkit-scrollbar-track { background: transparent; }
+.pane-meta { color: var(--on-text-muted); white-space: nowrap; flex-shrink: 0; }
 .insp-tabs { padding: 0 10px; display: flex; flex-direction: column; height: 100%; }
 .insp-tabs :deep(.el-tabs__content) { flex: 1; overflow: hidden; }
 .insp-tabs :deep(.el-tab-pane) { height: 100%; }

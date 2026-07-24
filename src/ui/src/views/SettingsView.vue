@@ -331,6 +331,9 @@ async function testClashConnection() {
 const tutorialVisible = ref(false)
 const tutorialHtml = ref('')
 const tutorialLoading = ref(false)
+
+// ---------- 代理引擎选择说明对话框 ----------
+const engineHelpVisible = ref(false)
 // markdown-it 实例：把 .\docs\xxx 反斜杠路径转为 /docs/xxx，让浏览器能加载
 const tutorialMd = new MarkdownIt({
   html: true,
@@ -499,84 +502,10 @@ async function onProxyEngineChange(val: any) {
   }
 }
 
-// ---------- mitmproxy 安装 ----------
-// 安装状态：idle / running / success / failed
-const mitmInstallStatus = ref<'idle' | 'running' | 'success' | 'failed'>('idle')
-const mitmInstallLog = ref('')
-const mitmInstallVisible = ref(false)
-let mitmInstallPollTimer: number | null = null
-
-async function startInstallMitmproxy() {
-  // 二次确认
-  try {
-    await ElMessageBox.confirm(
-      '将通过 pip 安装 mitmproxy（约 50MB，含依赖）。安装完成后需重启 Telnix 才能生效。继续？',
-      '安装 mitmproxy',
-      { confirmButtonText: '安装', cancelButtonText: '取消', type: 'info' },
-    )
-  } catch {
-    return
-  }
-  try {
-    await api.installDep('mitmproxy')
-    mitmInstallStatus.value = 'running'
-    mitmInstallLog.value = ''
-    mitmInstallVisible.value = true
-    startMitmInstallPolling()
-  } catch (e: any) {
-    ElMessage.error('启动安装失败：' + (e?.message || e))
-  }
-}
-
-function startMitmInstallPolling() {
-  if (mitmInstallPollTimer !== null) return
-  mitmInstallPollTimer = window.setInterval(async () => {
-    try {
-      const r = await api.installDepStatus()
-      mitmInstallStatus.value = r.status
-      mitmInstallLog.value = r.log || ''
-      if (r.status === 'success' || r.status === 'failed') {
-        stopMitmInstallPolling()
-        if (r.status === 'success') {
-          // 同步 mitmproxy 可用性：后端当前进程可能已能 import（部分情况下生效）
-          mitmproxyAvailable.value = !!r.mitmproxy_available
-          if (r.mitmproxy_available) {
-            ElMessage.success('mitmproxy 安装成功，已可切换为代理引擎')
-          } else {
-            ElMessage.warning('mitmproxy 安装成功，但需重启 Telnix 才能加载到当前进程')
-          }
-        } else {
-          ElMessage.error('mitmproxy 安装失败，请查看日志')
-        }
-      }
-    } catch { /* ignore polling errors */ }
-  }, 1500)
-}
-
-function stopMitmInstallPolling() {
-  if (mitmInstallPollTimer !== null) {
-    clearInterval(mitmInstallPollTimer)
-    mitmInstallPollTimer = null
-  }
-}
-
-function closeMitmInstallDialog() {
-  mitmInstallVisible.value = false
-  // 关闭时若仍在运行，后台继续轮询（不阻塞 UI）
-}
-
-async function checkMitmInstallStatusOnce() {
-  // 进入设置页时检查是否有未完成的安装任务
-  try {
-    const r = await api.installDepStatus()
-    if (r.status === 'running') {
-      mitmInstallStatus.value = 'running'
-      mitmInstallLog.value = r.log || ''
-      mitmInstallVisible.value = true
-      startMitmInstallPolling()
-    }
-  } catch { /* ignore */ }
-}
+// ---------- mitmproxy ----------
+// mitmproxy 是必选依赖（pyproject.toml），正常情况下始终可用。
+// mitmproxyAvailable 由后端 /settings 接口注入（MITMPROXY_AVAILABLE），
+// 仅在 import 异常时为 false（如依赖损坏），提示用户重新安装。
 
 async function load() {
   // 先从 localStorage 立即恢复（避免页面空白等待后端）
@@ -589,6 +518,8 @@ async function load() {
       form.value.flow_columns = Array.isArray(s.flow_columns) ? s.flow_columns : []
       // proxy_engine 默认 builtin
       if (!form.value.proxy_engine) form.value.proxy_engine = 'builtin'
+      // mitmproxy 可用性也从缓存恢复（避免异步加载前短暂显示"加载失败"）
+      mitmproxyAvailable.value = !!s.mitmproxy_available
       // autoScroll/autoScrollDelay 由 store 自己从 localStorage 持久化，不在这里覆盖
     }
   } catch { /* ignore */ }
@@ -788,8 +719,6 @@ onMounted(() => {
   loadThrottle()
   // 应用初始禁选状态
   document.documentElement.classList.toggle('list-no-select', listNoSelect.value)
-  // 检查是否有未完成的 mitmproxy 安装任务（恢复窗口）
-  checkMitmInstallStatusOnce()
 })
 
 // 左侧锚点导航分组（顺序与右侧 section 实际渲染顺序一致）
@@ -896,30 +825,13 @@ function onScroll() {
                 <el-option value="async" label="asyncio（实验性）" />
                 <el-option value="mitmproxy" label="mitmproxy（高性能）" :disabled="!mitmproxyAvailable" />
               </el-select>
+              <el-button text type="primary" size="small" style="margin-left: 12px" @click="engineHelpVisible = true">
+                如何选择？
+              </el-button>
               <span class="hint text-dim" style="margin-left: 12px">
-                <span v-if="!mitmproxyAvailable" style="color:#e6a23c">mitmproxy 未安装，</span>
-                切换后需重启后端生效
+                <span v-if="!mitmproxyAvailable" style="color:#e6a23c">mitmproxy 加载失败，请重新运行 install.ps1</span>
+                <span v-else>切换后需重启后端生效</span>
               </span>
-              <el-button
-                v-if="!mitmproxyAvailable"
-                type="warning"
-                size="small"
-                plain
-                style="margin-left: 8px"
-                :loading="mitmInstallStatus === 'running'"
-                @click="startInstallMitmproxy"
-              >
-                <el-icon><Download /></el-icon>&nbsp;安装 mitmproxy
-              </el-button>
-              <el-button
-                v-if="mitmInstallStatus !== 'idle' && mitmInstallStatus !== 'running'"
-                size="small"
-                link
-                style="margin-left: 4px"
-                @click="mitmInstallVisible = true"
-              >
-                查看安装日志
-              </el-button>
             </el-form-item>
             <el-form-item label="自动滚动">
               <el-switch v-model="flows.autoScroll" @change="autoSave(true)" />
@@ -1247,6 +1159,42 @@ function onScroll() {
       </template>
     </el-dialog>
 
+    <!-- 代理引擎选择说明对话框 -->
+    <el-dialog
+      v-model="engineHelpVisible"
+      title="代理引擎如何选择？"
+      width="640px"
+      destroy-on-close
+      align-center
+      :lock-scroll="true"
+    >
+      <div class="engine-help-body">
+        <p class="engine-help-intro">三个引擎都能完成日常 HTTP/HTTPS 抓包，差异主要在适用场景和功能完整度。</p>
+
+        <div class="engine-card">
+          <div class="engine-card-title">内置线程（默认推荐）</div>
+          <div class="engine-card-desc">日常抓包首选。功能最完整，支持本机进程识别、TCP/UDP 抓包、WebSocket 透传、断点、自动回复规则等全部能力，零额外依赖，稳定性最好。已针对高并发做了连接池与后台线程优化，绝大多数场景都不会感觉卡。</div>
+        </div>
+
+        <div class="engine-card">
+          <div class="engine-card-title">mitmproxy（高性能）</div>
+          <div class="engine-card-desc">适合遇到罕见协议或畸形请求无法解析时使用。协议兼容性最强，SSL 握手略快。但会丢失本机进程信息、TCP/UDP 抓包等能力，断点也较易出问题，且需额外安装约 50MB 依赖。未安装时选项不可选。</div>
+        </div>
+
+        <div class="engine-card">
+          <div class="engine-card-title">asyncio（实验性）</div>
+          <div class="engine-card-desc">目前仍是半成品，实际连接处理仍走线程模型，与内置引擎几乎无差异，仅多一层事件循环开销。不建议日常使用，保留作为未来扩展的基础。</div>
+        </div>
+
+        <div class="engine-help-tip">
+          <strong>一句话建议：</strong>保持默认「内置线程」即可；只在遇到解析不出的特殊流量时再尝试 mitmproxy。
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="engineHelpVisible = false">明白了</el-button>
+      </template>
+    </el-dialog>
+
     <!-- Clash 教程对话框 -->
     <el-dialog
       v-model="tutorialVisible"
@@ -1358,30 +1306,6 @@ function onScroll() {
         </template>
       </div>
     </el-dialog>
-
-    <!-- mitmproxy 安装日志 -->
-    <el-dialog
-      v-model="mitmInstallVisible"
-      title="mitmproxy 安装进度"
-      width="640px"
-      align-center
-      :close-on-click-modal="false"
-      class="install-log-dialog"
-    >
-      <div class="install-status-row">
-        <el-tag v-if="mitmInstallStatus === 'running'" type="warning">安装中…</el-tag>
-        <el-tag v-else-if="mitmInstallStatus === 'success'" type="success">安装成功</el-tag>
-        <el-tag v-else-if="mitmInstallStatus === 'failed'" type="danger">安装失败</el-tag>
-        <el-tag v-else type="info">空闲</el-tag>
-        <span class="hint text-dim" style="margin-left: 12px">
-          安装完成后请点侧边栏底部「重启服务」让 mitmproxy 加载到当前进程
-        </span>
-      </div>
-      <pre class="install-log mono">{{ mitmInstallLog || '（等待日志输出…）' }}</pre>
-      <template #footer>
-        <el-button @click="closeMitmInstallDialog">关闭</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -1488,6 +1412,43 @@ function onScroll() {
   margin: 8px 0;
 }
 
+/* 代理引擎选择说明 */
+.engine-help-body {
+  padding: 4px 8px 8px;
+  line-height: 1.7;
+  color: var(--el-text-color-primary, #eee);
+}
+.engine-help-intro {
+  margin: 0 0 16px;
+  color: var(--el-text-color-secondary, #aaa);
+}
+.engine-card {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light, rgba(255,255,255,0.04));
+  border: 1px solid var(--el-border-color, rgba(255,255,255,0.08));
+}
+.engine-card-title {
+  margin-bottom: 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-color-primary, #409eff);
+}
+.engine-card-desc {
+  font-size: 13px;
+  color: var(--el-text-color-regular, #ccc);
+}
+.engine-help-tip {
+  margin-top: 16px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--el-color-primary-light-9, rgba(64,158,255,0.1));
+  border-left: 3px solid var(--el-color-primary, #409eff);
+  font-size: 13px;
+  color: var(--el-text-color-regular, #ccc);
+}
+
 /* 手机抓包向导 */
 .mobile-wizard {
   padding: 8px 4px;
@@ -1562,27 +1523,5 @@ function onScroll() {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
-}
-
-/* mitmproxy 安装日志 */
-.install-status-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.install-log {
-  max-height: 360px;
-  overflow: auto;
-  background: var(--on-bg-hover, #1a1a2a);
-  border: 1px solid var(--on-border-light, #333);
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--on-text, #ddd);
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
 }
 </style>

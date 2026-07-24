@@ -15,20 +15,22 @@ const router = useRouter()
 
 // 所有页面常驻侧边栏（取消高级功能开关，避免懒加载卡顿）
 // 顺序可拖动排序，持久化到 localStorage
+// cat：分类色变量名（用于导航活动态左侧色条 + 图标着色，让侧边栏不单调）
 const DEFAULT_NAV = [
-  { path: '/capture', label: '抓包', icon: 'Aim' },
-  { path: '/analyze', label: '全局分析', icon: 'DataAnalysis' },
-  { path: '/auto-reply', label: '自动修改', icon: 'SetUp' },
-  { path: '/send', label: '发包', icon: 'Promotion' },
-  { path: '/clash', label: 'Clash', icon: 'ClashIcon' },
-  { path: '/cool', label: 'CoolUI', icon: 'DataBoard' },
-  { path: '/ai', label: 'AI 分析', icon: 'MagicStick' },
-  { path: '/codec', label: '编解码', icon: 'Key' },
-  { path: '/search', label: '搜索', icon: 'Search' },
-  { path: '/raw', label: 'TCP/UDP', icon: 'Connection' },
-  { path: '/ws', label: 'WebSocket', icon: 'ChatLineRound' },
-  { path: '/logs', label: '日志', icon: 'Document' },
-  { path: '/settings', label: '设置', icon: 'Setting' },
+  { path: '/capture',     label: '抓包',       icon: 'Aim',           cat: 'capture' },
+  { path: '/analyze',     label: '全局分析',   icon: 'DataAnalysis',  cat: 'analyze' },
+  { path: '/auto-reply',  label: '自动修改',   icon: 'SetUp',         cat: 'auto' },
+  { path: '/send',        label: '发包',       icon: 'Promotion',     cat: 'send' },
+  { path: '/clash',       label: 'Clash',      icon: 'ClashIcon',     cat: 'clash' },
+  // CoolUI 已下线（文件保留，入口移除）
+  { path: '/ai',          label: 'AI 分析',    icon: 'MagicStick',    cat: 'ai' },
+  { path: '/codec',       label: '编解码',     icon: 'Key',           cat: 'codec' },
+  { path: '/search',      label: '搜索',       icon: 'Search',        cat: 'search' },
+  { path: '/raw',         label: 'TCP/UDP',    icon: 'Connection',    cat: 'raw' },
+  { path: '/dns-hijack',  label: 'DNS 劫持',   icon: 'Histogram',     cat: 'dns' },
+  { path: '/ws',          label: 'WebSocket',  icon: 'ChatLineRound', cat: 'ws' },
+  { path: '/logs',        label: '日志',       icon: 'Document',      cat: 'log' },
+  { path: '/settings',    label: '设置',       icon: 'Setting',       cat: 'settings' },
 ]
 const NAV_ORDER_KEY = 'telnix_nav_order'
 
@@ -324,7 +326,9 @@ function onSystemCmd(cmd: string) {
     <!-- 侧边栏 -->
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-logo">ON</div>
+        <svg class="brand-logo" viewBox="0 0 1028 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="34" height="34">
+          <path d="M1006.633925 536.184845l-212.082369-136.555338V197.829919a47.352209 47.352209 0 0 0-21.593841-39.948606L539.230091 7.392806a46.272517 46.272517 0 0 0-50.179973 0L255.322494 157.881313a47.506451 47.506451 0 0 0-21.645255 39.948606v202.005243L21.646284 536.390501a47.403623 47.403623 0 0 0-21.645255 39.948606v248.740485a47.403623 47.403623 0 0 0 21.645255 39.948606l233.67621 150.488507a46.272517 46.272517 0 0 0 50.231387 0L514.140104 881.63489l208.586223 134.34454a46.272517 46.272517 0 0 0 50.231388 0l233.67621-150.488507a47.506451 47.506451 0 0 0 21.645255-40.411331v-249.151796a47.506451 47.506451 0 0 0-21.645255-39.742951zM514.140104 103.074088l186.940968 120.462785v176.092634L514.140104 520.040878 327.147723 399.629507V223.536873z m420.668592 696.247136l-186.992382 120.462785-186.940968-120.462785v-176.04122l203.444833-131.002636 170.488517 109.768693v197.326577z" fill="currentColor" />
+        </svg>
         <div class="brand-text">
           <div class="brand-name">Telnix</div>
           <div class="brand-sub">抓包工具</div>
@@ -335,7 +339,10 @@ function onSystemCmd(cmd: string) {
           v-for="item in visibleNavItems"
           :key="item.path"
           class="nav-item"
-          :class="{ active: activePath === item.path, dragging: dragPath === item.path }"
+          :class="[
+            `nav-cat-${item.cat}`,
+            { active: activePath === item.path, dragging: dragPath === item.path }
+          ]"
           draggable="true"
           @click="go(item.path)"
           @dragstart="onNavDragStart(item.path)"
@@ -399,42 +406,105 @@ function onSystemCmd(cmd: string) {
 .sidebar {
   width: 180px; flex-shrink: 0;
   background: var(--on-bg-sidebar);
+  background-image: var(--on-gradient-sidebar);
   border-right: 1px solid var(--on-border);
   display: flex; flex-direction: column;
+  position: relative;
+}
+/* 侧边栏右侧细微高光，制造层次 */
+.sidebar::after {
+  content: ''; position: absolute; top: 0; right: 0; bottom: 0;
+  width: 1px;
+  background: linear-gradient(180deg, transparent 0%, var(--on-border-light) 20%, var(--on-border-light) 80%, transparent 100%);
+  pointer-events: none;
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
   padding: 16px 14px; border-bottom: 1px solid var(--on-border-light);
+  position: relative;
+}
+.brand::after {
+  content: ''; position: absolute; left: 14px; right: 14px; bottom: -1px; height: 1px;
+  background: linear-gradient(90deg, transparent 0%, var(--on-accent-glow) 50%, transparent 100%);
 }
 .brand-logo {
-  width: 34px; height: 34px; border-radius: 7px;
-  background: linear-gradient(135deg, var(--on-accent), var(--on-accent-dim));
-  color: #001b18; font-weight: 800; font-size: 14px;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 0 16px var(--on-accent-glow);
+  width: 34px; height: 34px;
+  color: var(--on-accent);
+  filter: drop-shadow(0 0 8px var(--on-accent-glow));
+  flex-shrink: 0;
+  animation: brand-glow 3.6s ease-in-out infinite;
 }
-.brand-name { font-size: 15px; font-weight: 700; color: var(--on-text); letter-spacing: .3px; }
-.brand-sub { font-size: 11px; color: var(--on-text-dim); }
+@keyframes brand-glow {
+  0%, 100% { filter: drop-shadow(0 0 6px var(--on-accent-glow)); }
+  50% { filter: drop-shadow(0 0 12px var(--on-accent-glow)); }
+}
+.brand-name {
+  font-size: 16px; font-weight: 700;
+  background: var(--on-gradient-accent);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+  letter-spacing: .4px;
+}
+.brand-sub { font-size: 11px; color: var(--on-text-dim); letter-spacing: .5px; }
 
-.nav { flex: 1; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.nav { flex: 1; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px; border-radius: 6px; cursor: pointer;
+  padding: 9px 12px; border-radius: var(--on-radius-md); cursor: pointer;
   color: var(--on-text-muted); font-size: 13.5px;
-  transition: all .15s;
+  transition: all .18s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  border: 1px solid transparent;
 }
-.nav-item:hover { background: var(--on-bg-hover); color: var(--on-text); }
+.nav-item:hover {
+  background: var(--on-bg-hover); color: var(--on-text);
+  transform: translateX(2px);
+}
 .nav-item.active {
-  background: var(--on-accent-glow); color: var(--on-accent);
-  box-shadow: inset 2px 0 0 var(--on-accent);
+  color: var(--on-cat-color, var(--on-accent));
+  background: var(--on-cat-glow, var(--on-accent-glow));
+  box-shadow: inset 3px 0 0 var(--on-cat-color, var(--on-accent)),
+              0 1px 3px var(--on-cat-glow, var(--on-accent-glow));
+  font-weight: 600;
+  border-color: var(--on-cat-glow, var(--on-accent-glow));
 }
-.nav-item.dragging { opacity: 0.4; }
+.nav-item.active .nav-icon {
+  color: var(--on-cat-color, var(--on-accent));
+  filter: drop-shadow(0 0 4px var(--on-cat-glow, var(--on-accent-glow)));
+}
+.nav-item.dragging { opacity: 0.4; transform: scale(0.98); }
 .nav-item[draggable="true"] { cursor: grab; }
 .nav-item[draggable="true"]:active { cursor: grabbing; }
-.nav-icon { font-size: 17px; }
+.nav-icon { font-size: 17px; transition: all .18s; }
+.nav-item:hover .nav-icon { transform: scale(1.1); }
 
-.sidebar-footer { padding: 10px 14px; border-top: 1px solid var(--on-border-light); }
-.proxy-port { font-size: 11px; }
+/* 每个分类的配色（活动态色 + glow） */
+.nav-cat-capture    { --on-cat-color: var(--on-cat-capture);    --on-cat-glow: var(--on-accent-glow); }
+.nav-cat-analyze    { --on-cat-color: var(--on-cat-analyze);    --on-cat-glow: var(--on-indigo-glow); }
+.nav-cat-auto       { --on-cat-color: var(--on-cat-auto);       --on-cat-glow: var(--on-amber-glow); }
+.nav-cat-send       { --on-cat-color: var(--on-cat-send);       --on-cat-glow: var(--on-blue-glow); }
+.nav-cat-clash      { --on-cat-color: var(--on-cat-clash);      --on-cat-glow: var(--on-rose-glow); }
+.nav-cat-cool       { --on-cat-color: var(--on-cat-cool);       --on-cat-glow: var(--on-cyan-glow); }
+.nav-cat-ai         { --on-cat-color: var(--on-cat-ai);         --on-cat-glow: var(--on-purple-glow); }
+.nav-cat-codec      { --on-cat-color: var(--on-cat-codec);      --on-cat-glow: var(--on-emerald-glow); }
+.nav-cat-search     { --on-cat-color: var(--on-cat-search);     --on-cat-glow: var(--on-blue-glow); }
+.nav-cat-raw        { --on-cat-color: var(--on-cat-raw);        --on-cat-glow: var(--on-pink-glow); }
+.nav-cat-ws         { --on-cat-color: var(--on-cat-ws);         --on-cat-glow: var(--on-accent-glow); }
+.nav-cat-log        { --on-cat-color: var(--on-cat-log);        --on-cat-glow: var(--on-bg-hover); }
+.nav-cat-settings   { --on-cat-color: var(--on-cat-settings);   --on-cat-glow: var(--on-bg-hover); }
+
+.sidebar-footer {
+  padding: 10px 14px; border-top: 1px solid var(--on-border-light);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.proxy-port {
+  font-size: 11px; display: flex; align-items: center; gap: 5px;
+}
+.proxy-port::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--on-accent); box-shadow: 0 0 6px var(--on-accent);
+}
+.restart-btn { width: 100%; }
 
 /* 主区 */
 .main { min-width: 0; background: var(--on-bg); }

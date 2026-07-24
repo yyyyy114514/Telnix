@@ -5,25 +5,44 @@
 断点在代理层阻塞等待 API 放行。
 """
 
+import base64
+import concurrent.futures
+import gzip
 import json
 import os
 import re
+import select
 import socket
 import ssl
 import threading
 import time
-import concurrent.futures
+import traceback
+import zlib
 from datetime import datetime
+from urllib.parse import urlsplit
+
+from .. import db
+from .. import logger
+from ..auto_reply.rules import (
+    find_matching_rule, has_active_rules, host_matches_any_rule)
+from ..cert_info import get_cert_info
+from ..clash.client import get_upstream_proxy
+from ..ip_region import lookup as ip_region_lookup
+from .breakpoint import BreakpointManager
+from .process_lookup import ProcessLookup
+from .ssl_bump import SSLBumpManager
+from . import throttle
 
 # 记录到 DB 的 body 上限（字节）。超过则截断并加标记，避免大 body 阻塞代理线程
 # （视频/图片流可能几 MB ~ 几十 MB，base64 编码后 3x 膨胀 + DB INSERT 慢）
 MAX_RECORDED_BODY = 512 * 1024  # 512KB
 
 # 大响应体阈值：超过此大小跳过解压，直接转发原始字节。
-# 性能优化：解压几 MB 的 gzip/br 需几百 ms，阻塞代理线程。
+# 性能优化：解压几百 KB 的 gzip/br 需几十~几百 ms，阻塞代理线程。
 # 大 body 通常是视频/图片/下载，modify_response 规则对二进制内容无意义。
 # 仍会记录前 512KB（截断）用于 Inspector 查看，但不解压。
-MAX_DECOMPRESS_BODY = 1024 * 1024  # 1MB
+# 1MB→256KB：网页常见 200-800KB gzip JSON/HTML，256KB 以内才解压，减少主线程阻塞
+MAX_DECOMPRESS_BODY = 256 * 1024  # 256KB
 
 
 def _truncate_for_record(b: bytes) -> str:
@@ -42,26 +61,66 @@ def _truncate_for_record(b: bytes) -> str:
     try:
         text = b.decode("utf-8")
     except UnicodeDecodeError:
-        import base64
         text = "base64:" + base64.b64encode(b).decode("ascii")
     if truncated:
         text += f"\n\n[... body 已截断，原始大小 {len(b)} 字节，仅记录前 {MAX_RECORDED_BODY} 字节 ...]"
     return text
-from urllib.parse import urlsplit
-
-from .. import db
-from .breakpoint import BreakpointManager
-from .process_lookup import ProcessLookup
-from .ssl_bump import SSLBumpManager
-from . import throttle
 
 
 # ---------- DNS 预解析线程池（模块级单例） ----------
 # 异步执行 socket.getaddrinfo + IP 属地查询，避免阻塞代理线程
 # 线程池任务只做 DNS 解析 + 本地 IP 属地查询，不依赖代理线程，不会引入死锁
 _DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="dns-resolver"
+    max_workers=32, thread_name_prefix="dns-resolver"
 )
+
+# ---------- 证书信息解析线程池（模块级单例） ----------
+# 异步执行 getpeercert + cryptography 解析（50-100ms），避免阻塞代理主线程
+_CERT_INFO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="cert-info"
+)
+
+
+def _async_cert_info(target_sock):
+    """异步获取对端证书信息，返回 Future（懒获取结果）。
+
+    将 getpeercert + get_cert_info（cryptography 解析 + SHA256）提交到后台线程，
+    避免阻塞代理主线程。调用方通过 _get_cert_info_result 懒获取结果。
+    """
+    try:
+        return _CERT_INFO_EXECUTOR.submit(_do_cert_info, target_sock)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _do_cert_info(target_sock) -> str:
+    """在工作线程中执行证书信息解析。"""
+    try:
+        cert_der = target_sock.getpeercert(binary_form=True)
+        if cert_der:
+            info = get_cert_info(cert_der)
+            if info:
+                return json.dumps(info)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _get_cert_info_result(future) -> str:
+    """非阻塞获取 cert_info Future 的结果。
+
+    性能优化：原 timeout=5.0 会阻塞代理主线程最多 5 秒等待证书解析，
+    是"网页加载后 5 秒才显示包"的核心元凶。cert_info 是次要信息（证书详情），
+    不应阻塞响应返回。改为非阻塞：未完成则返回空，复用连接时再重试取值。
+    """
+    if future is None:
+        return ""
+    try:
+        return future.result(timeout=0)
+    except concurrent.futures.TimeoutError:
+        return ""  # 未完成，返回空（不阻塞）
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _resolve_host_for_region(host: str, port: int) -> tuple[str, str]:
@@ -76,8 +135,7 @@ def _resolve_host_for_region(host: str, port: int) -> tuple[str, str]:
     ip_region = ""
     if remote_ip:
         try:
-            from ..ip_region import lookup
-            ip_region = lookup(remote_ip)
+            ip_region = ip_region_lookup(remote_ip)
         except Exception:  # noqa: BLE001
             pass
     return remote_ip, ip_region
@@ -88,33 +146,49 @@ class _PooledConn:
     """到目标服务器的可复用连接。
 
     存 reader 而非裸 sock，以保留 SocketReader 缓冲区中可能的多读数据。
+    cert_info：首次 TLS 握手时获取的证书信息 JSON，复用连接时直接返回（避免重复 getpeercert）。
+    cert_info_future：新建连接时异步解析证书的 Future，复用连接时非阻塞重试取值
+    （首次请求时 future 可能未完成，cert_info 为空；复用时大概率已完成，可取到值）。
     """
     def __init__(self, sock: socket.socket, reader: 'SocketReader',
-                 host: str, port: int, scheme: str):
+                 host: str, port: int, scheme: str, cert_info: str = "",
+                 cert_info_future=None):
         self.sock = sock
         self.reader = reader
         self.host = host
         self.port = port
         self.scheme = scheme
+        self.cert_info = cert_info  # 缓存证书信息，复用连接时返回
+        self.cert_info_future = cert_info_future  # 异步证书解析 Future
         self.last_used = time.time()
 
 
 class _ConnPool:
     """简单的 keep-alive 连接池，按 (host, port, scheme) 缓存连接。
 
-    每个连接空闲超过 30 秒自动过期。每次最多缓存 4 个连接 per key。
+    每个连接空闲超过 120 秒自动过期。每个 key 最多缓存 32 个连接。
+
+    性能优化：分片锁（16 桶），不同 host 的连接 get/put 可并行，
+    避免高并发下（30 域名 × 6 连接 = 180 线程）单锁串行化。
     """
-    _MAX_IDLE = 60.0  # 秒（增大以提升复用率）
+    _MAX_IDLE = 120.0  # 秒（60→120，匹配主流 keep-alive 超时，提升复用率）
     _MAX_PER_KEY = 32  # 性能优化：从 4 增大到 32，避免高并发下连接池耗尽导致新建连接
+    _SHARD_COUNT = 16  # 分片数，减少锁争用
 
     def __init__(self):
-        self._pool: dict[tuple, list[_PooledConn]] = {}
-        self._lock = threading.Lock()
+        self._pools: list[dict[tuple, list[_PooledConn]]] = [
+            {} for _ in range(self._SHARD_COUNT)]
+        self._locks: list[threading.Lock] = [
+            threading.Lock() for _ in range(self._SHARD_COUNT)]
+
+    def _shard(self, key: tuple) -> int:
+        return hash(key) % self._SHARD_COUNT
 
     def get(self, host: str, port: int, scheme: str) -> _PooledConn | None:
         key = (host, port, scheme)
-        with self._lock:
-            conns = self._pool.get(key)
+        idx = self._shard(key)
+        with self._locks[idx]:
+            conns = self._pools[idx].get(key)
             if not conns:
                 return None
             while conns:
@@ -130,8 +204,9 @@ class _ConnPool:
 
     def put(self, conn: _PooledConn):
         key = (conn.host, conn.port, conn.scheme)
-        with self._lock:
-            conns = self._pool.setdefault(key, [])
+        idx = self._shard(key)
+        with self._locks[idx]:
+            conns = self._pools[idx].setdefault(key, [])
             if len(conns) >= self._MAX_PER_KEY:
                 try:
                     conn.sock.close()
@@ -141,14 +216,15 @@ class _ConnPool:
             conns.append(conn)
 
     def close_all(self):
-        with self._lock:
-            for conns in self._pool.values():
-                for c in conns:
-                    try:
-                        c.sock.close()
-                    except OSError:
-                        pass
-            self._pool.clear()
+        for idx in range(self._SHARD_COUNT):
+            with self._locks[idx]:
+                for conns in self._pools[idx].values():
+                    for c in conns:
+                        try:
+                            c.sock.close()
+                        except OSError:
+                            pass
+                self._pools[idx].clear()
 
 
 # 响应状态码原因短语（常用）
@@ -168,35 +244,51 @@ def _reason(code: int) -> str:
 # ---------- HTTP 头容器 ----------
 
 class Headers:
-    """大小写不敏感的头容器，保留原始顺序与大小写。"""
+    """大小写不敏感的头容器，保留原始顺序与大小写。
+
+    性能优化：_index dict 提供 O(1) 按名查找，避免每次 get/set/has/remove
+    都 O(n) 扫描 _items 并对每个 name 调 .lower()。
+    """
 
     def __init__(self):
         self._items: list[list[str]] = []  # [[name, value], ...]
+        self._index: dict[str, int] = {}  # lower_name -> 首个匹配的 _items 下标
 
     def add(self, name: str, value: str):
         self._items.append([name, value])
+        nl = name.lower()
+        if nl not in self._index:
+            self._index[nl] = len(self._items) - 1
 
     def get(self, name: str, default=None):
-        nl = name.lower()
-        for k, v in self._items:
-            if k.lower() == nl:
-                return v
+        idx = self._index.get(name.lower())
+        if idx is not None:
+            return self._items[idx][1]
         return default
 
     def set(self, name: str, value: str):
         nl = name.lower()
-        for it in self._items:
-            if it[0].lower() == nl:
-                it[1] = value
-                return
+        idx = self._index.get(nl)
+        if idx is not None:
+            self._items[idx][1] = value
+            return
         self._items.append([name, value])
+        self._index[nl] = len(self._items) - 1
 
     def remove(self, name: str):
         nl = name.lower()
+        if nl not in self._index:
+            return
+        # remove 罕见，重建 _items + _index 可接受
         self._items = [it for it in self._items if it[0].lower() != nl]
+        self._index.clear()
+        for i, it in enumerate(self._items):
+            key = it[0].lower()
+            if key not in self._index:
+                self._index[key] = i
 
     def has(self, name: str) -> bool:
-        return self.get(name) is not None
+        return name.lower() in self._index
 
     def to_dict(self) -> dict:
         d = {}
@@ -407,6 +499,14 @@ class ProxyServer:
         self._forward_ssl_ctx.verify_mode = ssl.CERT_NONE
         # HTTP/2 支持：到目标服务器的连接通过 ALPN 协商 h2 或 http/1.1
         self._forward_ssl_ctx.set_alpn_protocols(["h2", "http/1.1"])
+        # WebSocket over TLS (wss) 专用 SSL context：
+        # 只通告 http/1.1，避免 ALPN 协商到 h2（RFC 9113 禁止在 h2 上
+        # 发送 Connection/Upgrade 等 connection-specific 头，会导致 WS
+        # 握手失败，浏览器收到 code=1006 异常断开）
+        self._ws_ssl_ctx = ssl.create_default_context()
+        self._ws_ssl_ctx.check_hostname = False
+        self._ws_ssl_ctx.verify_mode = ssl.CERT_NONE
+        self._ws_ssl_ctx.set_alpn_protocols(["http/1.1"])
         # 上游代理（Clash/Mihomo 集成用）：启用时所有出站连接先走 CONNECT 到上游代理
         # 由 clash.client.get_upstream_proxy() 动态返回 (host, port) 或 None
         self._upstream_proxy_override: tuple[str, int] | None = None
@@ -416,7 +516,6 @@ class ProxyServer:
         if self._upstream_proxy_override is not None:
             return self._upstream_proxy_override
         try:
-            from ..clash.client import get_upstream_proxy
             return get_upstream_proxy()
         except Exception:  # noqa: BLE001
             return None
@@ -449,8 +548,8 @@ class ProxyServer:
             port_bytes = str(port).encode("ascii")
             req = b"CONNECT " + host_bytes + b":" + port_bytes + b" HTTP/1.1\r\nHost: " + host_bytes + b":" + port_bytes + b"\r\n\r\n"
             s.sendall(req)
-            # 读取代理响应时设独立超时（10s），避免代理异常长时间卡死
-            s.settimeout(10)
+            # 读取代理响应时设独立超时（3s），避免代理异常长时间卡死
+            s.settimeout(3)
             buf = b""
             while b"\r\n\r\n" not in buf:
                 chunk = s.recv(4096)
@@ -611,7 +710,6 @@ class ProxyServer:
         """通配符匹配 host（* → .*, ? → .），大小写不敏感。"""
         if not pattern:
             return False
-        import re
         regex_str = '^' + re.escape(pattern).replace(r'\*', '.*').replace(r'\?', '.') + '$'
         try:
             return re.match(regex_str, host, re.IGNORECASE) is not None
@@ -685,7 +783,6 @@ class ProxyServer:
             if self._ignored_pids or self._ignored_names:
                 return True
         # 有启用的自动回复规则时需要解密 HTTPS，也需要 PID
-        from ..auto_reply.rules import has_active_rules
         return has_active_rules()
 
     def _handle_client(self, client_sock: socket.socket, client_addr):
@@ -724,7 +821,6 @@ class ProxyServer:
         # - 未抓包但有启用的自动修改规则：仅 bump 匹配某条规则 pattern 的 host
         #   避免对所有 HTTPS 都 bump 导致钉扎站点（edge/bing/bilibili 等）断连
         # - 证书已装 + 非忽略进程 + 非专注外进程
-        from ..auto_reply.rules import has_active_rules, host_matches_any_rule
         if self.capturing:
             need_bump = True
         elif has_active_rules():
@@ -780,7 +876,6 @@ class ProxyServer:
             tls_sock = ssl_ctx.wrap_socket(client_sock, server_side=True)
         except (ssl.SSLError, OSError) as e:
             # 证书钉扎（pinning）诊断：客户端拒绝我们的证书，通常是 pinning
-            from .. import logger
             from datetime import datetime
             err_str = str(e).lower()
             is_pinning = any(k in err_str for k in ("tlsv1 alert", "handshake failure",
@@ -828,7 +923,13 @@ class ProxyServer:
                 pass
 
     def _tunnel(self, client_sock, reader, host, port):
-        """纯隧道：不解密，直接把字节在客户端与目标之间双向转发。"""
+        """纯隧道：不解密，直接把字节在客户端与目标之间双向转发。
+
+        性能优化：用 select.select 单线程驱动双向转发，替代原双线程 pipe 模型。
+        - 原模型：每个 CONNECT 开 2 个 pipe 线程 + join 阻塞，30 个并发域名 = 90 线程，GIL 严重争用
+        - 新模型：单线程 select 循环，线程数减少 2/3，GIL 争用大幅降低
+        - 额外收益：select timeout 实现空闲超时（120s 无活动自动关闭），防止僵尸连接占用线程
+        """
         # 弱网模拟：每连接启动延迟（模拟 RTT）
         throttle.delay()
         try:
@@ -847,34 +948,41 @@ class ProxyServer:
         client_sock.settimeout(None)
         target.settimeout(None)
 
-        def pipe(src, dst):
-            try:
-                while True:
-                    data = src.recv(65536)
+        # select 驱动双向转发（单线程，替代双线程 pipe 模型）
+        socks = [client_sock, target]
+        IDLE_TIMEOUT = 120.0  # 120s 无活动则关闭（匹配连接池 _MAX_IDLE）
+        try:
+            while True:
+                r, _, _ = select.select(socks, [], [], IDLE_TIMEOUT)
+                if not r:
+                    break  # 空闲超时
+                done = False
+                for s in r:
+                    dst = target if s is client_sock else client_sock
+                    try:
+                        data = s.recv(65536)
+                    except OSError:
+                        done = True
+                        break
                     if not data:
+                        done = True
                         break
                     # 弱网模拟：按 drop_pct 概率丢包
                     if throttle.should_drop():
                         continue
                     # 弱网模拟：限速发送
-                    throttle.send_throttled(dst, data)
-            except OSError:
-                pass
+                    try:
+                        throttle.send_throttled(dst, data)
+                    except OSError:
+                        done = True
+                        break
+                if done:
+                    break
+        finally:
             try:
-                dst.shutdown(socket.SHUT_WR)
+                target.close()
             except OSError:
                 pass
-
-        t1 = threading.Thread(target=pipe, args=(client_sock, target), daemon=True)
-        t2 = threading.Thread(target=pipe, args=(target, client_sock), daemon=True)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-        try:
-            target.close()
-        except OSError:
-            pass
 
     # ---------- HTTP ----------
 
@@ -888,15 +996,28 @@ class ProxyServer:
                          default_host=None, default_port=None, first_line=None):
         """在一条连接上循环处理 HTTP 请求（keep-alive）。"""
         line = first_line
+        # 获取 client_addr 用于 PID 重试（首次 lookup miss 后后续请求重试）
+        client_addr = None
+        if pid is None and self._needs_pid():
+            try:
+                client_addr = client_sock.getpeername()
+            except OSError:
+                client_addr = None
         while self._running:
             # first_line 为 None 时从连接读取下一行
             if line is None:
                 try:
+                    # keep-alive 空闲超时：30s 无新请求则关闭连接
+                    # 防止浏览器空闲 keep-alive 连接永久占用代理线程
+                    # （浏览器默认 keep-alive idle 15-30s，30s 超时确保浏览器主动关闭前不误杀）
+                    client_sock.settimeout(30)
                     line = reader.read_line()
-                except OSError:
+                except (OSError, socket.timeout):
                     break
                 if not line:
                     break
+            # 请求处理期间取消超时（响应可能较慢，由 _connect_target 和 socket 自身超时控制）
+            client_sock.settimeout(None)
             # 过滤 HTTP/2 connection preface（PRI * HTTP/2.0）
             # 客户端可能通过 ALPN 协商到 h2，但代理仅支持 HTTP/1.1 解析，
             # h2 preface 不是有效 HTTP/1.1 请求，跳过避免记录无效流量
@@ -911,6 +1032,10 @@ class ProxyServer:
                     pass
                 # 客户端要求 h2，但代理只能 HTTP/1.1，关闭连接
                 break
+            # 进程名重试：首次 lookup 超时返回 None 时，后续 keep-alive 请求重试
+            # （同步查找带 200ms 超时，通常首次就能命中，此处为兜底）
+            if pid is None and client_addr and self._needs_pid():
+                pid, proc_name = self.process_lookup.lookup(client_addr)
             keep_alive = self._process_one_request(
                 client_sock, reader, line, pid, proc_name, scheme,
                 default_host, default_port)
@@ -966,7 +1091,6 @@ class ProxyServer:
             orig_url, method=method, status_code=None,
             pid=pid, process_name=proc_name)
         if rule:
-            from .. import logger
             logger.info("proxy", f"匹配到自动回复规则: action={rule['action']}, pattern={rule['pattern']}",
                         f"URL={orig_url}")
             # §3.2 命中计数：匹配成功即自增（flow_id 此阶段可能为 None）
@@ -992,7 +1116,6 @@ class ProxyServer:
         # mock_request：写死请求（用预设的 method/url/headers/body 转发到目标服务器，返回真实响应）
         # 区别于 mock（不转发直接返回伪造响应），mock_request 会真的请求服务器，但请求内容是预设的
         if rule and rule["action"] == "mock_request":
-            from .. import logger
             try:
                 m_method = (rule.get("mock_method") or "GET").upper()
                 m_url = rule.get("mock_url") or orig_url
@@ -1040,30 +1163,34 @@ class ProxyServer:
 
         # modify_request：在转发前应用规则到请求头/体（记录原始 vs 修改后 diff 供 agent 排查）
         if rule and rule["action"] == "modify_request":
-            from .. import logger
             # §3.8 delay-request 动作：在转发前延迟（毫秒）
             _apply_delay(rule, target_name="delay-request",
                          log_label="delay-request")
-            # 记录原始值（前 200 字节），便于 agent 对比规则是否生效
-            try:
-                orig_headers_str = str(headers.to_dict())
-                orig_body_preview = body[:200].hex() if body else "(empty)"
-                orig_body_text = body[:200].decode("utf-8", errors="replace") if body else ""
-            except Exception:  # noqa: BLE001
-                orig_headers_str, orig_body_preview, orig_body_text = "(读取失败)", "", ""
+            # 性能优化：detail 中的 hex/decode/str(dict) 较昂贵，仅在 INFO 级别启用时计算
+            _log_detail = logger.is_enabled(logger.INFO)
+            if _log_detail:
+                try:
+                    orig_headers_str = str(headers.to_dict())
+                    orig_body_preview = body[:200].hex() if body else "(empty)"
+                    orig_body_text = body[:200].decode("utf-8", errors="replace") if body else ""
+                except Exception:  # noqa: BLE001
+                    orig_headers_str, orig_body_preview, orig_body_text = "(读取失败)", "", ""
             headers, body = _apply_modify_request(headers, body, rule)
-            try:
-                new_headers_str = str(headers.to_dict())
-                new_body_preview = body[:200].hex() if body else "(empty)"
-                new_body_text = body[:200].decode("utf-8", errors="replace") if body else ""
-            except Exception:  # noqa: BLE001
-                new_headers_str, new_body_preview, new_body_text = "(读取失败)", "", ""
-            detail = (f"原始 headers: {orig_headers_str}\n"
-                      f"修改后 headers: {new_headers_str}\n"
-                      f"原始 body(hex): {orig_body_preview}\n"
-                      f"修改后 body(hex): {new_body_preview}\n"
-                      f"原始 body(text): {orig_body_text}\n"
-                      f"修改后 body(text): {new_body_text}")
+            if _log_detail:
+                try:
+                    new_headers_str = str(headers.to_dict())
+                    new_body_preview = body[:200].hex() if body else "(empty)"
+                    new_body_text = body[:200].decode("utf-8", errors="replace") if body else ""
+                except Exception:  # noqa: BLE001
+                    new_headers_str, new_body_preview, new_body_text = "(读取失败)", "", ""
+                detail = (f"原始 headers: {orig_headers_str}\n"
+                          f"修改后 headers: {new_headers_str}\n"
+                          f"原始 body(hex): {orig_body_preview}\n"
+                          f"修改后 body(hex): {new_body_preview}\n"
+                          f"原始 body(text): {orig_body_text}\n"
+                          f"修改后 body(text): {new_body_text}")
+            else:
+                detail = ""
             logger.info("proxy",
                         f"modify_request 已应用: host={host}, path={path}, rule_note={rule.get('note', '')}",
                         detail)
@@ -1071,10 +1198,8 @@ class ProxyServer:
         # script：调用用户 Python 脚本的 on_request（请求阶段，转发前）
         # 脚本可修改请求头/体，或返回 mock（直接伪造响应）/ drop（拒绝）
         if rule and rule["action"] == "script":
-            from .. import logger
             from ..auto_reply.script_runner import (
                 call_script_request, build_ctx, apply_request)
-            import base64
             script = rule.get("modify_rules") or ""
             if isinstance(script, list):
                 # 兼容旧 JSON 字段（不太可能，但保护）
@@ -1095,7 +1220,6 @@ class ProxyServer:
                     logger.info("proxy", f"script on_request 调用返回: {rule['id']}",
                                 f"resp={'None' if resp is None else resp.get('action', '?')}")
                 except Exception as e:  # noqa: BLE001
-                    import traceback
                     logger.warning("proxy", f"script on_request 异常: {rule['id']}",
                                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
                     resp = None
@@ -1175,15 +1299,19 @@ class ProxyServer:
         # 转发到目标
         start = time.time()
         # WebSocket Upgrade：握手成功后转为双向帧转发，不再走常规 HTTP 请求/响应
-        from .websocket_relay import is_websocket_upgrade, relay_websocket, compute_accept_key
+        from .websocket_relay import is_websocket_upgrade, relay_websocket
         if is_websocket_upgrade(headers):
             return self._handle_websocket_upgrade(
                 client_sock, host, port, scheme, method, path, orig_url,
                 headers, body, pid, proc_name, remote_ip, ip_region,
                 record, flow_id, keep_alive)
         try:
+            # 是否需要解压响应体：抓包记录或需要修改响应时才解压，否则跳过节省 CPU
+            need_decompress = record or (
+                rule is not None and rule["action"] in ("modify_response", "script"))
             status, resp_headers, resp_body, cert_info_json, http_version = self._forward(
-                host, port, scheme, method, path, version, headers, body)
+                host, port, scheme, method, path, version, headers, body,
+                decompress=need_decompress)
         except Exception:  # noqa: BLE001
             self._send_simple(client_sock, 502, "Bad Gateway")
             if record and flow_id:
@@ -1207,35 +1335,33 @@ class ProxyServer:
                 orig_url, method=method, status_code=status,
                 pid=pid, process_name=proc_name)
             if rule:
-                from .. import logger
                 logger.info("proxy",
-                            f"响应阶段匹配到规则: action={rule['action']}, pattern={rule['pattern']}",
-                            f"URL={orig_url}, status={status}")
+                        f"响应阶段匹配到规则: action={rule['action']}, pattern={rule['pattern']}",
+                        f"URL={orig_url}, status={status}")
                 # §3.2 命中计数（响应阶段匹配也计数）
                 try:
                     db.increment_rule_hit(rule.get("id"), flow_id)
                 except Exception:  # noqa: BLE001
                     pass
         if rule and rule["action"] == "modify_response":
-            from .. import logger
+            # 性能优化：detail 中的 !r 计算仅在 INFO 级别启用时执行
+            _log_detail = logger.is_enabled(logger.INFO)
             logger.info("proxy", "进入 modify_response 分支",
-                        f"body_len={len(resp_body)}, Content-Encoding={resp_headers.get('Content-Encoding')}, "
-                        f"Content-Type={resp_headers.get('Content-Type')}, "
-                        f"body 前 200 字节={resp_body[:200]!r}")
+                        (f"body_len={len(resp_body)}, Content-Encoding={resp_headers.get('Content-Encoding')}, "
+                         f"Content-Type={resp_headers.get('Content-Type')}, "
+                         f"body 前 200 字节={resp_body[:200]!r}") if _log_detail else "")
             # §3.8 delay 动作：在响应前延迟（毫秒）
             _apply_delay(rule, target_name="delay", log_label="delay")
             status, resp_headers, resp_body = _apply_modify_response(
                 status, resp_headers, resp_body, rule)
             logger.info("proxy", "modify_response 处理完成",
-                        f"body_len={len(resp_body)}, body 前 200 字节={resp_body[:200]!r}")
+                        (f"body_len={len(resp_body)}, body 前 200 字节={resp_body[:200]!r}") if _log_detail else "")
 
         # script：调用用户 Python 脚本的 on_response（响应阶段，返回客户端前）
         # 脚本可修改响应头/体/状态码，或返回 drop（替换为 403）/ mock（替换为伪造响应）
         if rule and rule["action"] == "script":
-            from .. import logger
             from ..auto_reply.script_runner import (
                 call_script_response, build_ctx, apply_response)
-            import base64
             script = rule.get("modify_rules") or ""
             if isinstance(script, list):
                 script = ""
@@ -1425,7 +1551,9 @@ class ProxyServer:
         try:
             target = self._connect_target(host, port)
             if scheme == "https":
-                target = self._forward_ssl_ctx.wrap_socket(target, server_hostname=host)
+                # WSS：用专用 _ws_ssl_ctx（只通告 http/1.1），
+                # 避免 ALPN 协商到 h2 导致 WS Upgrade 握手失败 (code=1006)
+                target = self._ws_ssl_ctx.wrap_socket(target, server_hostname=host)
             target.settimeout(30)
         except OSError:
             self._send_simple(client_sock, 502, "Bad Gateway")
@@ -1434,15 +1562,18 @@ class ProxyServer:
             return False
 
         # 构造 Upgrade 请求发送给服务器
+        # 过滤 hop-by-hop 头，保留 Sec-WebSocket-* 等握手必需头
+        # 不强制设 Content-Length：WebSocket Upgrade 请求无 body，
+        # 强制设 Content-Length: 0 会让部分 WS 服务器拒绝握手 (code=1006)
         fwd_headers = Headers()
         for k, v in headers._items:  # noqa: SLF001
             kl = k.lower()
             if kl in ("proxy-connection", "proxy-authorization",
-                      "transfer-encoding", "content-length"):
+                      "transfer-encoding", "content-length",
+                      "connection"):
                 continue
             fwd_headers.add(k, v)
         fwd_headers.set("Connection", "Upgrade")
-        fwd_headers.set("Content-Length", "0")
 
         req_line = f"{method} {path} HTTP/1.1\r\n".encode("latin-1", "replace")
         req_data = req_line + fwd_headers.to_bytes() + b"\r\n"
@@ -1522,7 +1653,6 @@ class ProxyServer:
         # treader.buf 可能已有服务器发来的 WS 帧数据（紧跟 101 响应后）
         # 把缓冲区剩余数据写回 target，让帧读取器从 socket 读
         # （实际上 101 响应后服务器不会立即发数据，等待客户端首个 WS 帧）
-        from .. import logger
         logger.info("ws", f"WebSocket 升级成功: {host}{path}",
                     f"pid={pid}, proc={proc_name}")
         try:
@@ -1541,10 +1671,11 @@ class ProxyServer:
         return False  # WS 连接结束后不再 keep-alive
 
     def _h2_request_via_pool(self, host, port, scheme, method, path,
-                             fwd: Headers, body: bytes):
+                             fwd: Headers, body: bytes, decompress: bool = True):
         """尝试通过 h2 连接池发送请求（复用已有 h2 连接）。
 
-        成功返回 (status, resp_headers, resp_body, "", "HTTP/2")。
+        成功返回 (status, resp_headers, resp_body, cert_info_json, "HTTP/2")。
+        cert_info_json 从 H2Client 缓存中取（首次握手时获取）。
         池中无可用连接返回 None（调用方应新建连接）。
         池中连接出错返回 None 并自动从池中移除。
         """
@@ -1559,16 +1690,20 @@ class ProxyServer:
             # trailers 合并到 resp_headers（代理场景简化处理）
             for k, v in resp_trailers:
                 resp_headers.add(k, v)
-            resp_body, resp_headers = _decompress_body(resp_body, resp_headers)
+            if decompress:
+                resp_body, resp_headers = _decompress_body(resp_body, resp_headers)
             self._h2_pool.record_request()
-            return status, resp_headers, resp_body, "", "HTTP/2"
+            # 复用连接时返回缓存的证书信息
+            return status, resp_headers, resp_body, h2_client.cert_info, "HTTP/2"
         except Exception:  # noqa: BLE001
-            # h2 连接出错，从池中移除，让调用方新建连接
-            self._h2_pool.remove(host, port, scheme)
+            # 性能优化：只移除出错的这个连接，不清空整个 host 的连接池。
+            # 单个 stream 超时/抖动不应让后续并发请求都重新 TLS 握手。
+            self._h2_pool.remove_client(h2_client)
             return None
 
     def _h2_create_and_request(self, target, host, port, scheme, method, path,
-                                fwd: Headers, body: bytes, cert_info_json: str):
+                                fwd: Headers, body: bytes, cert_info_json: str,
+                                decompress: bool = True):
         """在新建的 TLS 连接上创建 H2Client 并发送请求。
 
         成功返回 5-tuple（H2Client 已放入池，可被后续请求复用）。
@@ -1576,7 +1711,7 @@ class ProxyServer:
         """
         from .h2_forward import H2Client
         try:
-            h2_client = H2Client(target, host, port, scheme)
+            h2_client = H2Client(target, host, port, scheme, cert_info_json)
             h2_headers = [(k, v) for k, v in fwd.to_dict().items()]
             status, resp_h, resp_trailers, resp_body = h2_client.request(
                 method, scheme, host, path, h2_headers, body)
@@ -1588,7 +1723,8 @@ class ProxyServer:
             # trailers 合并到 resp_headers（代理场景简化处理）
             for k, v in resp_trailers:
                 resp_headers.add(k, v)
-            resp_body, resp_headers = _decompress_body(resp_body, resp_headers)
+            if decompress:
+                resp_body, resp_headers = _decompress_body(resp_body, resp_headers)
             self._h2_pool.record_request()
             return status, resp_headers, resp_body, cert_info_json, "HTTP/2"
         except Exception:  # noqa: BLE001
@@ -1599,12 +1735,14 @@ class ProxyServer:
                 pass
             return None
 
-    def _forward(self, host, port, scheme, method, path, version, headers, body):
+    def _forward(self, host, port, scheme, method, path, version, headers, body,
+                 decompress: bool = True):
         """转发请求到目标服务器，返回 (status, resp_headers, resp_body, cert_info_json, http_version)。
 
         优先复用 h2 连接池（多路复用），其次复用 HTTP/1.1 连接池，最后新建连接。
         cert_info_json：HTTPS 流量的对端证书信息 JSON 字符串（首次握手时获取，复用连接返回空）
         http_version：'HTTP/1.1' 或 'HTTP/2'（ALPN 协商到 h2 时走 h2 转发）
+        decompress：是否解压响应体。不抓包且无修改规则时传 False 跳过解压，节省 CPU。
         """
         # 构造转发请求头：去掉代理相关头，使用 keep-alive
         fwd = Headers()
@@ -1622,14 +1760,16 @@ class ProxyServer:
         fwd.set("Content-Length", str(len(body)))
         fwd.set("Connection", "keep-alive")
 
-        req_line = f"{method} {path} HTTP/1.1\r\n".encode("latin-1", "replace")
-        req_data = req_line + fwd.to_bytes() + b"\r\n" + body
-
         # ---- 优先尝试 h2 连接池（复用已有 h2 连接，多路复用） ----
         if scheme == "https":
-            result = self._h2_request_via_pool(host, port, scheme, method, path, fwd, body)
+            result = self._h2_request_via_pool(host, port, scheme, method, path, fwd, body,
+                                                decompress=decompress)
             if result is not None:
                 return result
+
+        # 性能优化：req_data 延迟构造——h2 池命中时不浪费 CPU 拼接字节
+        req_line = f"{method} {path} HTTP/1.1\r\n".encode("latin-1", "replace")
+        req_data = req_line + fwd.to_bytes() + b"\r\n" + body
 
         # ---- HTTP/1.1 路径（或新建 h2 连接）----
         # 尝试从 HTTP/1.1 连接池获取复用连接
@@ -1641,11 +1781,18 @@ class ProxyServer:
             target = pooled.sock
             treader = pooled.reader  # 复用旧 reader 以保留缓冲区
             reused = True
+            # 复用连接时使用缓存的证书信息（首次握手时已获取）
+            cert_info_json = pooled.cert_info
+            # 非阻塞重试取 cert_info：首次请求时 future 可能未完成（cert_info 为空），
+            # 复用连接时 future 大概率已完成，可取到值
+            if not cert_info_json and pooled.cert_info_future is not None:
+                cert_info_json = _get_cert_info_result(pooled.cert_info_future)
 
         try:
             # 池中无连接：新建 TCP+TLS
-            cert_info_json = ""
+            cert_info_future = None  # 仅新建连接时异步获取证书信息
             if target is None:
+                cert_info_json = ""
                 # 弱网模拟：新建连接时加 RTT 延迟（模拟首包延迟）
                 throttle.delay()
                 # 弱网模拟：按 drop_pct 概率丢包（模拟连接失败）
@@ -1656,15 +1803,9 @@ class ProxyServer:
                     target = self._forward_ssl_ctx.wrap_socket(
                         target, server_hostname=host)
                     # 获取对端证书信息（仅首次握手，复用连接不重复获取）
-                    try:
-                        cert_der = target.getpeercert(binary_form=True)
-                        if cert_der:
-                            from ..cert_info import get_cert_info
-                            info = get_cert_info(cert_der)
-                            if info:
-                                cert_info_json = json.dumps(info)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    # 性能优化：cert_info 解析（cryptography 库）提交到后台线程，
+                    # 不阻塞代理主线程；后续 _record_flow 时懒获取结果
+                    cert_info_future = _async_cert_info(target)
                     # HTTP/2：ALPN 协商到 h2 时创建 H2Client（放入池，后续可复用）
                     try:
                         alpn = target.selected_alpn_protocol()
@@ -1672,7 +1813,9 @@ class ProxyServer:
                         alpn = None
                     if alpn == "h2":
                         result = self._h2_create_and_request(
-                            target, host, port, scheme, method, path, fwd, body, cert_info_json)
+                            target, host, port, scheme, method, path, fwd, body,
+                            _get_cert_info_result(cert_info_future),
+                            decompress=decompress)
                         if result is not None:
                             return result
                         # h2 失败，回退到新建 HTTP/1.1 连接
@@ -1697,15 +1840,8 @@ class ProxyServer:
                     if scheme == "https":
                         target = self._forward_ssl_ctx.wrap_socket(
                             target, server_hostname=host)
-                        try:
-                            cert_der = target.getpeercert(binary_form=True)
-                            if cert_der:
-                                from ..cert_info import get_cert_info
-                                info = get_cert_info(cert_der)
-                                if info:
-                                    cert_info_json = json.dumps(info)
-                        except Exception:  # noqa: BLE001
-                            pass
+                        # 重试连接也异步获取证书信息
+                        cert_info_future = _async_cert_info(target)
                         # 重试连接也检查 ALPN
                         try:
                             alpn = target.selected_alpn_protocol()
@@ -1713,7 +1849,9 @@ class ProxyServer:
                             alpn = None
                         if alpn == "h2":
                             result = self._h2_create_and_request(
-                                target, host, port, scheme, method, path, fwd, body, cert_info_json)
+                                target, host, port, scheme, method, path, fwd, body,
+                                _get_cert_info_result(cert_info_future),
+                                decompress=decompress)
                             if result is not None:
                                 return result
                             # h2 失败，回退
@@ -1726,9 +1864,9 @@ class ProxyServer:
                     throttle.send_throttled(target, req_data)
                     status_line = treader.read_line()
                     if not status_line:
-                        return 0, Headers(), b"", cert_info_json, "HTTP/1.1"
+                        return 0, Headers(), b"", _get_cert_info_result(cert_info_future), "HTTP/1.1"
                 else:
-                    return 0, Headers(), b"", cert_info_json, "HTTP/1.1"
+                    return 0, Headers(), b"", _get_cert_info_result(cert_info_future), "HTTP/1.1"
 
             sp = status_line.decode("latin-1", "replace").split(" ", 2)
             status_code = int(sp[1]) if len(sp) >= 2 and sp[1].isdigit() else 0
@@ -1736,14 +1874,19 @@ class ProxyServer:
             resp_headers = Headers.from_lines(resp_header_lines)
             resp_body = read_body(treader, resp_headers, method=method,
                                   status_code=status_code)
-            # 解压响应体，便于后续修改/记录
-            resp_body, resp_headers = _decompress_body(resp_body, resp_headers)
+            # 解压响应体，便于后续修改/记录（不抓包且无规则时跳过，节省 CPU）
+            if decompress:
+                resp_body, resp_headers = _decompress_body(resp_body, resp_headers)
 
             # 判断连接是否可复用：服务器未返回 close
             resp_conn = (resp_headers.get("Connection") or "").lower()
             can_reuse = "close" not in resp_conn
+            # 非阻塞获取 cert_info（未完成返回空，不阻塞响应返回）
+            cert_info_json = _get_cert_info_result(cert_info_future)
             if can_reuse:
-                self._conn_pool.put(_PooledConn(target, treader, host, port, scheme))
+                self._conn_pool.put(_PooledConn(
+                    target, treader, host, port, scheme, cert_info_json,
+                    cert_info_future=cert_info_future))
             else:
                 try:
                     target.close()
@@ -1880,7 +2023,6 @@ class ProxyServer:
         响应阶段：可传入 status_code 做状态码过滤。
         """
         try:
-            from ..auto_reply.rules import find_matching_rule
             return find_matching_rule(
                 url, method=method, status_code=status_code,
                 pid=pid, process_name=process_name,
@@ -1927,7 +2069,6 @@ def _apply_delay(rule, target_name: str, log_label: str = "delay"):
                 continue
             if ms <= 0:
                 continue
-            from .. import logger
             logger.info("proxy", f"{log_label} 延迟 {ms}ms",
                         f"rule_note={rule.get('note', '')}")
             time.sleep(ms / 1000.0)
@@ -1941,7 +2082,6 @@ def _to_text(b: bytes) -> str:
     try:
         return b.decode("utf-8")
     except UnicodeDecodeError:
-        import base64
         return "base64:" + base64.b64encode(b).decode("ascii")
 
 
@@ -1951,7 +2091,6 @@ def _to_bytes(s) -> bytes:
     if isinstance(s, bytes):
         return s
     if s.startswith("base64:"):
-        import base64
         try:
             return base64.b64decode(s[7:])
         except Exception:  # noqa: BLE001
@@ -1966,7 +2105,6 @@ def _decompress_body(body: bytes, headers: Headers) -> tuple[bytes, Headers]:
     性能优化：body 超过 MAX_DECOMPRESS_BODY（1MB）时跳过解压，直接返回原始字节。
     大 body 通常是视频/图片/下载，解压耗时几百 ms 且 modify_response 对二进制无意义。
     """
-    from .. import logger
     enc = (headers.get("Content-Encoding") or "").lower().strip()
     if not enc or not body:
         return body, headers
@@ -1977,10 +2115,8 @@ def _decompress_body(body: bytes, headers: Headers) -> tuple[bytes, Headers]:
         return body, headers
     try:
         if "gzip" in enc:
-            import gzip
             body = gzip.decompress(body)
         elif "deflate" in enc:
-            import zlib
             try:
                 body = zlib.decompress(body)
             except zlib.error:
@@ -2198,7 +2334,6 @@ def _apply_modify_response(status, headers: Headers, body: bytes, rule) -> tuple
     2. 旧结构（兼容）:
        { action: replace_body|replace_status|replace_header|remove_header, name, value }
     """
-    from .. import logger
     modify_rules = _parse_json(rule.get("modify_rules"))
     if not isinstance(modify_rules, list):
         logger.warning("proxy", "modify_response 规则解析失败或为空",
@@ -2279,7 +2414,6 @@ def _apply_modify_request(headers: Headers, body: bytes, rule) -> tuple:
     - request_header: op=replace/remove，key=头名，value=新值
     - request_body:   op=replace（JSON 字段替换/整体替换）/remove（删字段）/replace-bytes（二进制偏移替换）
     """
-    from .. import logger
     modify_rules = _parse_json(rule.get("modify_rules"))
     if not isinstance(modify_rules, list):
         return headers, body
@@ -2345,11 +2479,9 @@ def _apply_modify_request(headers: Headers, body: bytes, rule) -> tuple:
 
 def _apply_modify_response_binary(body: bytes, rule) -> bytes:
     """对响应体应用二进制字节替换规则（replace-bytes / replace-bytes-regex）。"""
-    from .. import logger
     modify_rules = _parse_json(rule.get("modify_rules"))
     if not isinstance(modify_rules, list):
         return body
-    import re
     for mr in modify_rules:
         try:
             target = mr.get("target")

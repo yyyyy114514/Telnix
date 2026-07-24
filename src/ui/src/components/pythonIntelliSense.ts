@@ -9,12 +9,13 @@
  * 5. on_request / on_response 钩子函数模板
  *
  * 注册是全局的（monaco 单例），多次调用幂等。
+ * monaco 实例由调用方传入（动态加载后传入），避免本文件静态导入 monaco-editor。
  */
-import * as monaco from 'monaco-editor'
+import type * as Monaco from 'monaco-editor'
 
 let registered = false
 
-export function registerPythonIntelliSense() {
+export function registerPythonIntelliSense(monaco: typeof Monaco) {
   if (registered) return
   registered = true
 
@@ -166,12 +167,12 @@ export function registerPythonIntelliSense() {
   // 辅助：构造 CompletionItem
   function makeItem(
     label: string,
-    kind: monaco.languages.CompletionItemKind,
+    kind: Monaco.languages.CompletionItemKind,
     insertText: string,
     detail: string,
     documentation: string,
     insertAsSnippet = false
-  ): monaco.languages.CompletionItem {
+  ): Monaco.languages.CompletionItem {
     return {
       label,
       kind,
@@ -181,7 +182,7 @@ export function registerPythonIntelliSense() {
         : monaco.languages.CompletionItemInsertTextRule.None,
       detail,
       documentation: { value: documentation },
-    } as monaco.languages.CompletionItem
+    } as Monaco.languages.CompletionItem
   }
 
   // 注册补全 provider
@@ -204,7 +205,7 @@ export function registerPythonIntelliSense() {
         endColumn: position.column,
       })
 
-      const suggestions: monaco.languages.CompletionItem[] = []
+      const suggestions: Monaco.languages.CompletionItem[] = []
 
       // ---------- 检测 xxx. 前缀，给特定成员 ----------
       const dotMatch = lineUpToCursor.match(/([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*$/)
@@ -345,7 +346,7 @@ export function registerPythonIntelliSense() {
             parameters: params.map((p) => ({ label: p, documentation: '' })),
           },
         ],
-      } as monaco.languages.SignatureHelp
+      } as Monaco.languages.SignatureHelp
     },
   })
 }

@@ -5,6 +5,7 @@ import { useFlowsStore } from '../stores/flows'
 import { useCaptureStore } from '../stores/capture'
 import { api, type ProcessInfo } from '../api/client'
 import { syncPrefs } from '../stores/prefs'
+import { parseFlowFilter, matchFlow, type ParsedFilter } from '../utils/flowfilter'
 
 // 会话列表：表格 + 统一悬浮窗（筛选/专注） + 一键忽略 + 右键菜单
 const props = defineProps<{
@@ -20,6 +21,7 @@ const emit = defineEmits<{
   'ignore-process': [proc: ProcessInfo]
   'ignore-host': [host: string]
   'replay': [flowId: number]
+  'replay-batch': [flowIds: number[]]
   'ai-analyze': [flowId: number]
   'ai-analyze-batch': [flowIds: number[]]
   'view-in-analyze': [flowId: number]
@@ -70,6 +72,13 @@ function batchAIAnalyze() {
   emit('ai-analyze-batch', ids)
   multiSelectMode.value = false
   selectedFlowIds.value.clear()
+}
+
+// 批量重放：交给父组件处理（含 QPS 限制和进度提示）
+function batchReplay() {
+  const ids = [...selectedFlowIds.value]
+  if (!ids.length) return
+  emit('replay-batch', ids)
 }
 
 // 批量删除：显示子悬浮窗确认（不弹页面中间框）
@@ -159,6 +168,40 @@ watch(multiSelectMode, (v) => {
 // ---------- 统一悬浮窗管理 ----------
 // 一次只能开一个悬浮窗（筛选 / 专注 互斥）
 const activePopup = ref<'filter' | 'focus' | null>(null)
+
+// ===== Flowfilter DSL =====
+// DSL 输入框文本（双向绑定）
+const dslQuery = ref('')
+// 当前已应用的解析后过滤器
+const dslFilter = ref<ParsedFilter>({ raw: '', conditions: [] })
+// 解析错误提示
+const dslError = ref('')
+// 显示语法帮助浮层
+const showDslHelp = ref(false)
+// 应用 DSL：解析后存到 dslFilter，displayFlows 会重新计算
+function applyDsl() {
+  const q = dslQuery.value.trim()
+  if (!q) {
+    dslFilter.value = { raw: '', conditions: [] }
+    dslError.value = ''
+    return
+  }
+  const parsed = parseFlowFilter(q)
+  if (parsed.error) {
+    dslError.value = parsed.error
+    ElMessage.warning('DSL 语法错误：' + parsed.error)
+    return
+  }
+  dslError.value = ''
+  dslFilter.value = parsed
+}
+// 清空 DSL（清除按钮触发）
+watch(dslQuery, (v) => {
+  if (!v) {
+    dslFilter.value = { raw: '', conditions: [] }
+    dslError.value = ''
+  }
+})
 // 悬浮窗位置（绝对定位，可拖动）
 const popupPos = ref({ left: 10, top: 46 })
 
@@ -481,6 +524,7 @@ function statusClass(code: number | null): string {
 }
 
 function rowClass(flow: any): string {
+  // 断点行最高优先级（已有红/紫底色）
   if (flow.breakpoint_status === 'pending_request') return 'bp-request-row'
   if (flow.breakpoint_status === 'pending_response') return 'bp-response-row'
   return ''
@@ -532,9 +576,12 @@ const displayFlows = computed(() => {
   const hasFilterAny = filterPids.length > 0 || filterHostsLocal.length > 0 ||
                        filterMethodsLocal.length > 0 || filterStatusCodesLocal.length > 0 ||
                        filterContentTypesLocal.length > 0 || filterProtocolsLocal.length > 0
+  // Flowfilter DSL：与现有筛选协同（AND 关系）
+  const dslConditions = dslFilter.value.conditions
+  const hasDsl = dslConditions.length > 0
 
   // 无任何过滤条件：直接返回源数组（零开销）
-  if (!focusOn && !hasFilterAny) return src
+  if (!focusOn && !hasFilterAny && !hasDsl) return src
 
   const result: any[] = []
   for (const f of src) {
@@ -583,6 +630,8 @@ const displayFlows = computed(() => {
       })
       if (!matched) continue
     }
+    // Flowfilter DSL 过滤（AND 关系：所有 DSL 条件必须满足）
+    if (hasDsl && !matchFlow(f, dslFilter.value)) continue
     result.push(f)
   }
   return result
@@ -1135,6 +1184,38 @@ onMounted(() => {
         <el-icon><Filter /></el-icon>&nbsp;筛选
         <span v-if="hasActiveFilters" class="filter-badge"></span>
       </el-button>
+      <!-- Flowfilter DSL 输入框：支持 ~d host ~m POST ~s 4xx 语法 -->
+      <el-input
+        v-model="dslQuery"
+        size="small"
+        :class="['dsl-input', { 'dsl-error': dslError }]"
+        placeholder="DSL 过滤：~d host ~m POST ~s 4xx"
+        clearable
+        @keydown.enter="applyDsl"
+      >
+        <template #prefix>
+          <el-icon class="dsl-icon"><Search /></el-icon>
+        </template>
+        <template #suffix>
+          <el-tooltip content="语法帮助" placement="bottom">
+            <el-icon class="dsl-help" @click="showDslHelp = !showDslHelp"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </template>
+      </el-input>
+      <transition name="el-fade-in">
+        <div v-if="showDslHelp" class="dsl-help-panel">
+          <div class="dsl-help-title">DSL 语法</div>
+          <div class="dsl-help-row"><code>~d host</code> host 包含（支持 * 通配）</div>
+          <div class="dsl-help-row"><code>~m POST</code> 方法等于</div>
+          <div class="dsl-help-row"><code>~s 4xx</code> 状态码（4xx 通配或 200 精确）</div>
+          <div class="dsl-help-row"><code>~p http</code> 协议（http/https/tcp/udp/ws）</div>
+          <div class="dsl-help-row"><code>~u /api</code> URL 包含</div>
+          <div class="dsl-help-row"><code>~h Auth</code> Header 包含</div>
+          <div class="dsl-help-row"><code>~b text</code> Body 包含</div>
+          <div class="dsl-help-row"><code>"text"</code> 任意字段包含</div>
+          <div class="dsl-help-hint">空格分隔 = AND（与关系）</div>
+        </div>
+      </transition>
       <el-dropdown size="small" :disabled="!store.selectedFlow" @command="(c: string) => { c === 'pid' && ignorePid(); c === 'process' && ignoreProcess(); c === 'host' && ignoreHost() }">
         <el-button size="small" :disabled="!store.selectedFlow">
           <el-icon><RemoveFilled /></el-icon>&nbsp;忽略<el-icon class="el-icon--right"><ArrowDown /></el-icon>
@@ -1148,7 +1229,7 @@ onMounted(() => {
         </template>
       </el-dropdown>
       <!-- 专注模式：点击打开悬浮窗 -->
-      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="top">
+      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="bottom">
         <el-button
           size="small"
           :type="focusEnabled ? 'success' : 'default'"
@@ -1498,6 +1579,14 @@ onMounted(() => {
           <el-icon><MagicStick /></el-icon>&nbsp;发送到AI
         </el-button>
         <el-button
+          size="small"
+          :disabled="!selectedCount"
+          @click="batchReplay"
+          title="按指定 QPS 依次重放选中流量"
+        >
+          <el-icon><RefreshRight /></el-icon>&nbsp;批量重放
+        </el-button>
+        <el-button
           v-if="hasPendingBreakpoint"
           size="small"
           type="success"
@@ -1683,6 +1772,66 @@ onMounted(() => {
   padding: 8px 10px; border-bottom: 1px solid var(--on-border-light);
   background: var(--on-bg-elevated);
 }
+/* Flowfilter DSL 输入框 */
+.dsl-input {
+  width: 280px;
+  flex-shrink: 0;
+}
+.dsl-input.dsl-error :deep(.el-input__wrapper) {
+  box-shadow: 0 0 0 1px var(--on-rose, #f43f5e) inset;
+}
+.dsl-icon {
+  color: var(--on-text-dim);
+}
+.dsl-help {
+  color: var(--on-text-dim);
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.dsl-help:hover {
+  color: var(--on-accent, #2dd4bf);
+}
+/* DSL 帮助浮层 */
+.dsl-help-panel {
+  position: absolute;
+  top: 42px;
+  left: 60px;
+  z-index: 200;
+  min-width: 260px;
+  padding: 10px 12px;
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border-light);
+  border-radius: var(--on-radius-md, 6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.dsl-help-title {
+  font-weight: 600;
+  color: var(--on-text);
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.dsl-help-row {
+  color: var(--on-text-dim);
+  margin: 2px 0;
+}
+.dsl-help-row code {
+  display: inline-block;
+  min-width: 90px;
+  padding: 1px 6px;
+  background: var(--on-bg, #f5f5f5);
+  border-radius: 3px;
+  color: var(--on-accent, #2dd4bf);
+  font-family: var(--on-font-mono, Menlo, Consolas, monospace);
+}
+.dsl-help-hint {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--on-border-light);
+  color: var(--on-text-dim);
+  font-size: 11px;
+}
 .filter-badge {
   display: inline-block;
   width: 6px; height: 6px;
@@ -1787,10 +1936,12 @@ onMounted(() => {
 .fl-row {
   height: 26px; font-size: 12px; cursor: pointer;
   border-bottom: 1px solid var(--on-border-light);
+  border-left: 2px solid transparent;
 }
 .fl-row:hover { background: var(--on-bg-hover); }
 .fl-row.selected { background: var(--on-accent-glow); border-left: 2px solid var(--on-accent); padding-left: 8px; }
 .fl-row.checked { background: rgba(45, 212, 191, 0.08); }
+
 .col-check { display: flex; align-items: center; justify-content: center; }
 .fl-row > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-url { color: var(--on-text-muted); }

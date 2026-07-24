@@ -6,8 +6,6 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import 'highlight.js/styles/atom-one-dark.css'
 import hljs from 'highlight.js/lib/common'
 import hljsVuePlugin from '@highlightjs/vue-plugin'
-// Monaco Editor worker 配置：必须在 monaco-editor 导入之前执行
-import './monaco-setup'
 import App from './App.vue'
 import router from './router'
 import ClashIcon from './components/ClashIcon.vue'

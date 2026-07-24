@@ -45,8 +45,14 @@ def _get_searcher():
             c_buffer = util.load_content_from_file(db_path)
             _searcher = xdb.new_with_buffer(util.IPv4, c_buffer)
             return _searcher
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             _load_failed = True
+            # 静默吞异常会导致属地永久空白且无日志，改为打印告警便于排查
+            try:
+                from . import logger
+                logger.warning("ip_region", f"ip2region 加载失败: {e}", "")
+            except Exception:  # noqa: BLE001
+                print(f"[Telnix] ip2region 加载失败: {e}", flush=True)
             return None
 
 
@@ -108,17 +114,21 @@ def _format_region(raw: str) -> str:
     if country == "中国" or code == "CN":
         prov = province if province and province != "0" else ""
         ct = city if city and city != "0" else ""
-        # 直辖市：省和市相同（如 上海市==上海市），只显示一次并去掉"市"后缀
-        if prov and ct and prov == ct:
-            return prov[:-1] if prov.endswith("市") else prov
-        # 省份简称：去掉 省/壮族自治区/回族自治区/维吾尔自治区/自治区 后缀
+        # 省份简称：去掉 省/壮族自治区/回族自治区/维吾尔自治区/自治区/特别行政区 后缀
         prov_short = prov
-        for suffix in ("壮族自治区", "回族自治区", "维吾尔自治区", "自治区", "省"):
+        for suffix in ("壮族自治区", "回族自治区", "维吾尔自治区", "自治区", "特别行政区", "省"):
             if prov_short.endswith(suffix):
                 prov_short = prov_short[:-len(suffix)]
                 break
+        # 直辖市/特别行政区：province 也可能带"市"后缀（如 北京市），剥掉
+        if prov_short.endswith("市"):
+            prov_short = prov_short[:-1]
         # 城市简称：去掉 市 后缀
         ct_short = ct[:-1] if ct.endswith("市") else ct
+        # 直辖市/特别行政区：省简称 == 市简称时只显示一次（北京/上海/天津/重庆/香港）
+        # 兼容 ip2region 省市不一致的情况（如 "北京市|北京" 或 "北京|北京市"）
+        if prov_short and ct_short and prov_short == ct_short:
+            return prov_short
         if prov_short and ct_short:
             return f"{prov_short}{ct_short}"
         if prov_short:

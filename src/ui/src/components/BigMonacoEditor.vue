@@ -1,19 +1,16 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount, shallowRef, nextTick } from 'vue'
 import { loader } from '@guolao/vue-monaco-editor'
-import * as monaco from 'monaco-editor'
-import { registerPythonIntelliSense } from './pythonIntelliSense'
+import type * as Monaco from 'monaco-editor'
+import { setupMonaco } from '../monaco-setup'
 
-loader.config({ monaco })
+// 确保 CDN loader 已配置 + Python 语言已注册（幂等）
+setupMonaco()
 
 /**
  * BigMonacoEditor：放大版 Monaco 编辑器（全屏对话框）
  *
- * - Python 语法高亮 + IntelliSense（关键字、内置函数、ctx API 补全）
- * - 亮/暗主题自动切换
- * - 行号、minimap、折叠、括号配对、自动缩进
- * - Ctrl+S 触发 save 事件
- * - Esc 关闭
+ * Monaco 通过 @guolao/vue-monaco-editor 的 loader 从 CDN 加载，不参与 Vite 构建。
  */
 const props = defineProps<{
   modelValue: boolean
@@ -32,10 +29,11 @@ watch(() => props.modelValue, (v) => { visible.value = v })
 watch(visible, (v) => { emit('update:modelValue', v) })
 
 const editorHost = ref<HTMLDivElement | null>(null)
-const editorRef = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(null)
+const editorRef = shallowRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
 let themeObserver: MutationObserver | null = null
+let monacoInstance: typeof Monaco | null = null
 
-function defineCustomTheme() {
+function defineCustomTheme(monaco: typeof Monaco) {
   monaco.editor.defineTheme('telnix-dark', {
     base: 'vs-dark',
     inherit: true,
@@ -68,11 +66,14 @@ function currentTheme(): string {
   return document.documentElement.classList.contains('dark') ? 'telnix-dark' : 'telnix-light'
 }
 
-function mountEditor() {
+async function mountEditor() {
   if (!editorHost.value) return
   if (editorRef.value) return
-  defineCustomTheme()
-  registerPythonIntelliSense()
+  const monaco = await loader.init()
+  monacoInstance = monaco
+  defineCustomTheme(monaco)
+  const { registerPythonIntelliSense } = await import('./pythonIntelliSense')
+  registerPythonIntelliSense(monaco)
   const lang = props.language || 'python'
   const editor = monaco.editor.create(editorHost.value, {
     value: props.text || '',
@@ -126,6 +127,7 @@ function destroyEditor() {
     editorRef.value.dispose()
     editorRef.value = null
   }
+  monacoInstance = null
 }
 
 onMounted(() => {

@@ -6,6 +6,7 @@ import { api, type RawStatus, type Flow } from '../api/client'
 import { useCaptureStore } from '../stores/capture'
 import { useFlowsStore } from '../stores/flows'
 import HexView from '../components/HexView.vue'
+import ProtocolView from '../components/ProtocolView.vue'
 
 const capture = useCaptureStore()
 const flowsStore = useFlowsStore()
@@ -21,6 +22,8 @@ const flows = ref<Flow[]>([])
 const selectedId = ref<number | null>(null)
 const selectedHex = ref('')
 const hexField = ref<'raw_data' | 'request_body' | 'response_body'>('raw_data')
+// 详情区 tab：'hex' 显示十六进制，'protocol' 显示协议深度解析
+const detailTab = ref<'hex' | 'protocol'>('hex')
 // 当前已加载的最大 flow id，用于增量轮询
 const maxFlowId = ref(0)
 // 安装 pydivert 状态
@@ -800,7 +803,7 @@ onUnmounted(() => {
         </template>
       </el-dropdown>
       <!-- 专注模式：点击打开悬浮窗 -->
-      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="top">
+      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="bottom">
         <el-button
           size="small"
           :type="focusEnabled ? 'success' : 'default'"
@@ -844,7 +847,21 @@ onUnmounted(() => {
           <template v-if="activePopup === 'filter'">
             <div class="fp-row">
               <label class="fp-label">BPF</label>
-              <el-input v-model="filterStr" size="small" style="width: 360px" placeholder="BPF 过滤表达式（如 tcp or udp）" />
+              <el-input v-model="filterStr" size="small" style="width: 360px" placeholder="WinDivert 过滤表达式（如 tcp or udp）" />
+            </div>
+            <!-- BPF 预设按钮：一键填入常用过滤表达式 -->
+            <div class="fp-row fp-presets">
+              <label class="fp-label">预设</label>
+              <el-button size="small" @click="filterStr = 'tcp or udp'">全部</el-button>
+              <el-button size="small" @click="filterStr = 'tcp'">仅 TCP</el-button>
+              <el-button size="small" @click="filterStr = 'udp'">仅 UDP</el-button>
+              <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 80 or tcp.SrcPort == 80)'">HTTP 80</el-button>
+              <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443)'">HTTPS 443</el-button>
+              <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 53 or udp.SrcPort == 53)'">DNS 53</el-button>
+              <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 123 or udp.SrcPort == 123)'">NTP 123</el-button>
+              <el-tooltip content="WinDivert 语法：tcp/udp/icmp; tcp.DstPort/SrcPort; ip.SrcAddress/DstAddress; not/and/or" placement="bottom">
+                <el-icon class="bpf-help"><QuestionFilled /></el-icon>
+              </el-tooltip>
             </div>
             <div class="fp-row">
               <label class="fp-label">PID</label>
@@ -1043,6 +1060,10 @@ onUnmounted(() => {
             <span class="text-muted">{{ selectedFlow.src_port }} → {{ selectedFlow.dst_port }}</span>
             <span class="text-muted">{{ selectedFlow.process_name || 'pid:' + selectedFlow.pid }}</span>
             <div class="flex-1"></div>
+            <el-radio-group v-model="detailTab" size="small" class="detail-tab">
+              <el-radio-button label="hex">Hex</el-radio-button>
+              <el-radio-button label="protocol">协议解析</el-radio-button>
+            </el-radio-group>
             <el-select v-model="hexField" size="small" style="width: 140px" @change="refreshHex">
               <el-option label="原始数据" value="raw_data" />
               <el-option label="请求体" value="request_body" />
@@ -1050,7 +1071,8 @@ onUnmounted(() => {
             </el-select>
           </div>
           <div class="hex-container">
-            <HexView :data="selectedHex" />
+            <HexView v-if="detailTab === 'hex'" :data="selectedHex" />
+            <ProtocolView v-else :flow-id="selectedFlow.id" :field="hexField" />
           </div>
         </template>
       </div>
@@ -1190,6 +1212,18 @@ onUnmounted(() => {
 }
 .fp-row {
   display: flex; align-items: flex-start; gap: 10px;
+}
+/* BPF 预设按钮行：允许换行 */
+.fp-row.fp-presets {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fp-presets .bpf-help {
+  margin-left: 4px;
+  color: var(--on-text-dim);
+  cursor: help;
+  align-self: center;
+  font-size: 16px;
 }
 .fp-label {
   width: 48px; color: var(--on-text-muted); font-size: 12px;

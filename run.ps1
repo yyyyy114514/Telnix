@@ -10,6 +10,43 @@ $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path $PSScriptRoot).Path
 $hostDir = Join-Path $projectRoot "src\host"
 
+# ---------- 查找系统 Python（避免用到 TRAE 内置 Python）----------
+function Find-SystemPython {
+    # 1. py launcher（官方 Windows Python 启动器，指向系统 Python）
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        try {
+            $exe = & py -3 -c "import sys; print(sys.executable)" 2>$null
+            if ($exe -and $exe -notmatch 'TRAE') {
+                return $exe.Trim()
+            }
+        } catch { }
+    }
+    # 2. 搜索常见系统安装路径
+    $candidates = @()
+    $localApp = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ($localApp) {
+        $candidates += Get-ChildItem "$localApp\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch 'TRAE' } |
+            Sort-Object Name -Descending |
+            Select-Object -ExpandProperty FullName
+    }
+    $candidates += Get-ChildItem "C:\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch 'TRAE' } |
+        Select-Object -ExpandProperty FullName
+    $candidates += Get-ChildItem "C:\Program Files\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch 'TRAE' } |
+        Select-Object -ExpandProperty FullName
+    if ($candidates.Count -gt 0) {
+        return $candidates[0]
+    }
+    # 3. 兜底：PATH 中的 python（可能不是系统 Python）
+    return 'python'
+}
+
+$pythonExe = Find-SystemPython
+Write-Host "[Python] $pythonExe" -ForegroundColor Gray
+
 # 检查后端是否已安装
 $telnixPkg = Join-Path $hostDir "telnix\__init__.py"
 if (-not (Test-Path $telnixPkg)) {
@@ -25,6 +62,24 @@ if (-not (Test-Path $webDir) -and -not (Test-Path $uiDist)) {
     Write-Host "WARNING: 前端未构建，启动后浏览器会显示空白" -ForegroundColor Yellow
     Write-Host "请先运行: .\build.ps1" -ForegroundColor Yellow
     Write-Host ""
+}
+
+# ---------- 关闭残留进程（占用 18901 / 8888 端口）----------
+foreach ($port in @(18901, 8888)) {
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        foreach ($conn in $conns) {
+            $pid = $conn.OwningProcess
+            if ($pid -and $pid -ne 0) {
+                try {
+                    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                    $procName = if ($proc) { $proc.ProcessName } else { "unknown" }
+                    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                    Write-Host "[OK] 已关闭占用端口 $port 的残留进程: $procName (PID $pid)" -ForegroundColor Gray
+                } catch { }
+            }
+        }
+    } catch { }
 }
 
 # 关闭系统代理（避免上次 Telnix 异常退出后代理设置残留）
@@ -46,4 +101,4 @@ Write-Host "  Args:      $args" -ForegroundColor Gray
 Write-Host ""
 
 Set-Location $hostDir
-python -m telnix @args
+& $pythonExe -m telnix @args

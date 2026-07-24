@@ -361,17 +361,13 @@ def get_upstream_proxy() -> tuple[str, int] | None:
     - clash_enabled 只控制侧边栏 Clash 入口可见性
     - clash_integrated 控制流量是否走 Mihomo 代理
 
-    性能优化：后台线程定期探测，此函数只读缓存（O(1)），不阻塞代理线程。
-    首次调用时同步探测一次（避免启动时 30 秒直连），后续由后台线程更新。
+    性能优化：完全非阻塞，首次调用直接返回 None（直连）并触发后台探测，
+    后台线程探测成功后填充缓存，后续请求即可走代理。
+    避免原实现首次同步探测最长 4 秒阻塞首包的问题。
     """
-    # 首次调用同步探测一次
-    with _UPSTREAM_CACHE_LOCK:
-        probed = _upstream_cache["probed"]
-    if not probed:
-        _sync_probe_first_call()
-    # 启动后台探测线程
+    # 启动后台探测线程（懒启动，首次调用时创建）
     _ensure_probe_thread()
-    # 只读缓存
+    # 只读缓存，首次调用时缓存为空返回 None（直连），后台探测完成后自动填充
     with _UPSTREAM_CACHE_LOCK:
         return _upstream_cache["value"]
 

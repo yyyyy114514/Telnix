@@ -377,7 +377,8 @@ def main():
         _open_browser_later(browser_url)
 
     try:
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        uvicorn.run(app, host=host, port=port, log_level="info",
+                    access_log=False)
     finally:
         proxy.stop()
         clear_system_proxy()

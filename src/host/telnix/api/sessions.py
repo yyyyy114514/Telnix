@@ -66,7 +66,8 @@ async def list_flows(session_id: int, limit: int = 100, offset: int = 0,
     )
     if has_tags:
         flows = [f for f in flows if f.get("tags")]
-    total = db.count_flows(session_id)
+    # 性能优化：增量轮询(since_id>0)时跳过 COUNT 查询，前端已有 total
+    total = db.count_flows(session_id) if since_id == 0 else None
     max_id = db.get_max_flow_id(session_id)
     return ok({"flows": flows, "total": total, "limit": limit, "offset": offset,
                "max_id": max_id})
@@ -94,6 +95,7 @@ async def list_all_flows(limit: int = 200, offset: int = 0,
         path=path or None, url=url or None,
         tag=tag or None,
         lite=lite,
+        skip_total=bool(since_id),
     )
     if has_tags:
         flows = [f for f in flows if f.get("tags")]
@@ -108,8 +110,8 @@ async def stream_flows(request: Request):
     客户端用 EventSource 监听，收到后更新 maxFlowId 并插入列表顶部。
     初始连接时立即推送一次 total/max_id，让前端同步基线。
     """
-    loop = asyncio.get_event_loop()
-    q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue(maxsize=2000)
 
     async def event_gen():
         db.register_flow_subscriber(q, loop)

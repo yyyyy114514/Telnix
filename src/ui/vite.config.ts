@@ -41,12 +41,13 @@ export default defineConfig({
       // lodash 是 CJS，需要 transformMixedEsModules 以正确处理混合模块
       transformMixedEsModules: true,
     },
+    // monaco-editor 通过 @guolao/vue-monaco-editor 的 loader 从 CDN 加载，
+    // 不参与构建（几千个模块会严重拖慢 rollup）。
+    // 只排除运行时模块（monaco-editor），保留类型导入（import type）。
     rollupOptions: {
+      external: ['monaco-editor'],
       output: {
-        manualChunks: {
-          'element-plus': ['element-plus', '@element-plus/icons-vue'],
-          'vendor': ['vue', 'vue-router', 'pinia'],
-        },
+        manualChunks: undefined,
       },
     },
   },

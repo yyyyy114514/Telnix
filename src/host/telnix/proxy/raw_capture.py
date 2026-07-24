@@ -59,10 +59,18 @@ _IP_REGION_CACHE_TTL = 600.0  # 10 分钟
 _IP_REGION_CACHE_MAX = 500
 _IP_REGION_LOCK = threading.Lock()
 
-# lookup 锁：防止多线程同时全表扫描 TCP/UDP 表
-# 注意：RawCapture 是单线程抓包循环，但 _lookup_pid 仍可能被多次调用，
-# 加锁是为了未来扩展为多线程抓包时的安全性
-_LOOKUP_LOCK = threading.Lock()
+# lookup 锁已移除：_list_tcp_owner_rows / _list_udp_owner_rows 读快照安全，
+# 多 worker 可并发读表，仅缓存写入用 _PID_CACHE_LOCK 保护即可
+
+# 本机 IP 集合缓存（避免每个包都做 socket.getaddrinfo DNS 查询）
+_LOCAL_IP_CACHE: frozenset[str] | None = None
+_LOCAL_IP_CACHE_TS: float = 0.0
+_LOCAL_IP_CACHE_TTL = 60.0
+_LOCAL_IP_CACHE_LOCK = threading.Lock()
+
+# 抓包队列满时的丢包计数器（模块级，便于跨线程读取统计）
+_DROPPED_PACKETS = 0
+_DROPPED_PACKETS_LOCK = threading.Lock()
 
 
 class RawCapture:
@@ -166,6 +174,7 @@ class RawCapture:
 
     def stop(self):
         """停止抓包。"""
+        global _DROPPED_PACKETS
         self._running = False
         if self._divert:
             try:
@@ -185,6 +194,12 @@ class RawCapture:
         for t in self._enrich_threads:
             t.join(timeout=2)
         self._enrich_threads.clear()
+        # 输出最终丢包统计
+        with _DROPPED_PACKETS_LOCK:
+            total_dropped = _DROPPED_PACKETS
+            _DROPPED_PACKETS = 0
+        if total_dropped > 0:
+            logger.warning("raw", "抓包停止，最终丢包统计", f"累计丢包数: {total_dropped}")
         logger.info("raw", "TCP/UDP 抓包已停止")
 
     @property
@@ -215,6 +230,7 @@ class RawCapture:
         PID 反查、进程名查询、IP 属地查询、DNS 解析等慢操作全部移到 _enrich_loop worker 线程。
         这样抓包线程吞吐量提升 5-10x，避免 1000 pps 时因 PID 全表扫描阻塞丢包。
         """
+        global _DROPPED_PACKETS
         while self._running:
             try:
                 packet = self._divert.recv()
@@ -280,7 +296,11 @@ class RawCapture:
                 try:
                     self._enrich_queue.put_nowait(raw)
                 except queue.Full:
-                    pass  # 队列满丢包保平安，避免反压阻塞抓包线程
+                    # 队列满丢包保平安，避免反压阻塞抓包线程；累计计数并周期性告警
+                    with _DROPPED_PACKETS_LOCK:
+                        _DROPPED_PACKETS += 1
+                        if _DROPPED_PACKETS % 100 == 0:
+                            logger.warning("raw", "抓包队列满丢包", f"累计丢包数: {_DROPPED_PACKETS}")
 
                 # SNIFF 模式无需 send，包已正常流转
 
@@ -436,45 +456,43 @@ class RawCapture:
                     return pid
                 _PID_CACHE.pop(cache_key, None)
 
-        # 2. lookup 锁内全表扫描
-        with _LOOKUP_LOCK:
-            # 双检锁：拿锁后再查一次
-            with _PID_CACHE_LOCK:
-                item = _PID_CACHE.get(cache_key)
-                if item is not None:
-                    ts, pid = item
-                    if now - ts < _PID_CACHE_TTL:
-                        _PID_CACHE.move_to_end(cache_key)
-                        return pid
-                    _PID_CACHE.pop(cache_key, None)
+        # 2. 双检锁：拿锁后再查一次（不再持 _LOOKUP_LOCK，允许多 worker 并发读表快照）
+        with _PID_CACHE_LOCK:
+            item = _PID_CACHE.get(cache_key)
+            if item is not None:
+                ts, pid = item
+                if now - ts < _PID_CACHE_TTL:
+                    _PID_CACHE.move_to_end(cache_key)
+                    return pid
+                _PID_CACHE.pop(cache_key, None)
 
-            # 3. 真正查表
+        # 3. 真正查表（表是只读快照，并发安全）
+        pid = None
+        try:
+            if is_udp:
+                for (lip, lport, p) in list_rows_fn():
+                    if lport == local_port and (lip == local_ip or lip == "0.0.0.0"):
+                        pid = p
+                        break
+            else:
+                for (lip, lport, rip, rport, p, _state) in list_rows_fn():
+                    if lip == src_ip and lport == src_port and rip == dst_ip and rport == dst_port:
+                        pid = p
+                        break
+                    if lip == dst_ip and lport == dst_port and rip == src_ip and rport == src_port:
+                        pid = p
+                        break
+        except Exception:  # noqa: BLE001
             pid = None
-            try:
-                if is_udp:
-                    for (lip, lport, p) in list_rows_fn():
-                        if lport == local_port and (lip == local_ip or lip == "0.0.0.0"):
-                            pid = p
-                            break
-                else:
-                    for (lip, lport, rip, rport, p, _state) in list_rows_fn():
-                        if lip == src_ip and lport == src_port and rip == dst_ip and rport == dst_port:
-                            pid = p
-                            break
-                        if lip == dst_ip and lport == dst_port and rip == src_ip and rport == src_port:
-                            pid = p
-                            break
-            except Exception:  # noqa: BLE001
-                pid = None
 
-            # 4. 写缓存
-            with _PID_CACHE_LOCK:
-                _PID_CACHE[cache_key] = (now, pid)
-                _PID_CACHE.move_to_end(cache_key)
-                if len(_PID_CACHE) > _PID_CACHE_MAX:
-                    _PID_CACHE.popitem(last=False)
+        # 4. 写缓存
+        with _PID_CACHE_LOCK:
+            _PID_CACHE[cache_key] = (now, pid)
+            _PID_CACHE.move_to_end(cache_key)
+            if len(_PID_CACHE) > _PID_CACHE_MAX:
+                _PID_CACHE.popitem(last=False)
 
-            return pid
+        return pid
 
     def _proc_name_cached(self, pid: int) -> str:
         """带 LRU 缓存的进程名查询，5 秒 TTL。"""
@@ -534,15 +552,23 @@ class RawCapture:
         """判断是否本机 IP。"""
         if ip in ("127.0.0.1", "::1"):
             return True
-        try:
-            hostname = socket.gethostname()
-            local_ips = socket.getaddrinfo(hostname, None)
-            for addr in local_ips:
-                if ip in addr[4][0]:
-                    return True
-        except Exception:  # noqa: BLE001
-            pass
-        return False
+        global _LOCAL_IP_CACHE, _LOCAL_IP_CACHE_TS
+        now = time.time()
+        local_ips = _LOCAL_IP_CACHE
+        if local_ips is None or now - _LOCAL_IP_CACHE_TS > _LOCAL_IP_CACHE_TTL:
+            with _LOCAL_IP_CACHE_LOCK:
+                if _LOCAL_IP_CACHE is None or now - _LOCAL_IP_CACHE_TS > _LOCAL_IP_CACHE_TTL:
+                    ips: set[str] = set()
+                    try:
+                        hostname = socket.gethostname()
+                        for addr in socket.getaddrinfo(hostname, None):
+                            ips.add(addr[4][0])
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _LOCAL_IP_CACHE = frozenset(ips)
+                    _LOCAL_IP_CACHE_TS = now
+                local_ips = _LOCAL_IP_CACHE
+        return ip in local_ips
 
     @staticmethod
     def _dns_summary(dns_info: dict) -> str:

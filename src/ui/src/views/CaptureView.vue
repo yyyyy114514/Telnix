@@ -106,9 +106,10 @@ function startPolling() {
   if (pollTimer !== null) return
   // SSE 推送：新 flow 立即推送到前端，UI 延迟 <50ms（替代 500ms 轮询）
   flows.startSSE()
-  // 兜底轮询：5 秒一次，防止 SSE 异常断开未重连时漏掉流量
+  // 兜底轮询：1.5 秒一次，防止 SSE 异常断开未重连时漏掉流量
+  // 性能优化：从 5s 降到 1.5s，SSE 异常时延迟从 5s 降到 1.5s
   // 也用于触发 loadProcesses（进程列表每 3 秒刷新）
-  pollTimer = window.setInterval(pollFlows, 5000)
+  pollTimer = window.setInterval(pollFlows, 1500)
 }
 
 function stopPolling() {
@@ -153,13 +154,16 @@ async function onClear() {
   } catch {
     return
   }
+  // 乐观清空：先立即清空 UI（用户无延迟感知），后端异步处理 flush+delete
+  // flows.clear() 会重启 SSE 连接，丢弃浏览器缓冲中的旧 flow 事件
+  flows.clear()
   try {
     const res = await capture.clearSessions()
-    // 清空本地 store 并重置 maxFlowId
-    flows.clear()
     ElMessage.success(res?.scope === 'all' ? '已清空全部流量' : '已清空当前会话')
   } catch (e: any) {
     ElMessage.error('清空失败：' + (e?.message || e))
+    // 失败时重新加载，恢复真实状态
+    flows.loadAllFlows()
   }
 }
 
@@ -169,6 +173,65 @@ function onReplay() {
     return
   }
   replayVisible.value = true
+}
+
+// 批量重放：弹出 QPS 输入框，依次重放选中流量
+// QPS=0 表示不限制（并发只受浏览器/服务器限制），默认 5 QPS（每 200ms 一条）
+let batchReplaying = false
+async function onBatchReplay(ids: number[]) {
+  if (!ids.length) return
+  if (batchReplaying) {
+    ElMessage.warning('正在批量重放中，请等待完成')
+    return
+  }
+  let qps = 5
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `即将依次重放 ${ids.length} 条流量。\n请输入 QPS（每秒发送条数，0=不限速）：`,
+      '批量重放',
+      {
+        confirmButtonText: '开始重放',
+        cancelButtonText: '取消',
+        inputValue: '5',
+        inputValidator: (v: string) => {
+          const n = Number(v)
+          if (!isFinite(n) || n < 0 || !Number.isInteger(n)) return '请输入非负整数'
+          return true
+        },
+      }
+    )
+    qps = Number(value)
+  } catch {
+    return
+  }
+  batchReplaying = true
+  const delay = qps > 0 ? Math.ceil(1000 / qps) : 0
+  const total = ids.length
+  let ok = 0
+  let fail = 0
+  const startMsg = ElMessage({
+    message: `批量重放中：0/${total}`,
+    type: 'info',
+    duration: 0,
+  })
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+  for (let i = 0; i < total; i++) {
+    const id = ids[i]
+    try {
+      await api.replayFlow(id)
+      ok++
+    } catch {
+      fail++
+    }
+    // 每 5 条更新一次进度
+    if ((i + 1) % 5 === 0 || i === total - 1) {
+      (startMsg as any).message = `批量重放中：${i + 1}/${total}（成功 ${ok}，失败 ${fail}）`
+    }
+    if (delay > 0 && i < total - 1) await sleep(delay)
+  }
+  startMsg.close()
+  ElMessage.success(`批量重放完成：共 ${total} 条，成功 ${ok}，失败 ${fail}`)
+  batchReplaying = false
 }
 
 // 右键菜单触发的重放
@@ -323,6 +386,7 @@ async function onExport(format: string) {
     const extMap: Record<string, string> = {
       'har': 'har',
       'json': 'json',
+      'csv': 'csv',
       'python-requests': 'py',
       'postman': 'json',
       'curl': 'sh',
@@ -330,6 +394,7 @@ async function onExport(format: string) {
     const mimeMap: Record<string, string> = {
       'har': 'application/json',
       'json': 'application/json',
+      'csv': 'text/csv',
       'python-requests': 'text/x-python',
       'postman': 'application/json',
       'curl': 'application/x-sh',
@@ -449,6 +514,7 @@ onUnmounted(() => {
           <el-dropdown-menu>
             <el-dropdown-item command="har">HAR 格式</el-dropdown-item>
             <el-dropdown-item command="json">JSON 格式</el-dropdown-item>
+            <el-dropdown-item command="csv">CSV 格式（Excel 友好）</el-dropdown-item>
             <el-dropdown-item command="python-requests">Python 脚本</el-dropdown-item>
             <el-dropdown-item command="postman">Postman Collection</el-dropdown-item>
             <el-dropdown-item command="curl">cURL 脚本</el-dropdown-item>
@@ -469,6 +535,7 @@ onUnmounted(() => {
           @ignore-process="onIgnoreProcess"
           @ignore-host="onIgnoreHost"
           @replay="onCtxReplay"
+          @replay-batch="onBatchReplay"
           @ai-analyze="onCtxAI"
           @ai-analyze-batch="onBatchAI"
           @view-in-analyze="onCtxViewInAnalyze"

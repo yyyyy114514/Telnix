@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
-import { ElMessage } from 'element-plus'
 import type { Flow } from '../api/client'
 import HeaderView from './HeaderView.vue'
 import JsonView from './JsonView.vue'
@@ -39,16 +38,6 @@ function onHeaders(v: string) {
 function onBody(v: string) {
   bodyStr.value = v
   emit('modify', { response_body: v })
-}
-
-// 右键复制 URL（pane-title 上右键直接复制）
-function onUrlContextMenu(e: MouseEvent) {
-  e.preventDefault()
-  const url = props.flow.url || ''
-  if (url) {
-    navigator.clipboard.writeText(url).catch(() => {})
-    ElMessage.success('已复制 URL')
-  }
 }
 
 function extractHeader(name: string): string {
@@ -140,15 +129,6 @@ const isJson = computed(() => {
   }
 })
 
-const statusClass = computed(() => {
-  const c = props.flow.status_code
-  if (c === null) return 'status-null'
-  if (c < 300) return 'status-2xx'
-  if (c < 400) return 'status-3xx'
-  if (c < 500) return 'status-4xx'
-  return 'status-5xx'
-})
-
 // TCP/UDP 流量没有 HTTP headers/json/preview
 const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
   || props.flow.protocol === 'ws')
@@ -156,14 +136,6 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
 
 <template>
   <div class="inspector-pane full flex flex-col">
-    <div class="pane-title" @contextmenu="onUrlContextMenu">
-      <span class="status-tag" :class="statusClass">{{ flow.status_code ?? '...' }}</span>
-      <span class="pane-url mono" :title="flow.url + '（右键复制）'">{{ flow.url }}</span>
-      <span class="pane-meta mono">
-        {{ flow.size ? (flow.size + ' B') : '' }}
-        <span v-if="flow.duration_ms !== null"> · {{ flow.duration_ms }} ms</span>
-      </span>
-    </div>
     <el-tabs v-model="activeTab" class="flex-1 insp-tabs">
       <template v-if="isTcpUdp">
         <!-- TCP/UDP 流量：显示 Hex + Raw 两个 tab -->
@@ -221,12 +193,7 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
   padding: 6px 10px; border-bottom: 1px solid var(--on-border-light);
   font-size: 12.5px;
 }
-.status-tag {
-  font-family: var(--on-font-mono); font-weight: 700; font-size: 12px;
-  padding: 2px 8px; border-radius: 3px; border: 1px solid currentColor;
-}
-.pane-meta { color: var(--on-text-muted); margin-left: auto; white-space: nowrap; }
-.pane-url { color: var(--on-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+.pane-meta { color: var(--on-text-muted); white-space: nowrap; }
 .insp-tabs { padding: 0 10px; display: flex; flex-direction: column; height: 100%; }
 /* el-tabs__content 不滚动，让各 tab 内部组件自己处理滚动，确保 TextSearch 等组件的悬浮窗定位正确 */
 .insp-tabs :deep(.el-tabs__content) { flex: 1; overflow: hidden; }

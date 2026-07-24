@@ -158,6 +158,29 @@ export interface RawStatus {
   msg?: string
 }
 
+/** DNS 劫持状态 */
+export interface DnsHijackStatus {
+  running: boolean
+  last_error: string
+  rules: Record<string, string>
+  default_ip: string
+  stats: {
+    total_packets: number
+    hijacked_packets: number
+    skipped_no_match: number
+    errors: number
+  }
+  log: Array<{
+    ts: string
+    domain: string
+    original_ips: string[]
+    new_ip: string
+    dns_server: string
+  }>
+  is_admin: boolean
+  is_windows: boolean
+}
+
 /** 搜索结果 */
 export interface SearchResult {
   matches: Flow[]
@@ -286,6 +309,9 @@ export const api = {
   getFlow: (id: number) => get<Flow>(`/flows/${id}`),
   patchFlow: (id: number, body: any) => patch<Flow>(`/flows/${id}`, body),
   releaseFlow: (id: number, body: { action: string }) => post(`/flows/${id}/release`, body),
+  // 协议深度解析（DNS/TLS/HTTP/NTP 等 TCP/UDP 流量）
+  decodeFlow: (id: number, field: string = 'raw_data') =>
+    get<{ protocol: string; summary?: string; error?: string; fields: { label: string; value: string; color?: string }[] }>(`/flows/${id}/decode`, { field }),
 
   // 重放
   replayFlow: (id: number) => post(`/flows/${id}/replay`),
@@ -354,7 +380,7 @@ export const api = {
   // AI
   aiAnalyze: (body: { flow_ids: number[] }) =>
     post<{ chat_id: number; result: string; title: string }>('/ai/analyze', body, AI_TIMEOUT),
-  aiChat: (body: { chat_id: number; message: string }) =>
+  aiChat: (body: { chat_id: number; message: string; flow_ids?: number[] }) =>
     post<{ result: string }>('/ai/chat', body, AI_TIMEOUT),
   aiListChats: () => get<AiChat[]>('/ai/chats'),
   aiGetChat: (chatId: number) => get<{ chat: AiChat; messages: AiMessage[] }>(`/ai/chats/${chatId}`),
@@ -476,6 +502,15 @@ export const api = {
     get<any>('/clash/dns/query', { name, type: qtype || 'A' }),
   clashFlushDns: () => post('/clash/dns/flush'),
   clashFlushFakeip: () => post('/clash/fakeip/flush'),
+
+  // DNS 劫持
+  dnsHijackStatus: () => get<DnsHijackStatus>('/dns-hijack/status'),
+  dnsHijackStart: (body: { rules: Record<string, string>; default_ip?: string }) =>
+    post<{ running: boolean }>('/dns-hijack/start', body),
+  dnsHijackStop: () => post<{ running: boolean }>('/dns-hijack/stop'),
+  dnsHijackSetRules: (body: { rules: Record<string, string>; default_ip?: string }) =>
+    put<DnsHijackStatus>('/dns-hijack/rules', body),
+  dnsHijackClearLog: () => post<{ cleared: boolean }>('/dns-hijack/clear-log'),
 }
 
 export default client

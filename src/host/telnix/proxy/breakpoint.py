@@ -43,19 +43,22 @@ class BreakpointManager:
     def get_timeout(self) -> float:
         return self._timeout
 
-    def wait_for_release(self, flow_id: int) -> str:
+    def wait_for_release(self, flow_id: int, timeout: float | None = None) -> str:
         """请求/响应被断点拦截，阻塞等待用户放行，返回动作（release/drop）。
 
         超时后自动放行（返回 'release'），避免 agent 忘了 release 导致连接永久阻塞。
+        timeout 参数优先于全局 _timeout；None 表示用全局 _timeout；
+        全局 _timeout=0 表示永不超时（旧行为，不推荐用于 async 引擎以免线程池耗尽）。
         """
         event = threading.Event()
         now = time.time()
         with self._lock:
             self._pending[flow_id] = event
             self._timestamps[flow_id] = now
-            timeout = self._timeout
+            # 显式 timeout 优先，否则用全局 _timeout
+            effective_timeout = timeout if timeout is not None else self._timeout
         # 超时为 0 表示永不超时（保持旧行为）；>0 则到点自动放行
-        triggered = event.wait(timeout=timeout if timeout > 0 else None)
+        triggered = event.wait(timeout=effective_timeout if effective_timeout > 0 else None)
         with self._lock:
             self._pending.pop(flow_id, None)
             self._timestamps.pop(flow_id, None)
@@ -63,7 +66,7 @@ class BreakpointManager:
                 # 超时自动放行
                 from .. import logger
                 logger.warning("proxy",
-                               f"断点 flow_id={flow_id} 等待 {timeout:.0f}s 超时，自动放行",
+                               f"断点 flow_id={flow_id} 等待 {effective_timeout:.0f}s 超时，自动放行",
                                "agent 可能忘了 release，已自动放行避免连接卡死")
                 return "release"
             return self._actions.pop(flow_id, "release")

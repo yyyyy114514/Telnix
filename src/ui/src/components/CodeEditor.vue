@@ -212,7 +212,7 @@ function openBigEditor() {
 .code-editor {
   position: relative;
   width: 100%;
-  background: var(--on-bg, #1e1e2e);
+  background: transparent;
   border: 1px solid var(--on-border-light, #333);
   border-radius: 4px;
   overflow: hidden;

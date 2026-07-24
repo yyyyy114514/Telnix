@@ -1,5 +1,6 @@
 """抓包控制 API：开始/停止/状态/清空。"""
 
+import asyncio
 import threading
 from datetime import datetime
 
@@ -97,7 +98,7 @@ async def capture_start(request: Request, body: CaptureStartBody | None = None):
         name=f"会话 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     state.current_session_id = session_id
     proxy.session_id = session_id
-    proxy.refresh_cert_status()
+    await asyncio.to_thread(proxy.refresh_cert_status)
     proxy.refresh_ignored()
     proxy.capturing = True
     out = {"session_id": session_id, "capturing": True, "system_proxy_on": _system_proxy_state(), "proxy_auto_enabled": proxy_enabled}
@@ -169,11 +170,18 @@ async def capture_resume(request: Request):
 
 @router.post("/capture/clear")
 async def capture_clear(request: Request):
-    """清空流量。有活动会话只清该会话，无活动会话清空所有 flows。"""
+    """清空流量。有活动会话只清该会话，无活动会话清空所有 flows。
+
+    先 flush 异步写入队列，避免 pending 的旧流量在清空后又被写入 DB。
+    """
     state = request.app.state.telnix
+    # 先排空异步写入队列，防止旧流量在 DELETE 后又被写入
+    db.flush_pending_flows(timeout=2.0)
     if state.current_session_id:
         db.delete_flows(state.current_session_id)
+        db.reset_max_flow_id()
         return ok({"cleared": True, "scope": "session"})
     # 无活动会话：清空所有流量（用户明确点了清空）
     n = db.delete_all_flows()
+    db.reset_max_flow_id()
     return ok({"cleared": True, "scope": "all", "deleted": n})

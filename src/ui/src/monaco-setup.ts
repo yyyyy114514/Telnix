@@ -1,35 +1,175 @@
 /**
- * Monaco Editor 运行时配置：无 worker + 预加载 Python 语言定义。
+ * Monaco Editor 按需加载器（CDN 模式）
  *
- * 两个问题：
- * 1. Worker 加载失败：monaco-editor 0.56 的 exports 字段干扰 Vite 的 ?worker 路径解析。
- *    → getWorker 返回空 worker（类型要求返回 Worker，不能返回 null），
- *      Monaco 退化为无 worker 模式（语法高亮在主线程运行）。
- * 2. 语言定义动态 import 失败：Python 的 Monarch tokenizer 通过 `import('./python.js')`
- *    动态加载，Vite 打包后生成单独 chunk，浏览器缓存或路径问题导致 404。
- *    → 静态 import Python 语言定义，手动注册 tokens provider + language configuration，
- *    绕过动态 import。
+ * monaco-editor 体积大（5MB+，几千个模块），无论静态还是动态导入都会严重拖慢构建。
+ * 改用 @guolao/vue-monaco-editor 的 loader 从 CDN 加载，monaco-editor 不参与构建。
  *
- * 必须在 `import * as monaco from 'monaco-editor'` 之前执行此文件。
+ * Python 语言定义：monaco-editor 的 python.js 子路径在 CDN 下不好访问，
+ * 改为自己注册一个简单的 Monarch tokenizer（足够语法高亮用）。
  */
-import * as monaco from 'monaco-editor'
-// 静态导入 Python 语言定义（Monarch tokenizer + 语言配置），避免动态 import chunk 404
-// @ts-expect-error: monaco-editor 的 exports 字段导致 TS 无法解析子路径模块声明
-import { conf as pythonConf, language as pythonLanguage } from 'monaco-editor/esm/vs/languages/definitions/python/python.js'
 
-// 1. 无 worker 模式：语法高亮在主线程运行，不依赖 worker
-//    类型要求返回 Worker，实际返回空对象（不会真正使用）
-self.MonacoEnvironment = {
-  getWorker(): any {
-    return null as any
-  },
+import { loader } from '@guolao/vue-monaco-editor'
+import type * as Monaco from 'monaco-editor'
+
+let configured = false
+
+/**
+ * 配置 Monaco loader（从 CDN 加载）+ 注册 Python 语言定义。
+ * 幂等，多次调用安全。返回 void（loader 内部管理 monaco 实例）。
+ *
+ * 组件用法：
+ *   import { loader } from '@guolao/vue-monaco-editor'
+ *   const editor = ... // loader 会自动从 CDN 加载 monaco
+ */
+export function setupMonaco() {
+  if (configured) return
+  configured = true
+
+  // loader 默认从 CDN（jsdelivr）加载 monaco-editor，不需要显式 config。
+  // 如果需要指定 CDN 路径，可以取消下面注释：
+  // loader.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } })
+
+  // Python Monarch tokenizer：注册自定义语言定义（不依赖 monaco-editor 的 python.js）
+  loader.init().then((monaco) => {
+    registerPythonLanguage(monaco)
+  }).catch(() => { /* 忽略，loader 会重试 */ })
 }
 
-// 2. 手动注册 Python 语言定义（绕过动态 import）
-//    monaco-editor 的 register.all.js 会通过 import('./python.js') 动态加载，
-//    但在 Vite 打包后可能因 chunk 路径问题失败。
-//    这里在模块加载时立即注册，确保 tokenizer 可用。
-monaco.languages.registerTokensProviderFactory('python', {
-  create: async () => pythonLanguage,
-})
-monaco.languages.setLanguageConfiguration('python', pythonConf)
+/**
+ * 注册 Python 语言定义（Monarch tokenizer + 语言配置）。
+ * 简化版，覆盖常见 Python 语法高亮需求。
+ */
+function registerPythonLanguage(monaco: typeof Monaco) {
+  // 如果已注册则跳过
+  try {
+    // 语言配置：括号配对、自动缩进、注释
+    monaco.languages.setLanguageConfiguration('python', {
+      comments: {
+        lineComment: '#',
+        blockComment: ['"""', '"""'],
+      },
+      brackets: [
+        ['{', '}'],
+        ['[', ']'],
+        ['(', ')'],
+      ],
+      autoClosingPairs: [
+        { open: '{', close: '}' },
+        { open: '[', close: ']' },
+        { open: '(', close: ')' },
+        { open: '"', close: '"', notIn: ['string'] },
+        { open: "'", close: "'", notIn: ['string', 'comment'] },
+        { open: '"""', close: '"""', notIn: ['string', 'comment'] },
+        { open: "'''", close: "'''", notIn: ['string', 'comment'] },
+      ],
+      surroundingPairs: [
+        { open: '{', close: '}' },
+        { open: '[', close: ']' },
+        { open: '(', close: ')' },
+        { open: '"', close: '"' },
+        { open: "'", close: "'" },
+        { open: '"""', close: '"""' },
+        { open: "'''", close: "'''" },
+      ],
+      onEnterRules: [
+        {
+          beforeText: /^\s*(?:def|class|for|if|elif|else|while|try|except|finally|with|async\s+def)\b.*:\s*$/,
+          action: { indentAction: monaco.languages.IndentAction.Indent },
+        },
+      ],
+      folding: {
+        offSide: true,
+        markers: {
+          start: /^\s*#region\b/,
+          end: /^\s*#endregion\b/,
+        },
+      },
+    })
+
+    // Monarch tokenizer：Python 语法高亮规则
+    monaco.languages.registerTokensProviderFactory('python', {
+      create: async () => ({
+        defaultToken: '',
+        tokenPostfix: '.python',
+        keywords: [
+          'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue',
+          'def', 'del', 'elif', 'else', 'except', 'False', 'finally', 'for',
+          'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'None',
+          'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'True', 'try',
+          'while', 'with', 'yield', 'self', 'cls',
+        ],
+        operators: [
+          '+', '-', '*', '**', '/', '//', '%', '@', '<<', '>>', '&', '|', '^',
+          '~', '<', '>', '<=', '>=', '==', '!=', '=', '+=', '-=', '*=', '/=',
+          '//=', '%=', '**=', '>>=', '<<=', '&=', '|=', '^=', '@=', ':=',
+        ],
+        symbols: /[=><!~?:&|+\-*/^%]+/,
+        escapes: /\\(?:[abfnrtv\\"']|x[0-9A-Fa-f]{1,4}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/,
+        digits: /\d+(_+\d+)*/,
+        octaldigits: /[0-7]?(_+[0-7])*$/,
+        binarydigits: /[0-1]?(_+[0-1])*$/,
+        hexdigits: /[[0-9a-fA-F]?(_+[0-9a-fA-F])*$/,
+        tokenizer: {
+          root: [
+            [/[a-zA-Z_]\w*/, {
+              cases: {
+                '@keywords': 'keyword',
+                '@default': 'identifier',
+              },
+            }],
+            { include: '@whitespace' },
+            [/\d+(\.\d+)?([eE][+-]?\d+)?/, 'number'],
+            [/0[xX][0-9a-fA-F]+/, 'number.hex'],
+            [/0[oO][0-7]+/, 'number.octal'],
+            [/0[bB][01]+/, 'number.binary'],
+            [/"""/, { token: 'string', next: '@stringTriple' }],
+            [/'''/, { token: 'string', next: '@stringTripleSingle' }],
+            [/"/, { token: 'string', next: '@string' }],
+            [/'/, { token: 'string', next: '@stringSingle' }],
+            [/[{}()[\]]/, '@brackets'],
+            [/@symbols/, {
+              cases: {
+                '@operators': 'operator',
+                '@default': '',
+              },
+            }],
+            [/#region\b/, 'comment'],
+            [/#endregion\b/, 'comment'],
+          ],
+          whitespace: [
+            [/\s+/, 'white'],
+            [/#.*$/, 'comment'],
+          ],
+          string: [
+            [/[^\\"]+/, 'string'],
+            [/@escapes/, 'string.escape'],
+            [/\\./, 'string.escape.invalid'],
+            [/"/, { token: 'string', next: '@pop' }],
+          ],
+          stringSingle: [
+            [/[^\\']+/, 'string'],
+            [/@escapes/, 'string.escape'],
+            [/\\./, 'string.escape.invalid'],
+            [/'/, { token: 'string', next: '@pop' }],
+          ],
+          stringTriple: [
+            [/[^\\"]+/, 'string'],
+            [/@escapes/, 'string.escape'],
+            [/\\./, 'string.escape.invalid'],
+            [/"""/, { token: 'string', next: '@pop' }],
+            [/"/, 'string'],
+          ],
+          stringTripleSingle: [
+            [/[^\\']+/, 'string'],
+            [/@escapes/, 'string.escape'],
+            [/\\./, 'string.escape.invalid'],
+            [/'''/, { token: 'string', next: '@pop' }],
+            [/'/, 'string'],
+          ],
+        },
+      }),
+    })
+  } catch {
+    // 已注册则忽略
+  }
+}

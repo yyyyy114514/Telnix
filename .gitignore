@@ -40,6 +40,9 @@ test/
 *_out.txt
 diag*.py
 perf_*.py
+# 内部测试脚本（带下划线前缀，如 _dns_hijack_test.py、_decode_test.py）
+_*_test.py
+_*test.py
 
 # 设计预览/原型（开发期产物，不发布）
 __design_preview/
@@ -52,9 +55,19 @@ _ip2region_ref/
 dogfood-output/
 *.design
 4.1.0
+# AI 参考资料与压缩包（开发期产物，不发布）
+__ai_ref/
+*.zip
+
+# 本地看门狗/启动辅助脚本（本地用，不发布；正式启动走 build.ps1 / run.ps1）
+proxy_watchdog.py
+start_watchdog.bat
 
 # 构建辅助脚本（本地用，避免与 build.ps1 重复）
 build-frontend.ps1
+
+# 已下线功能：CoolUI（文件保留供本地参考，但不发布到 GitHub）
+src/ui/src/views/CoolUIView.vue
 
 # IDE
 .vscode/

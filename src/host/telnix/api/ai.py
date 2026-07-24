@@ -19,6 +19,8 @@ class AnalyzeRequest(BaseModel):
 class ChatRequest(BaseModel):
     chat_id: int
     message: str
+    # 可选：本次对话追加引用的流量 ID（如从抓包页"发送到已有会话"）
+    flow_ids: list[int] = []
 
 
 class UpdateTitleRequest(BaseModel):
@@ -88,7 +90,11 @@ async def analyze(body: AnalyzeRequest):
 
 @router.post("/ai/chat")
 async def chat(body: ChatRequest):
-    """多轮对话：基于已有聊天记录追问。"""
+    """多轮对话：基于已有聊天记录追问。
+
+    支持在消息中追加引用流量（flow_ids）：当用户从抓包页"发送到已有会话"
+    时，前端会把引用的流量 ID 一起传过来，后端构建流量上下文注入给 AI。
+    """
     chat = db.get_ai_chat(body.chat_id)
     if not chat:
         return err("聊天记录不存在")
@@ -100,10 +106,15 @@ async def chat(body: ChatRequest):
     history = db.get_ai_messages(body.chat_id)
     history_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
+    # 流量上下文：优先用本次追加的 flow_ids，否则用聊天记录原有的
+    flow_context = chat["flow_context"] or ""
+    if body.flow_ids:
+        flow_context = _build_flow_context(body.flow_ids)
+
     # 调用 AI
     result = deepseek.chat(
         history_list,
-        chat["flow_context"],
+        flow_context,
         body.message,
     )
     if not result.get("ok"):

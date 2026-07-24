@@ -20,16 +20,51 @@ Write-Host "  Telnix Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
+# ---------- 查找系统 Python（避免用到 TRAE 内置 Python）----------
+function Find-SystemPython {
+    # 1. py launcher（官方 Windows Python 启动器，指向系统 Python）
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        try {
+            $exe = & py -3 -c "import sys; print(sys.executable)" 2>$null
+            if ($exe -and $exe -notmatch 'TRAE') {
+                return $exe.Trim()
+            }
+        } catch { }
+    }
+    # 2. 搜索常见系统安装路径
+    $candidates = @()
+    $localApp = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    if ($localApp) {
+        $candidates += Get-ChildItem "$localApp\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch 'TRAE' } |
+            Sort-Object Name -Descending |
+            Select-Object -ExpandProperty FullName
+    }
+    $candidates += Get-ChildItem "C:\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch 'TRAE' } |
+        Select-Object -ExpandProperty FullName
+    $candidates += Get-ChildItem "C:\Program Files\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch 'TRAE' } |
+        Select-Object -ExpandProperty FullName
+    if ($candidates.Count -gt 0) {
+        return $candidates[0]
+    }
+    # 3. 兜底：PATH 中的 python（可能不是系统 Python）
+    return 'python'
+}
+
 # ---------- 检查 Python ----------
 Write-Host "[0/4] Checking Python..." -ForegroundColor Yellow
+$pythonExe = Find-SystemPython
 try {
-    $pyVer = python --version 2>&1
+    $pyVer = & $pythonExe --version 2>&1
     if ($pyVer -notmatch "Python (\d+)\.(\d+)") { throw "无法识别 Python 版本" }
     $major = [int]$Matches[1]; $minor = [int]$Matches[2]
     if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 10)) {
         throw "Python $major.$minor 版本过低，需要 3.10+"
     }
-    Write-Host "  OK: $pyVer" -ForegroundColor Green
+    Write-Host "  OK: $pyVer ($pythonExe)" -ForegroundColor Green
 } catch {
     Write-Host "  ERROR: $_" -ForegroundColor Red
     Write-Host "  请先安装 Python 3.10+: https://www.python.org/downloads/" -ForegroundColor Yellow
@@ -61,7 +96,7 @@ Write-Host ""
 Write-Host "[1/4] Installing Python backend dependencies..." -ForegroundColor Yellow
 $hostDir = Join-Path $projectRoot "src\host"
 Set-Location $hostDir
-pip install -e . 2>&1 | Out-Host
+& $pythonExe -m pip install -e . 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ERROR: pip install 失败" -ForegroundColor Red
     exit 1

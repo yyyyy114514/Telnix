@@ -21,7 +21,7 @@ const groupBy = ref<GroupBy>('host')
 // 请求分析 vs 响应分析：影响右侧详情显示内容
 const analyzeMode = ref<'request' | 'response'>('response')
 // 视图模式：list 列表 / bar 条形图 / pie 饼图（图表显示全量数据，换页不换图）
-const viewMode = ref<'list' | 'bar' | 'pie'>('list')
+const viewMode = ref<'list' | 'bar' | 'pie' | 'timeline'>('list')
 
 // 统计图颜色板（性能优先：纯 CSS，不用图表库）
 const CHART_COLORS = [
@@ -139,6 +139,128 @@ const pieGradient = computed(() => {
     stops.push(`${groupColor(i)} ${start}deg ${end}deg`)
   })
   return `conic-gradient(${stops.join(', ')})`
+})
+
+// ===== 时序图（timeline）=====
+// 粒度（秒）：1 / 5 / 60
+const timelineGranularity = ref<number>(1)
+// 指标：qps（每秒请求数）或 bytes（每秒字节）
+const timelineMetric = ref<'qps' | 'bytes'>('qps')
+// SVG 尺寸
+const timelineWidth = 800
+const timelineHeight = 320
+const timelinePadding = { top: 20, right: 20, bottom: 30, left: 50 }
+
+// 时间桶：按粒度分桶统计 count 和 bytes
+const timelineBuckets = computed(() => {
+  const flows = allFlows.value
+  if (flows.length < 2) return []
+  const gran = timelineGranularity.value
+  // 找出最早和最晚时间
+  const times = flows.map(f => new Date(f.timestamp).getTime() / 1000)
+  const minT = Math.min(...times)
+  const maxT = Math.max(...times)
+  const span = Math.max(1, maxT - minT)
+  const bucketCount = Math.min(200, Math.ceil(span / gran) + 1)
+  const buckets: { ts: number; count: number; bytes: number }[] = []
+  for (let i = 0; i < bucketCount; i++) {
+    buckets.push({ ts: minT + i * gran, count: 0, bytes: 0 })
+  }
+  for (const f of flows) {
+    const t = new Date(f.timestamp).getTime() / 1000
+    const idx = Math.min(bucketCount - 1, Math.max(0, Math.floor((t - minT) / gran)))
+    buckets[idx].count++
+    buckets[idx].bytes += f.size || 0
+  }
+  return buckets
+})
+
+// 峰值
+const timelineMaxBucket = computed(() => {
+  const b = timelineBuckets.value
+  if (!b.length) return 0
+  return timelineMetric.value === 'qps'
+    ? Math.max(...b.map(x => x.count))
+    : Math.max(...b.map(x => x.bytes))
+})
+
+// 折线 points（x,y 对）
+const timelineQpsPoints = computed(() => {
+  return buildTimelinePoints(b => b.count)
+})
+const timelineBytesPoints = computed(() => {
+  return buildTimelinePoints(b => b.bytes)
+})
+function buildTimelinePoints(selector: (b: { count: number; bytes: number }) => number): string {
+  const b = timelineBuckets.value
+  if (!b.length) return ''
+  const maxVal = Math.max(1, ...b.map(selector))
+  const innerW = timelineWidth - timelinePadding.left - timelinePadding.right
+  const innerH = timelineHeight - timelinePadding.top - timelinePadding.bottom
+  return b.map((bucket, i) => {
+    const x = timelinePadding.left + (i / Math.max(1, b.length - 1)) * innerW
+    const y = timelinePadding.top + innerH - (selector(bucket) / maxVal) * innerH
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+}
+
+// 区域填充 points（在折线两端加底部）
+const timelineQpsAreaPoints = computed(() => {
+  const pts = timelineQpsPoints.value
+  return buildTimelineArea(pts)
+})
+const timelineBytesAreaPoints = computed(() => {
+  const pts = timelineBytesPoints.value
+  return buildTimelineArea(pts)
+})
+function buildTimelineArea(linePoints: string): string {
+  if (!linePoints) return ''
+  const pts = linePoints.split(' ')
+  if (pts.length < 2) return ''
+  const first = pts[0].split(',')
+  const last = pts[pts.length - 1].split(',')
+  const baseY = timelineHeight - timelinePadding.bottom
+  return `${first[0]},${baseY} ${linePoints} ${last[0]},${baseY}`
+}
+
+// Y 轴刻度（5 条网格线）
+const timelineYGrids = computed(() => {
+  const b = timelineBuckets.value
+  if (!b.length) return []
+  const maxVal = timelineMetric.value === 'qps'
+    ? Math.max(...b.map(x => x.count))
+    : Math.max(...b.map(x => x.bytes))
+  const top = Math.max(1, maxVal)
+  const innerH = timelineHeight - timelinePadding.top - timelinePadding.bottom
+  const grids: { y: number; label: string }[] = []
+  for (let i = 0; i <= 4; i++) {
+    const val = (top * i) / 4
+    const y = timelinePadding.top + innerH - (val / top) * innerH
+    const label = timelineMetric.value === 'qps'
+      ? String(Math.round(val))
+      : val >= 1024 ? (val / 1024).toFixed(1) + 'K' : String(Math.round(val))
+    grids.push({ y, label })
+  }
+  return grids
+})
+
+// X 轴刻度（5 个时间点）
+const timelineXLabels = computed(() => {
+  const b = timelineBuckets.value
+  if (b.length < 2) return ['—', '—']
+  const gran = timelineGranularity.value
+  const minT = b[0].ts
+  const maxT = b[b.length - 1].ts
+  const result: string[] = []
+  for (let i = 0; i <= 4; i++) {
+    const t = minT + (maxT - minT) * (i / 4)
+    const d = new Date(t * 1000)
+    const label = gran >= 60
+      ? `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+      : `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+    result.push(label)
+  }
+  return result
 })
 
 // 所有流量（跨会话，分页加载）
@@ -550,7 +672,7 @@ onMounted(async () => {
         <el-button size="small" @click="onClearFlows('before')" :loading="clearLoading" title="删除当前页之前的旧流量，保留最近数据">
           <el-icon><Delete /></el-icon>&nbsp;清理旧数据
         </el-button>
-        <el-button size="small" type="danger" plain @click="onClearFlows('all')" :loading="clearLoading">
+        <el-button size="small" type="danger" @click="onClearFlows('all')" :loading="clearLoading">
           <el-icon><Delete /></el-icon>&nbsp;清空全部
         </el-button>
       </div>
@@ -575,11 +697,12 @@ onMounted(async () => {
       >
         <el-icon><Sort /></el-icon>&nbsp;{{ sortOrder === 'desc' ? '大到小' : '小到大' }}
       </el-button>
-      <!-- 视图切换：列表 / 条形图 / 饼图（图表显示全量数据，换页不换图） -->
+      <!-- 视图切换：列表 / 条形图 / 饼图 / 时序图（图表显示全量数据，换页不换图） -->
       <el-radio-group v-model="viewMode" size="small" style="margin-left: 8px">
         <el-radio-button value="list">列表</el-radio-button>
         <el-radio-button value="bar">条形图</el-radio-button>
         <el-radio-button value="pie">饼图</el-radio-button>
+        <el-radio-button value="timeline">时序图</el-radio-button>
       </el-radio-group>
       <span class="text-dim" style="font-size: 12px; margin-left: 12px">本页 {{ allFlows.length }} 条 / 共 {{ totalCount }} 条</span>
     </div>
@@ -665,6 +788,65 @@ onMounted(async () => {
               <span class="legend-pct mono text-dim">{{ (g.count / statsTotal * 100).toFixed(1) }}%</span>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 主体：时序图视图（viewMode === 'timeline'）— SVG 折线图，每秒 QPS 和字节数 -->
+    <div v-else-if="viewMode === 'timeline'" class="analyze-body chart-body flex-1 overflow-auto timeline-view">
+      <div v-if="allFlows.length < 2" class="empty-text text-dim">（流量少于 2 条，无法生成时序图）</div>
+      <div v-else class="timeline-container">
+        <div class="timeline-controls">
+          <span class="text-dim" style="font-size: 12px;">粒度：</span>
+          <el-radio-group v-model="timelineGranularity" size="small">
+            <el-radio-button value="1">1秒</el-radio-button>
+            <el-radio-button value="5">5秒</el-radio-button>
+            <el-radio-button value="60">1分钟</el-radio-button>
+          </el-radio-group>
+          <span class="text-dim" style="font-size: 12px; margin-left: 16px;">指标：</span>
+          <el-radio-group v-model="timelineMetric" size="small">
+            <el-radio-button value="qps">QPS</el-radio-button>
+            <el-radio-button value="bytes">字节</el-radio-button>
+          </el-radio-group>
+          <span class="text-dim timeline-summary">
+            总 {{ allFlows.length }} 条 / {{ timelineBuckets.length }} 个时间桶 / 峰值 {{ timelineMaxBucket }}{{ timelineMetric === 'qps' ? ' req' : ' B' }}
+          </span>
+        </div>
+        <div class="timeline-svg-wrap">
+          <svg :viewBox="`0 0 ${timelineWidth} ${timelineHeight}`" preserveAspectRatio="none" class="timeline-svg">
+            <!-- 网格线 -->
+            <line v-for="(g, i) in timelineYGrids" :key="'grid-' + i"
+                  :x1="timelinePadding.left" :y1="g.y" :x2="timelineWidth - timelinePadding.right" :y2="g.y"
+                  stroke="var(--on-border-light)" stroke-width="1" stroke-dasharray="2 4" />
+            <!-- Y 轴刻度 -->
+            <text v-for="(g, i) in timelineYGrids" :key="'y-' + i"
+                  :x="timelinePadding.left - 8" :y="g.y + 4" text-anchor="end"
+                  fill="var(--on-text-dim)" font-size="11" font-family="var(--on-font-mono, Menlo, monospace)">
+              {{ g.label }}
+            </text>
+            <!-- QPS 折线（青色） -->
+            <polyline v-if="timelineMetric === 'qps'"
+                      :points="timelineQpsPoints" fill="none"
+                      stroke="var(--on-accent, #2dd4bf)" stroke-width="2" />
+            <!-- Bytes 折线（蓝色） -->
+            <polyline v-else
+                      :points="timelineBytesPoints" fill="none"
+                      stroke="#3b82f6" stroke-width="2" />
+            <!-- 区域填充 -->
+            <polygon v-if="timelineMetric === 'qps' && timelineQpsAreaPoints"
+                     :points="timelineQpsAreaPoints"
+                     fill="var(--on-accent, #2dd4bf)" fill-opacity="0.1" />
+            <polygon v-else-if="timelineBytesAreaPoints"
+                     :points="timelineBytesAreaPoints"
+                     fill="#3b82f6" fill-opacity="0.1" />
+            <!-- X 轴刻度 -->
+            <text v-for="(label, i) in timelineXLabels" :key="'x-' + i"
+                  :x="timelinePadding.left + i * (timelineWidth - timelinePadding.left - timelinePadding.right) / (timelineXLabels.length - 1 || 1)"
+                  :y="timelineHeight - timelinePadding.bottom + 16" text-anchor="middle"
+                  fill="var(--on-text-dim)" font-size="11" font-family="var(--on-font-mono, Menlo, monospace)">
+              {{ label }}
+            </text>
+          </svg>
         </div>
       </div>
     </div>
@@ -849,13 +1031,15 @@ onMounted(async () => {
   overflow-x: auto; overflow-y: hidden;
   white-space: nowrap;
   flex: 1 1 auto; min-width: 80px; max-width: calc(100% - 220px);
-  scrollbar-width: thin;
+  scrollbar-width: none; /* Firefox：默认隐藏滚动条 */
 }
-.detail-title::-webkit-scrollbar { height: 4px; }
+.detail-title::-webkit-scrollbar { height: 0; }
 .detail-title::-webkit-scrollbar-thumb { background: transparent; border-radius: 2px; }
 .detail-title::-webkit-scrollbar-track { background: transparent; }
-/* 默认隐藏滚动条，鼠标悬停时显示淡灰色 */
-.detail-title:hover::-webkit-scrollbar-thumb { background: var(--on-border-light, rgba(128,128,128,.3)); }
+/* hover 时显示 4px 小滚动条 */
+.detail-title:hover { scrollbar-width: thin; }
+.detail-title:hover::-webkit-scrollbar { height: 4px; }
+.detail-title:hover::-webkit-scrollbar-thumb { background: var(--on-border-light, rgba(128,128,128,.3)); border-radius: 2px; }
 .detail-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .detail-pre {
   flex: 1; margin: 0; padding: 10px 12px;
@@ -935,6 +1119,40 @@ onMounted(async () => {
 /* 饼图视图（conic-gradient 环形图，显示全量比例）*/
 .pie-container {
   max-width: 1000px; margin: 0 auto; padding: 12px;
+}
+
+/* 时序图视图（SVG 折线图） */
+.timeline-view {
+  display: flex;
+  flex-direction: column;
+}
+.timeline-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+.timeline-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.timeline-summary {
+  margin-left: auto;
+  font-size: 12px;
+}
+.timeline-svg-wrap {
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border-light);
+  border-radius: var(--on-radius-md, 6px);
+  padding: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+.timeline-svg {
+  width: 100%;
+  height: 320px;
+  display: block;
 }
 .pie-wrap {
   display: flex; align-items: center; gap: 24px;

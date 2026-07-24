@@ -34,7 +34,7 @@ function onRespModify(p: any) {
 }
 
 const isBreakpoint = computed(
-  () => !!props.flow && props.flow.breakpoint_status !== null && props.flow.breakpoint_status !== ''
+  () => !!props.flow && !!props.flow.breakpoint_status
 )
 const bpLabel = computed(() => {
   const s = props.flow?.breakpoint_status

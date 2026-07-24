@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 # 平台判断
@@ -39,8 +39,20 @@ class SSLBumpManager:
         self._cert_cache: dict[str, tuple[str, str]] = {}  # host -> (cert_path, key_path)
         self._root_key = None
         self._root_cert = None
-        self._lock = threading.Lock()
+        # 性能优化：每域名独立锁，不同 host 的首次签发可并行 keygen
+        # （原全局锁会把多域名首次访问串行化，每个 keygen 50-150ms）
+        self._host_locks: dict[str, threading.Lock] = {}
+        self._host_locks_lock = threading.Lock()
         self._ensure_root_cert()
+
+    def _get_host_lock(self, host: str) -> threading.Lock:
+        """获取指定 host 的独立锁（懒创建）。"""
+        with self._host_locks_lock:
+            lock = self._host_locks.get(host)
+            if lock is None:
+                lock = threading.Lock()
+                self._host_locks[host] = lock
+            return lock
 
     # ---------- 根证书 ----------
 
@@ -96,8 +108,8 @@ class SSLBumpManager:
     def get_cert(self, host: str) -> tuple[str, str]:
         """获取指定域名的证书（有缓存），返回 (cert_path, key_path)。
 
-        性能优化：双检锁 — 锁内查缓存、锁内签发，避免并发首请求重复 RSA keygen（50-100ms）
-        + 避免多线程同时写同一对文件导致损坏。
+        性能优化：每域名独立锁 — 同 host 互斥避免重复签发，
+        不同 host 的 keygen 完全并行（原全局锁会串行化所有域名，每个 keygen 50-150ms）。
         """
         # 去掉端口
         if ":" in host:
@@ -106,22 +118,28 @@ class SSLBumpManager:
         cached = self._cert_cache.get(host)
         if cached is not None:
             return cached
-        # 双检锁：锁内再查一次 + 锁内签发
-        with self._lock:
+        # 每域名独立锁：锁内双检 + 签发
+        with self._get_host_lock(host):
             cached = self._cert_cache.get(host)
             if cached is not None:
                 return cached
             cert_path = os.path.join(self.cert_dir, f"{host}.crt")
             key_path = os.path.join(self.cert_dir, f"{host}.key")
-            # 锁内签发（保证只有一个线程做 RSA keygen + 写文件）
+            # 锁内签发（保证同 host 只有一个线程做 RSA keygen + 写文件）
             if not (os.path.exists(cert_path) and os.path.exists(key_path)):
                 self._sign_host_cert(host, cert_path, key_path)
             self._cert_cache[host] = (cert_path, key_path)
             return cert_path, key_path
 
     def _sign_host_cert(self, host: str, cert_path: str, key_path: str):
-        """用根证书为 host 签发叶证书。"""
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        """用根证书为 host 签发叶证书。
+
+        性能优化：子证书用 ECDSA P-256（keygen ~1-5ms），
+        而非 RSA 2048（keygen ~50-150ms）。
+        根证书保持 RSA（已安装），签发子证书时用 RSA 根密钥签名（跨算法签名合法）。
+        浏览器加载 30 个新域名时，keygen 总耗时从 3 秒降到 150ms。
+        """
+        key = ec.generate_private_key(ec.SECP256R1())
         subject = x509.Name([
             x509.NameAttribute(NameOID.COMMON_NAME, host),
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, ROOT_ORG),
@@ -145,11 +163,12 @@ class SSLBumpManager:
             .add_extension(
                 x509.KeyUsage(
                     digital_signature=True, content_commitment=False,
-                    key_encipherment=True, data_encipherment=False,
+                    key_encipherment=False, data_encipherment=False,
                     key_agreement=False, key_cert_sign=False, crl_sign=False,
                     encipher_only=False, decipher_only=False),
                 critical=True,
             )
+            .add_extension(x509.OCSPNoCheck(), critical=False)
             .sign(self._root_key, hashes.SHA256())
         )
         with open(key_path, "wb") as f:

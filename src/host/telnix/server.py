@@ -14,6 +14,8 @@ from .api import (
     breakpoint as breakpoint_api,
     capture,
     clash,
+    decode as decode_api,
+    dns_hijack,
     export,
     focus,
     groups as groups_api,
@@ -98,12 +100,15 @@ def create_app(state: AppState | None = None) -> FastAPI:
     app.include_router(system_api.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
     app.include_router(raw.router, prefix="/api")
+    app.include_router(decode_api.router, prefix="/api")
     # §3.15 规则模板库 / §3.16 环境快照
     app.include_router(templates_api.router, prefix="/api")
     app.include_router(snapshot_api.router, prefix="/api")
     # Clash/Mihomo 集成
     app.include_router(clash.router, prefix="/api")
     app.include_router(throttle_api.router, prefix="/api")
+    # DNS 劫持
+    app.include_router(dns_hijack.router, prefix="/api")
 
     # 挂载文档目录（CLASH_SET.md 教程图片等资源）
     # 必须在 SPA catch-all 路由之前注册，否则 /docs/clash/1.png 会被回退到 index.html
