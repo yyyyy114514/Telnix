@@ -43,6 +43,7 @@ else:
 
 from .config import (
     get_cert_dir,
+    get_data_dir,
     get_host,
     get_masquerade_name,
     get_port,
@@ -68,8 +69,25 @@ INTERNET_OPTION_REFRESH = 37
 
 # ---------- 系统代理 ----------
 
+# 代理状态标记文件：开启系统代理时写入，关闭时删除。
+# 用途：Windows 关机时 SetConsoleCtrlHandler 可能被强杀来不及执行 clear，
+# 下次启动 Telnix 时检查此标记，若存在说明上次没清理干净，立即清理。
+# 类似 Clash 的"下次启动兜底清理"机制。
+_PROXY_ACTIVE_FLAG = None  # 懒初始化（避免 get_data_dir 在 import 时失败）
+
+
+def _get_proxy_flag_path() -> str:
+    global _PROXY_ACTIVE_FLAG
+    if _PROXY_ACTIVE_FLAG is None:
+        try:
+            _PROXY_ACTIVE_FLAG = os.path.join(get_data_dir(), ".proxy_active")
+        except Exception:  # noqa: BLE001
+            _PROXY_ACTIVE_FLAG = os.path.join(os.path.expanduser("~"), ".telnix_proxy_active")
+    return _PROXY_ACTIVE_FLAG
+
+
 def set_system_proxy(host: str = "127.0.0.1", port: int = 8888):
-    """设置 Windows 系统代理（写注册表 + 通知系统刷新）。
+    """设置 Windows 系统代理（写注册表 + 通知系统刷新 + 写标记文件）。
 
     性能优化：设置 ProxyOverride 排除 localhost/127.0.0.1，让浏览器直连本地 API。
     否则 SSE（/api/flows/stream）走代理时会被存储-转发模式缓冲，无法实时推送。
@@ -92,10 +110,16 @@ def set_system_proxy(host: str = "127.0.0.1", port: int = 8888):
         winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
                           "localhost;127.0.0.1;<local>")
     _notify_settings_changed()
+    # 写标记文件：内容为设置时间戳，便于事后诊断
+    try:
+        with open(_get_proxy_flag_path(), "w", encoding="utf-8") as f:
+            f.write(f"{time.time()}\n{host}:{port}\n")
+    except OSError:
+        pass
 
 
 def clear_system_proxy():
-    """清除系统代理。
+    """清除系统代理（写注册表 + 通知系统刷新 + 删标记文件）。
 
     非 Windows 平台：无操作（set_system_proxy 在非 Windows 上也不写注册表）。
     """
@@ -106,6 +130,11 @@ def clear_system_proxy():
                             winreg.KEY_SET_VALUE) as key:
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         _notify_settings_changed()
+    except OSError:
+        pass
+    # 删除标记文件（即使注册表写入失败也尝试删，避免下次启动误判）
+    try:
+        os.unlink(_get_proxy_flag_path())
     except OSError:
         pass
 
@@ -146,6 +175,16 @@ def setup_watchdog():
     def _handler(ctrl_type):
         # CTRL_C_EVENT=0, CTRL_BREAK_EVENT=1, CTRL_CLOSE_EVENT=2,
         # CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6
+        # 关机/注销时写关机日志，便于事后诊断（标记文件会被 clear_system_proxy 删除，
+        # 所以此处额外写一个 .proxy_shutdown_log 记录是否触发了 handler）
+        if ctrl_type in (2, 5, 6):
+            try:
+                log_path = os.path.join(os.path.dirname(_get_proxy_flag_path()),
+                                        ".proxy_shutdown.log")
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(f"{time.time()}\nctrl_type={ctrl_type}\n")
+            except OSError:
+                pass
         try:
             clear_system_proxy()
         except Exception:  # noqa: BLE001
@@ -274,8 +313,20 @@ def main():
 
     init_db()
 
-    # 启动时无条件清理残留系统代理（防止上次崩溃/强杀后代理残留导致全网瘫痪）
+    # 启动时无条件清理残留系统代理（防止上次崩溃/强杀/关机时代理残留导致全网瘫痪）
+    # 检查标记文件：若存在说明上次没干净退出（可能被关机强杀），记录诊断信息
     try:
+        flag_path = _get_proxy_flag_path()
+        if os.path.exists(flag_path):
+            # 读取标记内容（设置时间戳）用于诊断
+            try:
+                with open(flag_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                print(f"[Telnix] 检测到上次未清理的系统代理标记：{content}", file=sys.stderr)
+                print("[Telnix] 可能上次未正常退出（被关机强杀/崩溃），正在清理...",
+                      file=sys.stderr)
+            except OSError:
+                pass
         clear_system_proxy()
     except Exception:  # noqa: BLE001
         pass

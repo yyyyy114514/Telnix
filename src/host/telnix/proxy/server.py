@@ -581,6 +581,62 @@ class ProxyServer:
         self.refresh_ignored()
         t = threading.Thread(target=self._accept_loop, daemon=True)
         t.start()
+        # 后台预热：强制加载首次调用时的懒加载依赖（cryptography/h2/psutil/ip2region），
+        # 避免首批请求被 5-6 秒冷启动延迟拖慢
+        threading.Thread(target=self._prewarm, daemon=True, name="prewarm").start()
+
+    def _prewarm(self):
+        """预热：在后台线程强制触发各种首次调用的开销，避免首批请求被冷启动延迟拖慢。
+
+        主要预热项（按耗时从大到小）：
+        - cryptography 库首次加载 OpenSSL 后端（cffi 绑定 libcrypto/libssl，500ms-2s）
+        - ip2region 11MB 数据加载（200-500ms）
+        - h2 库首次导入（50-100ms）
+        - psutil 首次进程枚举初始化（50-200ms）
+        - DB 连接 + 后台写入线程首次启动
+        """
+        try:
+            # 1. cryptography：触发 OpenSSL 后端加载 + 一次 ECDSA keygen
+            #    首次调用会动态加载 libcrypto-1_1.dll，预热后后续证书签发只需 5-15ms
+            from cryptography.hazmat.primitives.asymmetric import ec
+            ec.generate_private_key(ec.SECP256R1())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 2. ip2region 数据预加载（11MB xdb → 内存）
+            from .. import ip_region
+            ip_region._get_searcher()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 3. h2 库预导入（避免首个 HTTPS 请求创建 H2Client 时才导入）
+            import h2.connection  # noqa: F401
+            import h2.config  # noqa: F401
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 4. psutil 预热：查询当前进程名，触发内部缓存初始化
+            import psutil
+            psutil.Process().name()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 5. DB 后台写入线程预启动 + 主线程连接建立
+            from .. import db
+            db._start_flow_writer()
+            db._start_update_writer()
+            db._get_thread_conn()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 6. SSL bump 证书签发路径预热：构造一次 SSLContext 验证 cryptography 链路通畅
+            if self.ssl_bump and self.ssl_bump._root_cert and self.ssl_bump._root_key:
+                import ssl as _ssl
+                ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+                # 用根证书做一次 load_cert_chain，触发证书解析路径
+                ctx.load_cert_chain(self.ssl_bump.root_cert_path, self.ssl_bump.root_key_path)
+        except Exception:  # noqa: BLE001
+            pass
 
     def stop(self):
         self._running = False
