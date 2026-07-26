@@ -78,14 +78,16 @@ async function loadSettings() {
 let lastProcLoadTime = 0
 async function pollFlows() {
   if (capture.status.capturing) {
-    // 增量轮询新流量；若 maxFlowId 为 0（无历史），先全量加载
-    if (flows.maxFlowId) {
-      const n = await flows.pollNewFlows()
-      // 有新流量时触发自动滚动（由 FlowList watch flows 处理）
-      if (n > 0 && flows.autoScroll && !flows.autoScrollPaused) {
-        // autoScroll 逻辑由 FlowList 内部处理
+    // SSE 正常连接时新流量已由 SSE 推送，无需再做增量轮询（避免冗余网络往返）。
+    // 仅当 SSE 未连接（断线/不支持）时才用增量轮询兜底；本地无历史时先全量加载。
+    if (!flows.sseActive) {
+      if (flows.maxFlowId) {
+        await flows.pollNewFlows()
+      } else {
+        await flows.loadAllFlows()
       }
-    } else {
+    } else if (!flows.maxFlowId) {
+      // SSE 已连但本地尚无历史，先全量加载一次基线
       await flows.loadAllFlows()
     }
     // 进程列表每 3 秒刷新一次（后端也有 5 秒缓存），且不阻塞流量刷新

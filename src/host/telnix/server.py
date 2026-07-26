@@ -30,8 +30,10 @@ from .api import (
     settings as settings_api,
     snapshot as snapshot_api,
     system as system_api,
+    tech_fingerprint as tech_fingerprint_api,
     templates as templates_api,
     throttle as throttle_api,
+    transparent_proxy as transparent_proxy_api,
 )
 from .config import get_docs_dir, get_ui_dist_dir
 from .proxy.server import ProxyServer
@@ -73,12 +75,25 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 db.update_session_ended(state.current_session_id)
 
     app = FastAPI(
-        title="Telnix",
+        title="API",  # 不暴露真实应用名（隐蔽性）
         lifespan=lifespan,
-        docs_url="/api/docs",
-        openapi_url="/api/openapi.json",
+        docs_url=None,  # 关闭 Swagger UI（避免暴露 API 结构给探测者）
+        openapi_url=None,  # 关闭 OpenAPI schema 暴露
+        redoc_url=None,  # 关闭 ReDoc
     )
     app.state.telnix = state
+
+    # 隐蔽性：移除 FastAPI/Starlette 默认的 Server 头，避免暴露框架信息
+    @app.middleware("http")
+    async def _strip_server_header(request, call_next):
+        response = await call_next(request)
+        # MutableHeaders 没有 pop 方法，用 del + 容错
+        for _h in ("server", "x-powered-by"):
+            try:
+                del response.headers[_h]
+            except KeyError:
+                pass
+        return response
 
     # 注册 API 路由
     app.include_router(capture.router, prefix="/api")
@@ -109,6 +124,10 @@ def create_app(state: AppState | None = None) -> FastAPI:
     app.include_router(throttle_api.router, prefix="/api")
     # DNS 劫持
     app.include_router(dns_hijack.router, prefix="/api")
+    # 技术栈识别
+    app.include_router(tech_fingerprint_api.router, prefix="/api")
+    # 透明代理模式
+    app.include_router(transparent_proxy_api.router, prefix="/api")
 
     # 挂载文档目录（CLASH_SET.md 教程图片等资源）
     # 必须在 SPA catch-all 路由之前注册，否则 /docs/clash/1.png 会被回退到 index.html

@@ -146,10 +146,10 @@ onMounted(refresh)
   color: var(--el-text-color-secondary, #888);
 }
 .clash-icon.ok {
-  color: #67c23a;
+  color: var(--on-ok);
 }
 .clash-icon.off {
-  color: #909399;
+  color: var(--on-text-dim);
 }
 .clash-title {
   flex: 1;
@@ -185,11 +185,11 @@ onMounted(refresh)
   font-size: 14px;
 }
 .status-val.ok {
-  color: #67c23a;
+  color: var(--on-ok);
   font-weight: 600;
 }
 .status-val.fail {
-  color: #f56c6c;
+  color: var(--on-error);
   font-weight: 600;
 }
 .mono {

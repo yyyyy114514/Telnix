@@ -53,12 +53,30 @@ from .config import (
 from .db import init_db
 from .proxy.server import ProxyServer
 from .proxy.ssl_bump import SSLBumpManager
-# mitmproxy 引擎可选导入：未安装时 MITMPROXY_AVAILABLE=False，导入本身不报错
-from .proxy.mitmproxy_engine import MitmproxyEngine, MITMPROXY_AVAILABLE
-# asyncio 代理引擎（G 方案）
-from .proxy.async_proxy import AsyncProxyServer
+# 性能优化：mitmproxy 引擎延迟导入（import mitmproxy 链路重 ~50MB，
+# 启动时 import 会让 main() 慢 1-2s）。改为在 main() 内按需 import。
+# 此处只导入轻量的引擎可用性标志函数。
+# asyncio 代理引擎（G 方案）也延迟导入（依赖 h2/httpx 等）
 from .server import AppState, create_app
 from .api import system as system_api
+
+
+def _check_mitmproxy_available() -> bool:
+    """延迟检测 mitmproxy 是否可用（避免启动时 eager import 拖慢启动）。
+
+    在 main() 内首次调用时执行 import，结果缓存到模块级。
+    """
+    global _mitmproxy_available_cache
+    if _mitmproxy_available_cache is None:
+        try:
+            import mitmproxy  # noqa: F401
+            _mitmproxy_available_cache = True
+        except Exception:  # noqa: BLE001
+            _mitmproxy_available_cache = False
+    return _mitmproxy_available_cache
+
+
+_mitmproxy_available_cache: bool | None = None
 
 _INTERNET_SETTINGS = (
     r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
@@ -152,6 +170,12 @@ def _notify_settings_changed():
 
 
 # ---------- 看门狗 ----------
+# 关键：_console_ctrl_handler 必须放在模块级，避免被 Python 垃圾回收。
+# ctypes 的 WINFUNCTYPE 返回的 callback 对象只被 SetConsoleCtrlHandler
+# 以原始函数指针形式持有，Python 侧若无引用就会被 GC，导致 Ctrl+C / 关窗口
+# 时 handler 已被释放，Windows 调用已释放的函数指针会静默失败（代理不清理）。
+_console_ctrl_handler = None
+
 
 def setup_watchdog():
     """注册看门狗：进程退出时自动恢复代理设置。
@@ -165,6 +189,7 @@ def setup_watchdog():
     非 Windows 平台：仅注册 atexit（clear_system_proxy 内部会判断平台跳过），
     不注册 SetConsoleCtrlHandler（Windows 专属 API）。
     """
+    global _console_ctrl_handler
     atexit.register(clear_system_proxy)
 
     if not IS_WINDOWS:
@@ -191,6 +216,9 @@ def setup_watchdog():
             pass
         # 同步清完代理后立即退出，不依赖 atexit / finally（避免被 Windows 强杀）
         os._exit(0)
+
+    # 关键：保存到模块级变量，防止局部变量被 GC 后 ctypes 调用已释放的函数指针
+    _console_ctrl_handler = _handler
 
     try:
         ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, True)
@@ -231,6 +259,13 @@ def _do_restart():
     """
     import time
     print("[Telnix] 正在重启服务...")
+    # 先标记代理状态为关闭，避免监控线程在 clear_system_proxy() 与 os._exit()
+    # 之间的时间窗内误判"代理丢失"导致前端弹窗
+    try:
+        from .api import system as system_api
+        system_api.mark_proxy_on(False)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         clear_system_proxy()
     except Exception:  # noqa: BLE001
@@ -288,6 +323,13 @@ def _do_restart():
 def _do_quit():
     """退出 Telnix：清代理 + 停服务 + sys.exit。"""
     print("[Telnix] 正在退出...")
+    # 先标记代理状态为关闭，避免监控线程在 clear_system_proxy() 与 os._exit()
+    # 之间的时间窗内误判"代理丢失"导致前端弹窗
+    try:
+        from .api import system as system_api
+        system_api.mark_proxy_on(False)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         clear_system_proxy()
     except Exception:  # noqa: BLE001
@@ -342,11 +384,13 @@ def main():
     proxy_engine = settings_store.get_setting("proxy_engine", "builtin")
     proxy = None
     if proxy_engine == "mitmproxy":
-        if not MITMPROXY_AVAILABLE:
+        if not _check_mitmproxy_available():
             print("[Telnix] proxy_engine=mitmproxy 但 mitmproxy 未安装，"
                   "回退到内置引擎。可执行 pip install mitmproxy 启用。")
         else:
             try:
+                # 延迟导入：仅在选择 mitmproxy 引擎时执行（避免启动时 eager import）
+                from .proxy.mitmproxy_engine import MitmproxyEngine
                 proxy = MitmproxyEngine(
                     host=get_proxy_host(),
                     port=get_proxy_port(),
@@ -358,6 +402,8 @@ def main():
                 proxy = None
     elif proxy_engine == "async":
         try:
+            # 延迟导入：仅在选择 async 引擎时执行（依赖 h2/httpx）
+            from .proxy.async_proxy import AsyncProxyServer
             proxy = AsyncProxyServer(
                 host=get_proxy_host(),
                 port=get_proxy_port(),
@@ -373,11 +419,19 @@ def main():
             port=get_proxy_port(),
             ssl_bump=ssl_bump,
         )
-        if proxy_engine == "mitmproxy" and MITMPROXY_AVAILABLE:
+        if proxy_engine == "mitmproxy" and _check_mitmproxy_available():
             print("[Telnix] 已回退到内置线程引擎（builtin）")
         elif proxy_engine == "async":
             print("[Telnix] 已回退到内置线程引擎（builtin）")
-    proxy.refresh_cert_status()
+    # 性能优化：certutil 检测耗时 ~1-2s（subprocess.run），改为后台异步执行，
+    # 不阻塞 main() 启动。前端通过 /cert/status 轮询时拿到最新结果。
+    def _refresh_cert_in_bg():
+        try:
+            proxy.refresh_cert_status()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_refresh_cert_in_bg, daemon=True,
+                     name="cert-refresh").start()
     proxy.start()
 
     # 全局状态
@@ -428,8 +482,10 @@ def main():
         _open_browser_later(browser_url)
 
     try:
+        # 隐蔽性：禁用 uvicorn 默认 Server 头（默认会暴露 "uvicorn"）
+        # server=False 关闭 Server 头；access_log=False 不打访问日志
         uvicorn.run(app, host=host, port=port, log_level="info",
-                    access_log=False)
+                    access_log=False, server_header=False)
     finally:
         proxy.stop()
         clear_system_proxy()

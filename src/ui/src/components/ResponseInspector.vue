@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
-import type { Flow } from '../api/client'
+import type { Flow, TechFingerprint } from '../api/client'
+import { api } from '../api/client'
 import HeaderView from './HeaderView.vue'
 import JsonView from './JsonView.vue'
 import RawView from './RawView.vue'
@@ -81,6 +82,7 @@ const tabs = computed(() => {
     { name: 'json', label: 'JSON' },
     { name: 'raw', label: 'Raw' },
     { name: 'hex', label: 'Hex' },
+    { name: 'tech', label: 'Tech' },
   ]
   if (props.enabledTabs.includes('cache')) list.push({ name: 'cache', label: 'Cache' })
   if (props.enabledTabs.includes('xml')) list.push({ name: 'xml', label: 'XML' })
@@ -102,13 +104,19 @@ watch(
     }
     // HTTP 流量
     if (props.autoSwitchPreview !== false) {
+      // 自动切换开启：回到 preview（如用户所述"开启就自动换 preview"）
       activeTab.value = 'preview'
     } else {
-      // 保持当前 tab，如果当前 tab 不在可用列表中则不选
-      const availableTabs = ['preview', 'headers', 'json', 'raw', 'hex']
+      // 自动切换关闭：保持当前 tab
+      // 当前 tabs 计算属性始终包含 preview/headers/json/raw/hex/tech，
+      // 所以这些 tab 切换流量后都保持，无需清空
+      // 仅 cache/xml 等条件性 tab 可能因新流量不可用而需要清空
+      const availableTabs = ['preview', 'headers', 'json', 'raw', 'hex', 'tech']
       if (props.enabledTabs.includes('cache')) availableTabs.push('cache')
       if (props.enabledTabs.includes('xml')) availableTabs.push('xml')
       if (!availableTabs.includes(activeTab.value)) {
+        // 仅当当前 tab 在新流量中不可用时才清空
+        // tech/preview 等基础 tab 始终可用，不会被清空
         activeTab.value = ''
       }
     }
@@ -132,6 +140,72 @@ const isJson = computed(() => {
 // TCP/UDP 流量没有 HTTP headers/json/preview
 const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.protocol === 'udp'
   || props.flow.protocol === 'ws')
+
+// ---------- 技术栈识别 ----------
+const techItems = ref<TechFingerprint[]>([])
+const techLoading = ref(false)
+const techLoaded = ref<number | null>(null)  // 已加载的 flow_id，避免重复请求
+
+watch(
+  () => props.flow.id,
+  () => {
+    techItems.value = []
+    techLoaded.value = null
+    // 若当前正停留在 Tech 标签页，切换 flow 后自动加载新技术栈
+    if (activeTab.value === 'tech') loadTech()
+  }
+)
+
+async function loadTech() {
+  // 切换流量后已加载的会被 watch 重置；同一 flow 仅请求一次
+  if (techLoaded.value === props.flow.id || techLoading.value) return
+  techLoading.value = true
+  try {
+    const res: any = await api.getTechFingerprint(props.flow.id)
+    techItems.value = (res.items || []) as TechFingerprint[]
+    techLoaded.value = props.flow.id
+  } catch (e: any) {
+    techItems.value = []
+  } finally {
+    techLoading.value = false
+  }
+}
+
+watch(activeTab, (v) => {
+  if (v === 'tech') loadTech()
+})
+
+// 按类别分组识别结果
+const techGroups = computed(() => {
+  const groups: Record<string, TechFingerprint[]> = {}
+  for (const t of techItems.value) {
+    if (!groups[t.category]) groups[t.category] = []
+    groups[t.category].push(t)
+  }
+  return groups
+})
+
+const TECH_CATEGORY_LABEL: Record<string, string> = {
+  server: '服务器',
+  language: '语言 / 运行时',
+  framework: '后端框架',
+  frontend: '前端',
+  cms: 'CMS',
+  cdn_waf: 'CDN / WAF',
+  analytics: '统计',
+  build_tool: '构建工具',
+}
+
+function confidenceColor(c: string): 'success' | 'warning' | 'info' {
+  if (c === 'high') return 'success'
+  if (c === 'medium') return 'warning'
+  return 'info'
+}
+function confidenceLabel(c: string): string {
+  if (c === 'high') return '高'
+  if (c === 'medium') return '中'
+  return '低'
+}
 </script>
 
 <template>
@@ -166,6 +240,34 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
         </el-tab-pane>
         <el-tab-pane label="Hex" name="hex" lazy>
           <HexView :data="bodyStr" />
+        </el-tab-pane>
+        <el-tab-pane label="Tech" name="tech" lazy>
+          <div class="tech-view">
+            <div v-if="techLoading" class="tech-loading text-dim">
+              <el-icon class="is-loading"><Loading /></el-icon>&nbsp;识别中...
+            </div>
+            <div v-else-if="!techItems.length" class="tech-empty text-dim">
+              <el-icon :size="28"><Cpu /></el-icon>
+              <div style="margin-top: 6px">未识别到明显技术栈特征</div>
+              <div class="text-muted" style="font-size: 11px; margin-top: 4px">
+                可能是 HTTP 响应非 HTML/JSON 或无典型头/Cookie 特征
+              </div>
+            </div>
+            <div v-else class="tech-groups">
+              <div v-for="(items, cat) in techGroups" :key="cat" class="tech-group">
+                <div class="tech-cat">{{ TECH_CATEGORY_LABEL[cat] || cat }}</div>
+                <div class="tech-chips">
+                  <span v-for="(t, i) in items" :key="i" class="tech-chip">
+                    <span class="tech-name">{{ t.name }}</span>
+                    <span v-if="t.version" class="tech-ver">{{ t.version }}</span>
+                    <el-tag size="small" :type="confidenceColor(t.confidence)" effect="plain" class="tech-conf">
+                      {{ confidenceLabel(t.confidence) }}
+                    </el-tag>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
         </el-tab-pane>
         <el-tab-pane v-if="enabledTabs.includes('cache')" label="Cache" name="cache" lazy>
           <div class="cache-view overflow-auto">
@@ -203,4 +305,29 @@ const isTcpUdp = computed(() => props.flow.protocol === 'tcp' || props.flow.prot
 .kv-table td { padding: 5px 8px; border-bottom: 1px solid var(--on-border-light); word-break: break-all; }
 .empty-text { text-align: center; padding: 18px; }
 .cache-view { padding: 8px; }
+/* 技术栈识别视图 */
+.tech-view { padding: 12px; height: 100%; overflow: auto; }
+.tech-loading { padding: 18px; text-align: center; }
+.tech-empty { padding: 32px 12px; text-align: center; }
+.tech-empty .text-muted { color: var(--on-text-muted); }
+.tech-groups { display: flex; flex-direction: column; gap: 14px; }
+.tech-group { display: flex; flex-direction: column; gap: 6px; }
+.tech-cat {
+  font-size: 12px; color: var(--on-text-muted);
+  font-weight: 600; padding-bottom: 4px;
+  border-bottom: 1px solid var(--on-border-light);
+}
+.tech-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tech-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border-radius: 4px;
+  background: var(--on-bg); border: 1px solid var(--on-border-light);
+  font-size: 12px;
+}
+.tech-name { font-weight: 600; }
+.tech-ver {
+  font-size: 11px; color: var(--on-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tech-conf { transform: scale(0.9); transform-origin: center; }
 </style>

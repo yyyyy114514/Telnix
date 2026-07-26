@@ -778,6 +778,77 @@ pre code {
 .el-tag:hover { transform: translateY(-1px); }
 .el-tag--small { font-size: 11px; }
 
+/* 暗色模式：el-alert 默认浅色背景在暗色下刺眼，改为透明背景 + 彩色边框 */
+html.dark .el-alert {
+  background-color: transparent !important;
+  border: 1px solid currentColor !important;
+  border-radius: var(--on-radius-sm) !important;
+}
+html.dark .el-alert .el-alert__content {
+  padding: 8px 12px !important;
+}
+html.dark .el-alert--info {
+  color: var(--el-text-color-regular) !important;
+  border-color: var(--el-border-color) !important;
+  background-color: var(--el-fill-color) !important;
+}
+html.dark .el-alert--info .el-alert__title,
+html.dark .el-alert--info .el-alert__description {
+  color: var(--el-text-color-regular) !important;
+}
+html.dark .el-alert--success {
+  color: var(--el-color-success) !important;
+  border-color: rgba(70, 199, 90, 0.3) !important;
+  background-color: rgba(70, 199, 90, 0.05) !important;
+}
+html.dark .el-alert--warning {
+  color: #d29922 !important;
+  border-color: rgba(210, 153, 34, 0.3) !important;
+  background-color: rgba(210, 153, 34, 0.05) !important;
+}
+html.dark .el-alert--error {
+  color: #f85149 !important;
+  border-color: rgba(248, 81, 73, 0.3) !important;
+  background-color: rgba(248, 81, 73, 0.05) !important;
+}
+/* alert 图标颜色跟随类型 */
+html.dark .el-alert--info .el-alert__icon,
+html.dark .el-alert--info .el-icon {
+  color: var(--el-text-color-secondary) !important;
+}
+html.dark .el-alert--success .el-alert__icon { color: var(--el-color-success) !important; }
+html.dark .el-alert--warning .el-alert__icon { color: #d29922 !important; }
+html.dark .el-alert--error .el-alert__icon { color: #f85149 !important; }
+
+/* 暗色模式：el-tag 默认浅色背景框在暗色里显得刺眼，改为透明背景 + 彩色边框 */
+html.dark .el-tag {
+  background-color: transparent !important;
+  border-color: currentColor !important;
+  /* 让边框颜色与文字色一致，但通过 opacity 让边框稍弱 */
+}
+html.dark .el-tag.el-tag--success {
+  color: var(--el-color-success) !important;
+  border-color: rgba(70, 199, 90, 0.4) !important;
+}
+html.dark .el-tag.el-tag--danger {
+  color: #f85149 !important;
+  border-color: rgba(248, 81, 73, 0.4) !important;
+}
+html.dark .el-tag.el-tag--warning {
+  color: #d29922 !important;
+  border-color: rgba(210, 153, 34, 0.4) !important;
+}
+html.dark .el-tag.el-tag--info {
+  color: var(--el-text-color-secondary) !important;
+  border-color: var(--el-border-color) !important;
+}
+html.dark .el-tag:not(.el-tag--success):not(.el-tag--danger):not(.el-tag--warning):not(.el-tag--info) {
+  /* default 类型（无 type） */
+  background-color: var(--el-fill-color) !important;
+  border-color: var(--el-border-color) !important;
+  color: var(--el-text-color-regular) !important;
+}
+
 /* Tooltip */
 .el-popper.is-dark {
   background: var(--on-bg-elevated) !important;

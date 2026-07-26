@@ -778,12 +778,12 @@ onMounted(() => {
   padding: 1px 6px; border-radius: 3px;
   background: var(--on-bg-elevated);
 }
-.li-method.m-get { color: #2dd4bf; }
-.li-method.m-post { color: #fbbf24; }
-.li-method.m-put { color: #60a5fa; }
-.li-method.m-delete { color: #f87171; }
-.li-method.m-patch { color: #c084fc; }
-.li-method.m-head, .li-method.m-options { color: #94a3b8; }
+.li-method.m-get { color: var(--on-ok); }
+.li-method.m-post { color: var(--on-warn); }
+.li-method.m-put { color: var(--on-redirect); }
+.li-method.m-delete { color: var(--on-error); }
+.li-method.m-patch { color: var(--on-purple); }
+.li-method.m-head, .li-method.m-options { color: var(--on-text-dim); }
 .li-url {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -807,9 +807,9 @@ onMounted(() => {
 }
 .resp-title { font-weight: 600; }
 .resp-status { font-weight: 600; }
-.text-success { color: #4ade80; }
-.text-warning { color: #fbbf24; }
-.text-danger { color: #f87171; }
+.text-success { color: var(--on-ok); }
+.text-warning { color: var(--on-warn); }
+.text-danger { color: var(--on-error); }
 .resp-empty {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center;

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import QRCode from 'qrcode'
 import { useCaptureStore } from '../stores/capture'
 import { useFlowsStore } from '../stores/flows'
-import { api, type Settings, type IgnoredProcess } from '../api/client'
+import { api, type Settings, type IgnoredProcess, type TransparentProxyStatus } from '../api/client'
 import { getCacheSize, clearFlowCache } from '../stores/flows'
 import { syncPrefs } from '../stores/prefs'
 
@@ -18,6 +18,53 @@ const cacheSize = ref(0)
 const cacheThreshold = ref(10)
 // mitmproxy 引擎是否可用（后端 /settings 接口注入，前端据此禁用选项）
 const mitmproxyAvailable = ref(false)
+
+// 透明代理模式状态
+const transparentProxy = ref<TransparentProxyStatus>({
+  supported: true, running: false,
+})
+const transparentLoading = ref(false)
+const transparentIsAdmin = ref(false)  // 是否已是管理员
+const transparentRestarting = ref(false)  // 管理员重启中
+let transparentPollTimer: number | null = null
+
+async function loadTransparentStatus() {
+  try {
+    transparentProxy.value = await api.transparentProxyStatus()
+    // 复用 raw/status 的 is_admin 字段判断当前进程是否管理员
+    const raw: any = await api.rawStatus()
+    transparentIsAdmin.value = !!raw.is_admin
+  } catch (e: any) { /* ignore */ }
+}
+
+async function onToggleTransparent(val: any) {
+  transparentLoading.value = true
+  try {
+    if (val) {
+      const r: any = await api.transparentProxyStart()
+      ElMessage.success(r.msg || '透明代理已启动')
+    } else {
+      const r: any = await api.transparentProxyStop()
+      ElMessage.success(r.msg || '透明代理已停止')
+    }
+    await loadTransparentStatus()
+  } catch (e: any) {
+    ElMessage.error('操作失败：' + (e?.message || e))
+  } finally {
+    transparentLoading.value = false
+  }
+}
+
+async function restartTransparentAsAdmin() {
+  transparentRestarting.value = true
+  try {
+    await api.restartAsAdmin()
+    ElMessage.success('正在以管理员身份重启，请稍候...')
+  } catch (e: any) {
+    ElMessage.error('重启失败：' + (e?.message || e))
+    transparentRestarting.value = false
+  }
+}
 
 // 主题模式（dark/light），从 localStorage 读取，默认 dark
 const themeMode = ref<'dark' | 'light'>(
@@ -354,7 +401,7 @@ async function showTutorial() {
                      .replace(/\\+/g, '/')
     tutorialHtml.value = tutorialMd.render(content)
   } catch (e: any) {
-    tutorialHtml.value = `<p style="color:#f56c6c">加载教程失败: ${e.message}</p>`
+    tutorialHtml.value = `<p style="color: var(--on-error)">加载教程失败: ${e.message}</p>`
   } finally {
     tutorialLoading.value = false
   }
@@ -717,14 +764,27 @@ onMounted(() => {
   loadClashStatus()
   loadCopyPrefs()
   loadThrottle()
+  loadTransparentStatus()
+  // 透明代理运行时每 5s 轮询统计
+  transparentPollTimer = window.setInterval(() => {
+    if (transparentProxy.value.running) loadTransparentStatus()
+  }, 5000)
   // 应用初始禁选状态
   document.documentElement.classList.toggle('list-no-select', listNoSelect.value)
+})
+
+onUnmounted(() => {
+  if (transparentPollTimer) {
+    clearInterval(transparentPollTimer)
+    transparentPollTimer = null
+  }
 })
 
 // 左侧锚点导航分组（顺序与右侧 section 实际渲染顺序一致）
 const groups = [
   { id: 'sec-appearance', label: '外观', icon: 'Brush' },
   { id: 'sec-capture', label: '抓包行为', icon: 'Aim' },
+  { id: 'sec-transparent', label: '透明代理', icon: 'Connection' },
   { id: 'sec-display', label: '显示选项', icon: 'View' },
   { id: 'sec-processes', label: '忽略规则', icon: 'Cpu' },
   { id: 'sec-clash', label: 'Clash 集成', icon: 'ClashIcon' },
@@ -825,12 +885,8 @@ function onScroll() {
                 <el-option value="async" label="asyncio（实验性）" />
                 <el-option value="mitmproxy" label="mitmproxy（高性能）" :disabled="!mitmproxyAvailable" />
               </el-select>
-              <el-button text type="primary" size="small" style="margin-left: 12px" @click="engineHelpVisible = true">
-                如何选择？
-              </el-button>
               <span class="hint text-dim" style="margin-left: 12px">
-                <span v-if="!mitmproxyAvailable" style="color:#e6a23c">mitmproxy 加载失败，请重新运行 install.ps1</span>
-                <span v-else>切换后需重启后端生效</span>
+                <span v-if="!mitmproxyAvailable" style="color: var(--on-warn)">mitmproxy 加载失败，请重新运行 install.ps1</span>
               </span>
             </el-form-item>
             <el-form-item label="自动滚动">
@@ -850,6 +906,57 @@ function onScroll() {
               <span class="hint text-dim" style="margin-left: 12px">多选模式下滚动列表隐藏悬浮工具栏，N 秒不操作再显示，默认 1 秒</span>
             </el-form-item>
           </el-form>
+        </div>
+
+        <!-- 透明代理 -->
+        <div class="section" id="sec-transparent">
+          <div class="section-title"><el-icon><Connection /></el-icon>&nbsp;透明代理</div>
+          <el-form label-width="160px" size="default">
+            <el-form-item label="透明代理模式">
+              <el-switch
+                :model-value="transparentProxy.running"
+                :loading="transparentLoading"
+                :disabled="!transparentProxy.supported"
+                @change="onToggleTransparent"
+              />
+              <span class="hint text-dim" style="margin-left: 12px">
+                <span v-if="!transparentProxy.supported" style="color: var(--on-warn)">
+                  {{ transparentProxy.hint || '当前平台不支持' }}
+                </span>
+                <span v-else-if="transparentProxy.running" style="color: var(--on-ok)">
+                  已启用 · HTTP(80) + HTTPS(443) 透明重定向
+                </span>
+                <span v-else>HTTP(80) 解析 + HTTPS(443) 隧道转发（不解密）</span>
+              </span>
+              <el-button
+                v-if="!transparentIsAdmin"
+                size="small"
+                type="warning"
+                style="margin-left: 12px"
+                :loading="transparentRestarting"
+                @click="restartTransparentAsAdmin"
+              >
+                <el-icon><Key /></el-icon>&nbsp;管理员重启
+              </el-button>
+            </el-form-item>
+            <el-form-item v-if="transparentProxy.running" label="重定向统计">
+              <span class="text-dim mono" style="font-size: 12px">
+                已重定向 {{ transparentProxy.redirected_count || 0 }} 包 ·
+                NAT 表 {{ transparentProxy.nat_table_size || 0 }} 条 ·
+                本地端口 {{ transparentProxy.local_port || 8888 }}
+              </span>
+              <el-button text size="small" style="margin-left: 12px" @click="loadTransparentStatus">刷新</el-button>
+            </el-form-item>
+            <el-form-item v-if="transparentProxy.last_error" label="最近错误">
+              <span style="color: var(--on-error); font-size: 12px">{{ transparentProxy.last_error }}</span>
+            </el-form-item>
+          </el-form>
+          <div class="hint text-dim" style="margin: 4px 12px 0; padding: 8px 12px; background: var(--on-bg); border-radius: 4px">
+            <strong>说明：</strong>启用后无需设置系统代理，应用发出的 HTTP(80) + HTTPS(443) 流量会被 WinDivert
+            透明重定向到 Telnix 代理端口。<strong>需管理员权限</strong>。
+            HTTP 走代理正常解析（可修改/记录）；HTTPS 仅做 TCP 隧道转发（端到端 TLS，<strong>不解密</strong>，但可记录元数据）。
+            隐蔽性更强：应用无代理感知，难以通过常规手段探测。
+          </div>
         </div>
 
         <!-- 显示选项（合并流量列表列 + 检查器标签） -->
@@ -1226,7 +1333,7 @@ function onScroll() {
               <div class="step-desc">
                 设置页「允许局域网设备连接」开关需为开启状态（代理监听 0.0.0.0）。
                 当前监听地址：<code>{{ form.proxy_listen_host || '127.0.0.1' }}</code>
-                <span v-if="form.proxy_listen_host !== '0.0.0.0'" style="color:#f56c6c">（未开启，请先开启并重启后端）</span>
+                <span v-if="form.proxy_listen_host !== '0.0.0.0'" style="color: var(--on-error)">（未开启，请先开启并重启后端）</span>
               </div>
             </div>
           </div>
@@ -1257,7 +1364,7 @@ function onScroll() {
               <div class="step-title">安装证书</div>
               <div class="step-desc">
                 下载的 <code>telnix_root.pem</code> 在手机「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」中选择安装。<br/>
-                <span style="color:#e6a23c">⚠ 安卓 7+ 默认不信任用户证书，HTTPS 抓包可能需要 root 后导入系统证书，或对目标 App 改 networkSecurityConfig。</span>
+                <span style="color: var(--on-warn)">⚠ 安卓 7+ 默认不信任用户证书，HTTPS 抓包可能需要 root 后导入系统证书，或对目标 App 改 networkSecurityConfig。</span>
               </div>
               <div class="android-sys-cert" v-if="mobileSetup.android_cert_url">
                 <div class="android-title">📱 安卓 7+ 系统证书（root 用户）</div>
@@ -1271,10 +1378,10 @@ function onScroll() {
                   <span class="text-dim cert-hint">文件名已是 <code>&lt;hash&gt;.0</code> 格式</span>
                 </div>
                 <div class="android-tutorials">
-                  <el-button size="small" text type="primary" @click="openAndroidTutorial('mumu')">
+                  <el-button size="small" type="primary" @click="openAndroidTutorial('mumu')">
                     MuMu 模拟器教程
                   </el-button>
-                  <el-button size="small" text type="primary" @click="openAndroidTutorial('leidian')">
+                  <el-button size="small" type="primary" @click="openAndroidTutorial('leidian')">
                     雷电模拟器 / root 实体设备教程
                   </el-button>
                 </div>
