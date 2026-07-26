@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import functools
 import shlex
 import sys
 import urllib.error
@@ -102,6 +103,52 @@ def _ok(res: dict) -> tuple[Optional[Any], Optional[str]]:
     if hint:
         msg = f"{msg} | 修复建议: {hint}"
     return None, msg
+
+
+def _api_with_windivert_ack(method: str, path: str, body: Any = None,
+                            timeout: float = 30.0) -> dict:
+    """调用可能触发 WinDivert 加载的 API（raw/transparent-proxy start）。
+
+    若后端返回 need_ack=true（首次启用未确认），自动触发桌面置顶原生弹窗流程：
+    1. POST /system/request-windivert-ack 创建 pending 请求 + 弹原生 Yes/No
+    2. 长轮询 /system/windivert-ack-request/{rid}/wait 等待用户响应
+    3. 用户选「是」→ ack 已持久化 → 重试原请求并返回结果
+    4. 用户选「否」→ 返回包含 need_ack=true 的错误响应（caller 用 _ok 处理）
+
+    非 Windows 平台 / 已 ack 时后端不会返回 need_ack，本函数等同 _api。
+    """
+    res = _api(method, path, body, timeout=timeout)
+    # 检测是否需要 WinDivert 风险提示确认
+    if not (res.get("need_ack") is True or
+            (isinstance(res.get("data"), dict) and res["data"].get("need_ack"))):
+        return res
+    # 触发原生弹窗流程
+    ack_res = _api("POST", "/system/request-windivert-ack", timeout=10.0)
+    if ack_res.get("code") != 0:
+        return ack_res
+    ack_data = ack_res.get("data") or {}
+    # 非 Windows 或已 ack：后端返回 skipped=true，直接重试原请求
+    if ack_data.get("skipped"):
+        return _api(method, path, body, timeout=timeout)
+    rid = ack_data.get("request_id")
+    if not rid:
+        return res
+    # 长轮询：最多重试 3 次（每次 60s），覆盖 3 分钟窗口
+    for _ in range(3):
+        r = _api("GET", f"/system/windivert-ack-request/{rid}/wait", timeout=65.0)
+        if r.get("code") != 0:
+            return r
+        d = r.get("data") or {}
+        status = d.get("status")
+        if status == "accepted":
+            # 用户已确认：重试原请求
+            return _api(method, path, body, timeout=timeout)
+        elif status == "rejected":
+            # 用户拒绝：返回原错误响应让 caller 处理
+            return res
+        # status == "pending"，继续下一轮
+    # 超时：返回原错误响应
+    return res
 
 
 def _hint_for_error(msg: str) -> str | None:
@@ -255,7 +302,8 @@ def _get_flow_field(flow: dict, key: str) -> Any:
     return m.get(key)
 
 
-def _wildcard_to_regex(pat: str):
+@functools.lru_cache(maxsize=512)
+def _wildcard_to_regex(pat: str) -> "re.Pattern[str]":
     rx = "^" + re.escape(pat).replace(r"\*", ".*").replace(r"\?", ".") + "$"
     return re.compile(rx)
 
@@ -501,7 +549,8 @@ def capture_start(
             raw_body["port_filter"] = [int(p) for p in port_filter.split(",") if p.strip()]
         if bpf_filter:
             raw_body["filter_str"] = bpf_filter
-        raw_res = _api("POST", "/raw/start", raw_body, timeout=10)
+        # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+        raw_res = _api_with_windivert_ack("POST", "/raw/start", raw_body, timeout=10)
         if raw_res.get("code") == 0:
             out["raw_capture"] = "started"
         else:
@@ -1413,7 +1462,8 @@ def raw_capture_start(pid_filter: str = "", port_filter: str = "", bpf_filter: s
         body["port_filter"] = [int(p) for p in port_filter.split(",") if p.strip()]
     if bpf_filter:
         body["filter_str"] = bpf_filter
-    res = _api("POST", "/raw/start", body, timeout=10)
+    # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+    res = _api_with_windivert_ack("POST", "/raw/start", body, timeout=10)
     data, err = _ok(res)
     if err:
         return _error(err)
@@ -1648,6 +1698,44 @@ def system_restart_as_admin() -> str:
         return _result({"restarting": True, "as_admin": True, "approved": True, "message": final_msg})
     return _error(final_msg, rejected_by_user=True,
                   hint="用户拒绝了管理员重启请求。可在 GUI 中手动重启，或请用户同意后重试")
+
+
+@mcp.tool()
+def system_windivert_warning_status() -> str:
+    """查询 WinDivert 风险提示状态。
+
+    返回:
+      needed: 是否需要提示（仅 Windows 平台 + 未确认时为 true）
+      message: 风险说明文本
+      ack: 当前是否已确认
+      platform: 当前平台
+
+    说明：raw_capture_start / transparent_proxy_start / dns_hijack_start 等触发 WinDivert
+    加载的工具会自动处理 ack 流程（首次未确认时弹桌面置顶原生弹窗）。本工具仅供 agent
+    主动查询当前状态（如检查是否已确认、是否在 Windows 平台）。
+    """
+    res = _api("GET", "/system/windivert-warning")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def system_windivert_warning_ack() -> str:
+    """标记 WinDivert 风险提示为已确认（永久不再提示）。
+
+    调用后 settings.json 的 windivert_warning_acknowledged 设为 1，
+    后续 raw_capture_start / transparent_proxy_start / dns_hijack_start 不再被拦截。
+
+    注意：通常无需手动调用——上述 start 工具首次调用时会自动触发桌面原生弹窗让用户确认。
+    本工具用于 agent 在用户已通过其他渠道（如读 README）知情后主动跳过弹窗的场景。
+    """
+    res = _api("POST", "/system/windivert-warning/ack")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
 
 
 # ======================================================================
@@ -2884,6 +2972,314 @@ def session_export(
             content = content[:cut] + f"\n... [已截断，原始 {len(content)} 字符]"
         return content
     return _to_text(content)
+
+
+# ======================================================================
+# 工具集：透明代理
+# ======================================================================
+
+@mcp.tool()
+def transparent_proxy_status() -> str:
+    """查看透明代理状态（运行中/已重定向包数/NAT 表大小/错误）。
+
+    透明代理用 WinDivert NETWORK 层重定向出站 HTTP(80)/HTTPS(443) 流量到本地代理，
+    应用无需配置代理即可被抓包。返回字段：
+    running（是否运行中）、redirected_count（已重定向包数）、nat_table_size（NAT 表大小）、
+    last_error（最近错误）、supported（平台是否支持）。
+    """
+    res = _api("GET", "/transparent-proxy/status")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    if isinstance(data, dict):
+        if not data.get("supported"):
+            data["hint"] = "透明代理仅 Windows 可用（依赖 WinDivert）"
+        elif not data.get("running") and data.get("last_error"):
+            le = data.get("last_error", "")
+            if "管理员" in le or "admin" in le.lower():
+                data["hint"] = "需要管理员权限。调用 system_restart_as_admin 以管理员身份重启后端"
+    return _result(data)
+
+
+@mcp.tool()
+def transparent_proxy_start() -> str:
+    """启动透明代理（WinDivert NETWORK 层重定向，需管理员权限）。
+
+    将出站 HTTP(80)/HTTPS(443) 流量重定向到本地代理端口，应用无需配置代理即可被抓包。
+    需要 Windows + 管理员权限 + pydivert。
+    失败时返回明确错误（如未提权会提示调用 system_restart_as_admin）。
+    首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗。
+    """
+    # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+    res = _api_with_windivert_ack("POST", "/transparent-proxy/start")
+    data, err = _ok(res)
+    if err:
+        if "管理员" in err or "admin" in err.lower():
+            return _error(err,
+                          hint="需要管理员权限。调用 system_restart_as_admin 以管理员身份重启后端")
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def transparent_proxy_stop() -> str:
+    """停止透明代理。"""
+    res = _api("POST", "/transparent-proxy/stop")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+# ======================================================================
+# 工具集：自动修改规则（Python 脚本友好）
+# ======================================================================
+
+@mcp.tool()
+def auto_reply_list() -> str:
+    """列出所有自动修改规则（含命中统计）。
+
+    与 intercept_list 等价，返回所有规则。每条规则含：
+    id/rule_id、pattern、action、enabled、hit_count、last_hit_at、last_hit_flow_id 等。
+    """
+    res = _api("GET", "/auto-reply/rules")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    rules = data if isinstance(data, list) else []
+    for r in rules:
+        if isinstance(r, dict) and "rule_id" not in r:
+            r["rule_id"] = r.get("id")
+    return _result(rules)
+
+
+@mcp.tool()
+def auto_reply_get(rule_id: str) -> str:
+    """查看规则详情。
+
+    Args:
+        rule_id: 规则 ID
+    """
+    res = _api("GET", "/auto-reply/rules")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    rules = data if isinstance(data, list) else []
+    for r in rules:
+        if isinstance(r, dict) and str(r.get("id")) == str(rule_id):
+            return _result(r)
+    return _error(f"规则不存在: {rule_id}")
+
+
+@mcp.tool()
+def auto_reply_create(
+    pattern: str,
+    action: str = "script",
+    script_path: str = "",
+    script: str = "",
+    action_spec: str = "",
+    match_mode: str = "wildcard",
+    note: str = "",
+    method_filter: str = "",
+    status_filter: str = "",
+    pid_filter: str = "",
+    process_filter: str = "",
+    disabled: bool = False,
+) -> str:
+    """创建自动修改规则（支持从本地 .py 文件加载 Python 脚本）。
+
+    与 intercept_add 互补：本工具专注 Python 脚本规则的创建，
+    通过 script_path 参数从本地 .py 文件加载脚本内容，方便 agent 操作。
+
+    Args:
+        pattern: URL 匹配 pattern（如 *api.example.com*/v1/*）
+        action: 动作类型: script=Python脚本, mock=伪造响应, modify_response=改响应,
+            modify_request=改请求, mock_request=写死请求转发
+        script_path: action=script 时，从本地 .py 文件加载脚本内容（agent 友好，与 script 互斥）
+        script: action=script 时，内联 Python 脚本源码（与 script_path 互斥）
+        action_spec: 非 script 动作时，动作规范字符串（如 'set-json key value' / 'mock 200 {}'），
+            复用 intercept_add 的语法
+        match_mode: 匹配模式 wildcard|exact|regex（默认 wildcard）
+        note: 规则备注
+        method_filter: 方法过滤（逗号分隔）
+        status_filter: 状态码过滤（逗号分隔）
+        pid_filter: PID 过滤
+        process_filter: 进程名过滤
+        disabled: true=创建为禁用状态
+    """
+    body: dict = {
+        "enabled": not disabled,
+        "match_mode": match_mode,
+        "pattern": pattern,
+        "action": action,
+        "note": note,
+        "method_filter": method_filter,
+        "status_filter": status_filter,
+        "pid_filter": pid_filter,
+        "process_filter": process_filter,
+    }
+    if action == "script":
+        if script_path:
+            try:
+                with open(script_path, "r", encoding="utf-8") as f:
+                    source = f.read()
+            except OSError as e:
+                return _error(f"读取脚本文件失败: {e}")
+            body["modify_rules"] = source
+        elif script:
+            body["modify_rules"] = script
+        else:
+            return _error("action=script 时需要 script_path 或 script 参数")
+        body["mock_status"] = None
+        body["mock_headers"] = {}
+        body["mock_body"] = ""
+    else:
+        if not action_spec:
+            return _error(f"action={action} 时需要 action_spec 参数（如 'set-json key value'）")
+        try:
+            a = parse_action(action_spec)
+        except ValueError as e:
+            return _error(str(e))
+        if a.get("action"):
+            body["action"] = a["action"]
+        body["mock_status"] = a.get("mock_status")
+        body["mock_headers"] = a.get("mock_headers")
+        body["mock_body"] = a.get("mock_body", "")
+        body["modify_rules"] = a.get("modify_rules", [])
+    res = _api("POST", "/auto-reply/rules", body)
+    created, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result({"created": True,
+                    "rule_id": created.get("id") if isinstance(created, dict) else None,
+                    "pattern": pattern, "action": body["action"]})
+
+
+@mcp.tool()
+def auto_reply_enable(rule_id: str) -> str:
+    """启用规则。
+
+    Args:
+        rule_id: 规则 ID
+    """
+    res = _api("PUT", f"/auto-reply/rules/{rule_id}", {"enabled": True})
+    _, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result({"rule_id": rule_id, "enabled": True})
+
+
+@mcp.tool()
+def auto_reply_disable(rule_id: str) -> str:
+    """禁用规则。
+
+    Args:
+        rule_id: 规则 ID
+    """
+    res = _api("PUT", f"/auto-reply/rules/{rule_id}", {"enabled": False})
+    _, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result({"rule_id": rule_id, "enabled": False})
+
+
+@mcp.tool()
+def auto_reply_delete(rule_id: str) -> str:
+    """删除规则。
+
+    Args:
+        rule_id: 规则 ID
+    """
+    res = _api("DELETE", f"/auto-reply/rules/{rule_id}")
+    _, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result({"deleted": True, "rule_id": rule_id})
+
+
+@mcp.tool()
+def auto_reply_test_script(
+    script: str = "",
+    script_path: str = "",
+    mock_host: str = "api.example.com",
+    mock_path: str = "/v1/user",
+    mock_method: str = "GET",
+    mock_scheme: str = "https",
+    mock_http_version: str = "HTTP/1.1",
+    mock_headers: dict = None,
+    mock_body: str = "",
+    mock_resp_status: int = None,
+    mock_resp_headers: dict = None,
+    mock_resp_body: str = "",
+) -> str:
+    """测试 Python 脚本执行（不创建规则，用 mock 数据走 worker 子进程）。
+
+    agent 在用 auto_reply_create 创建脚本规则前，可先用本工具验证脚本逻辑：
+    用 mock 请求/响应数据调用 on_request / on_response 钩子，查看脚本执行结果、
+    是否报错、是否对请求/响应做了修改。
+
+    Args:
+        script: 内联 Python 脚本源码（与 script_path 互斥）
+        script_path: 从本地 .py 文件加载脚本（与 script 互斥，agent 友好）
+        mock_host: mock 请求 host
+        mock_path: mock 请求 path
+        mock_method: mock 请求方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS）
+        mock_scheme: mock 请求 scheme（http/https）
+        mock_http_version: mock HTTP 版本（HTTP/1.1）
+        mock_headers: mock 请求 headers（dict）
+        mock_body: mock 请求 body 字符串
+        mock_resp_status: mock 响应状态码（提供则同时调用 on_response 钩子）
+        mock_resp_headers: mock 响应 headers（dict）
+        mock_resp_body: mock 响应 body 字符串
+
+    Returns:
+        测试结果 JSON：{ok, duration_ms, error, traceback, request_phase, response_phase}
+        - ok: 脚本是否执行成功
+        - duration_ms: 总耗时（毫秒）
+        - error: 错误信息（如有）
+        - traceback: 异常 traceback（如有）
+        - request_phase: on_request 阶段结果（action/modified/headers/body/error）
+        - response_phase: on_response 阶段结果（仅当提供 mock_resp_* 时返回）
+    """
+    # 优先用 script_path 加载本地文件
+    if script_path:
+        import os
+        if not os.path.isfile(script_path):
+            return _error(f"脚本文件不存在: {script_path}")
+        try:
+            with open(script_path, "r", encoding="utf-8") as f:
+                script_source = f.read()
+        except OSError as e:
+            return _error(f"读取脚本文件失败: {e}")
+    elif script:
+        script_source = script
+    else:
+        return _error("需要提供 script 或 script_path 参数")
+
+    body = {
+        "script": script_source,
+        "mock_request": {
+            "host": mock_host,
+            "path": mock_path,
+            "method": mock_method.upper(),
+            "scheme": mock_scheme,
+            "http_version": mock_http_version,
+            "headers": mock_headers or {},
+            "body": mock_body or "",
+        },
+    }
+    # 可选：mock_response
+    if mock_resp_status is not None:
+        body["mock_response"] = {
+            "status_code": int(mock_resp_status),
+            "headers": mock_resp_headers or {},
+            "body": mock_resp_body or "",
+        }
+    res = _api("POST", "/auto-reply/test-script", body, timeout=15.0)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
 
 
 # ======================================================================

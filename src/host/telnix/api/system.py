@@ -6,6 +6,8 @@
 - 关闭系统代理：调用注入的 _clear_proxy_hook。
 - 管理员重启（restart-as-admin）：先经 GUI 用户确认（置顶弹窗），同意后 ShellExecuteW runas。
   CLI 发起 → 后端创建 pending 请求并阻塞等待 → 前端轮询弹窗 → 用户响应 → 解除阻塞。
+- WinDivert 风险提示：首次启用 WinDivert 相关功能（TCP/UDP 抓包 / 透明代理 / DNS 劫持）
+  时弹窗告知用户该驱动可能被杀软拦截。GUI 走 Vue 对话框，CLI/MCP 走原生 MessageBox。
 """
 
 import os
@@ -15,7 +17,9 @@ import time
 import uuid
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
+from .. import settings_store
 from . import ok, err
 
 router = APIRouter()
@@ -325,6 +329,140 @@ def _do_shell_elevate() -> tuple[bool, str]:
     return True, '已批准'
 
 
+# ---------- WinDivert 风险提示 ----------
+# WinDivert 是 Windows 内核驱动，Telnix 用它做 TCP/UDP 抓包 / 透明代理 / DNS 劫持。
+# 部分杀毒软件会把 WinDivert64.sys 当成"漏洞驱动"拦截（漏洞利用工具也用它）。
+# 因此首次启用相关功能前必须让用户知情同意，ack 后存到 settings.json 永久不再提示。
+
+WINDIVERT_ACK_KEY = "windivert_warning_acknowledged"
+
+_WINDIVERT_WARNING_MESSAGE = (
+    "即将启用的功能需要加载 WinDivert64.sys 内核驱动。\n\n"
+    "该驱动常被漏洞利用工具使用，部分杀毒软件（360 / 火绒 / Windows Defender 等）"
+    "可能将其作为\"漏洞驱动\"拦截或报警，导致功能无法启动。\n\n"
+    "Telnix 仅将该驱动用于抓包 / 透明代理 / DNS 劫持，"
+    "不会对您的设备带来任何安全隐患。\n\n"
+    "是否确认开启？"
+)
+
+_WINDIVERT_WARNING_BRIEF = (
+    "即将加载 WinDivert64.sys 内核驱动，该驱动常被漏洞利用工具使用，"
+    "部分杀毒软件可能将其作为\"漏洞驱动\"拦截或报警。"
+    "Telnix 仅用于抓包 / 透明代理，不会对您的设备带来安全隐患。"
+)
+
+
+def is_windivert_acknowledged() -> bool:
+    """用户是否已确认 WinDivert 风险提示。"""
+    return settings_store.get_setting(WINDIVERT_ACK_KEY, "0") == "1"
+
+
+def windivert_warning_needed() -> bool:
+    """是否需要提示：仅 Windows 平台 + 未确认时为 True。"""
+    return sys.platform == "win32" and not is_windivert_acknowledged()
+
+
+def check_windivert_ack_or_block():
+    """在 WinDivert 相关 API 入口调用。
+
+    返回 None 表示已确认（或非 Windows 平台，由底层函数返回不支持），可继续执行。
+    返回 JSONResponse（HTTP 403 + need_ack=true）表示需要确认，调用方应直接 return 该响应。
+    """
+    if sys.platform != "win32":
+        # 非 Windows 平台：不检查 ack，由底层函数返回"不支持"错误
+        return None
+    if is_windivert_acknowledged():
+        return None
+    # 未确认：返回 403 + need_ack=true，前端/CLI 据此弹窗
+    return JSONResponse(
+        status_code=403,
+        content={
+            "code": -1,
+            "msg": "需要先确认 WinDivert 风险提示",
+            "data": {"need_ack": True},
+            "need_ack": True,
+        },
+    )
+
+
+def acknowledge_windivert_warning() -> None:
+    """标记为已确认（永久不再提示）。"""
+    settings_store.set_setting(WINDIVERT_ACK_KEY, "1")
+
+
+# ---- CLI/MCP 原生弹窗确认流程（类似 _pending_admin_requests） ----
+# 待确认 ack 请求池：request_id → {event, response, created_at}
+# - event: threading.Event，用户响应时 set
+# - response: 'accept' | 'reject' | None（未响应）
+_pending_windivert_acks: dict[str, dict] = {}
+_pending_windivert_lock = threading.Lock()
+
+
+def _create_pending_windivert_ack() -> str:
+    """创建一个待确认的 WinDivert ack 请求，返回 request_id。
+
+    创建后立即在新线程中弹原生 Windows MessageBox（置顶），用户响应后回传结果。
+    """
+    rid = uuid.uuid4().hex[:12]
+    with _pending_windivert_lock:
+        _pending_windivert_acks[rid] = {
+            "event": threading.Event(),
+            "response": None,
+            "created_at": time.time(),
+        }
+    threading.Thread(
+        target=_native_windivert_message_box_thread,
+        args=(rid,),
+        daemon=True,
+        name=f"windivert-ack-{rid}",
+    ).start()
+    return rid
+
+
+def _native_windivert_message_box_thread(rid: str):
+    """在新线程中弹原生 Windows Yes/No 弹窗，把结果回传到 pending ack 请求。"""
+    title = "Telnix WinDivert 驱动风险提示"
+    message = _WINDIVERT_WARNING_MESSAGE
+    result = _show_native_message_box(title, message)
+    response = 'accept' if result == 'yes' else 'reject'
+    _respond_pending_windivert_ack(rid, response)
+    # 若用户同意，立即标记 ack=1（settings.json 持久化，永久不再提示）
+    if response == 'accept':
+        try:
+            acknowledge_windivert_warning()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _wait_pending_windivert_ack(rid: str, timeout: float = 60.0) -> str | None:
+    """阻塞等待用户响应，返回 'accept' / 'reject' / None（超时）。"""
+    with _pending_windivert_lock:
+        item = _pending_windivert_acks.get(rid)
+    if not item:
+        return None
+    triggered = item["event"].wait(timeout=timeout)
+    if not triggered:
+        return None
+    return item["response"]
+
+
+def _respond_pending_windivert_ack(rid: str, response: str) -> bool:
+    """用户响应 pending ack 请求，返回是否成功。"""
+    with _pending_windivert_lock:
+        item = _pending_windivert_acks.get(rid)
+        if not item or item["response"] is not None:
+            return False
+        item["response"] = response
+        item["event"].set()
+    return True
+
+
+def _cleanup_pending_windivert_ack(rid: str):
+    """清理已处理的 pending ack 请求。"""
+    with _pending_windivert_lock:
+        _pending_windivert_acks.pop(rid, None)
+
+
 @router.post("/system/restart")
 async def restart_service(request: Request):
     """重启前后端服务（同进程内 os.execv 重启）。"""
@@ -439,6 +577,85 @@ async def admin_request_respond(rid: str, request: Request):
     if not success:
         return err("请求不存在或已响应")
     return ok({"request_id": rid, "response": response}, "已提交响应")
+
+
+# ---------- WinDivert 风险提示 API ----------
+# GET  /api/system/windivert-warning       - 查询是否需要提示 + 当前 ack 状态 + 风险说明文本
+# POST /api/system/windivert-warning/ack    - 标记为已确认（前端"了解，不再显示此提示"按钮调用）
+# POST /api/system/request-windivert-ack   - 创建 pending ack 请求 + 桌面置顶原生弹窗（CLI/MCP 用）
+# GET  /api/system/windivert-ack-request/{rid}/wait - 长轮询等待用户响应（CLI/MCP 用）
+
+
+@router.get("/system/windivert-warning")
+async def get_windivert_warning(request: Request):
+    """查询 WinDivert 风险提示状态。
+
+    返回:
+      needed: 是否需要提示（仅 Windows 平台 + 未确认时为 true）
+      message: 风险说明文本（前端弹窗正文用）
+      ack: 当前是否已确认
+    """
+    needed = windivert_warning_needed()
+    return ok({
+        "needed": needed,
+        "message": _WINDIVERT_WARNING_MESSAGE,
+        "brief": _WINDIVERT_WARNING_BRIEF,
+        "ack": is_windivert_acknowledged(),
+        "platform": sys.platform,
+    })
+
+
+@router.post("/system/windivert-warning/ack")
+async def ack_windivert_warning(request: Request):
+    """标记 WinDivert 风险提示为已确认（永久不再提示）。
+
+    由前端"了解，不再显示此提示"按钮调用，也可由 CLI/MCP 在原生弹窗用户选"是"后调用。
+    """
+    acknowledge_windivert_warning()
+    return ok({"ack": True}, "已确认 WinDivert 风险提示，后续不再提示")
+
+
+@router.post("/system/request-windivert-ack")
+async def request_windivert_ack(request: Request):
+    """创建一个待 GUI 用户确认的 WinDivert ack 请求（CLI/MCP 用）。
+
+    创建后立即在新线程中弹原生 Windows MessageBox（置顶）。
+    CLI 应通过 /system/windivert-ack-request/{id}/wait 长轮询等待响应。
+    返回 request_id。
+    """
+    # 非 Windows 平台：无需 ack（底层功能直接返回不支持）
+    if sys.platform != "win32":
+        return ok({"request_id": None, "skipped": True},
+                  "非 Windows 平台无需 WinDivert 风险提示")
+    # 已确认：直接跳过
+    if is_windivert_acknowledged():
+        return ok({"request_id": None, "skipped": True, "ack": True},
+                  "已确认过 WinDivert 风险提示")
+    rid = _create_pending_windivert_ack()
+    return ok({
+        "request_id": rid,
+        "message": "已创建待确认请求，等待 GUI 用户响应",
+    })
+
+
+@router.get("/system/windivert-ack-request/{rid}/wait")
+async def windivert_ack_request_wait(rid: str, request: Request):
+    """长轮询等待用户响应，超时 60s 返回 pending。"""
+    import asyncio
+    with _pending_windivert_lock:
+        item = _pending_windivert_acks.get(rid)
+    if not item:
+        return err("请求不存在或已处理")
+    response = await asyncio.to_thread(_wait_pending_windivert_ack, rid, 60.0)
+    if response is None:
+        return ok({"status": "pending", "request_id": rid}, "仍在等待用户响应")
+    _cleanup_pending_windivert_ack(rid)
+    if response == "accept":
+        return ok({"status": "accepted", "request_id": rid, "ack": True},
+                  "用户已确认 WinDivert 风险提示")
+    else:
+        return ok({"status": "rejected", "request_id": rid, "ack": False},
+                   "用户拒绝了 WinDivert 风险提示")
 
 
 def _delayed_restart():

@@ -80,8 +80,10 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -136,6 +138,73 @@ def _ok(res: dict) -> Any:
         err_obj["hint"] = hint
     print(json.dumps(err_obj, ensure_ascii=False), file=sys.stderr)
     sys.exit(1)
+
+
+def _req_with_windivert_ack(method: str, path: str, body: Any = None,
+                            timeout: float = 30.0) -> dict:
+    """调用可能触发 WinDivert 加载的 API（raw/transparent-proxy/dns-hijack start）。
+
+    若后端返回 need_ack=true（首次启用未确认），自动触发桌面置顶原生弹窗流程：
+    1. POST /system/request-windivert-ack 创建 pending 请求 + 弹原生 Yes/No
+    2. 长轮询 /system/windivert-ack-request/{rid}/wait 等待用户响应
+    3. 用户选「是」→ ack 已持久化 → 重试原请求并返回结果
+    4. 用户选「否」→ 返回错误响应（caller 用 _ok 处理后 die）
+
+    非 Windows 平台 / 已 ack 时后端不会返回 need_ack，本函数等同 _req。
+    """
+    res = _req(method, path, body, timeout=timeout)
+    # 检测是否需要 WinDivert 风险提示确认
+    if not (res.get("need_ack") is True or
+            (isinstance(res.get("data"), dict) and res["data"].get("need_ack"))):
+        return res
+    # 触发原生弹窗流程
+    ack_res = _req("POST", "/system/request-windivert-ack", timeout=10.0)
+    if ack_res.get("code") != 0:
+        return ack_res  # 创建失败，返回错误让 caller die
+    ack_data = ack_res.get("data") or {}
+    # 非 Windows 或已 ack：后端返回 skipped=true，直接重试原请求
+    if ack_data.get("skipped"):
+        return _req(method, path, body, timeout=timeout)
+    rid = ack_data.get("request_id")
+    if not rid:
+        return res  # 兜底：没拿到 rid，返回原错误
+    # 长轮询：最多重试 3 次（每次 60s），覆盖 3 分钟窗口
+    final_status = None
+    final_msg = None
+    for _ in range(3):
+        r = _req("GET", f"/system/windivert-ack-request/{rid}/wait", timeout=65.0)
+        if r.get("code") != 0:
+            return r
+        d = r.get("data") or {}
+        status = d.get("status")
+        if status == "accepted":
+            final_status = "accepted"
+            final_msg = r.get("msg") or "用户已确认 WinDivert 风险提示"
+            break
+        elif status == "rejected":
+            final_status = "rejected"
+            final_msg = r.get("msg") or "用户拒绝了 WinDivert 风险提示"
+            break
+        # status == "pending"，继续下一轮
+    if final_status is None:
+        err_obj = {
+            "ok": False,
+            "error": "等待用户响应 WinDivert 风险提示超时（3 分钟无响应）",
+            "hint": "可在 GUI 设置页确认，或请用户在场后重试",
+        }
+        print(json.dumps(err_obj, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
+    if final_status == "rejected":
+        err_obj = {
+            "ok": False,
+            "error": final_msg,
+            "rejected_by_user": True,
+            "hint": "用户拒绝了 WinDivert 风险提示。可在 GUI 设置页确认后再试",
+        }
+        print(json.dumps(err_obj, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
+    # 用户已确认：重试原请求
+    return _req(method, path, body, timeout=timeout)
 
 
 # ---------- 错误提示 ----------
@@ -363,8 +432,8 @@ def _get_flow_field(flow: dict, key: str) -> Any:
     return m.get(key)
 
 
-def _wildcard_to_regex(pat: str):
-    import re
+@functools.lru_cache(maxsize=512)
+def _wildcard_to_regex(pat: str) -> "re.Pattern[str]":
     rx = "^" + re.escape(pat).replace(r"\*", ".*").replace(r"\?", ".") + "$"
     return re.compile(rx)
 
@@ -640,7 +709,8 @@ def cmd_capture_start(args):
             raw_body["port_filter"] = [int(p) for p in args.port.split(",") if p.strip()]
         if args.bpf:
             raw_body["filter_str"] = args.bpf
-        raw_res = _req("POST", "/raw/start", raw_body, timeout=10)
+        # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+        raw_res = _req_with_windivert_ack("POST", "/raw/start", raw_body, timeout=10)
         if raw_res.get("code") == 0:
             out["raw_capture"] = "started"
         else:
@@ -2440,9 +2510,22 @@ def cmd_system(args):
             elif status == "failed":
                 print(f"[Telnix] {pkg} 安装失败（return_code={data.get('return_code')}）",
                       file=sys.stderr)
+    elif action == "windivert-warning-status":
+        # 查询 WinDivert 风险提示状态（needed/ack/message）
+        res = _req("GET", "/system/windivert-warning")
+        data = _ok(res)
+        emit_obj(data)
+    elif action == "windivert-warning-ack":
+        # 标记 WinDivert 风险提示为已确认（永久不再提示）
+        res = _req("POST", "/system/windivert-warning/ack")
+        data = _ok(res)
+        emit_obj(data)
+        if not args.json:
+            print("[Telnix] 已确认 WinDivert 风险提示，后续不再提示", file=sys.stderr)
     else:
         _die_arg("system 需要: restart | quit | restart-as-admin | firewall-allow | "
-                 "firewall-status | install-dep | install-dep-status")
+                 "firewall-status | install-dep | install-dep-status | "
+                 "windivert-warning-status | windivert-warning-ack")
 
 
 def cmd_intercept_add(args):
@@ -3076,7 +3159,8 @@ def cmd_raw(args):
             body["port_filter"] = [int(p) for p in args.port.split(",") if p.strip()]
         if args.bpf:
             body["filter_str"] = args.bpf
-        res = _req("POST", "/raw/start", body, timeout=10)
+        # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+        res = _req_with_windivert_ack("POST", "/raw/start", body, timeout=10)
         data = _ok(res)
         emit_obj(data)
     elif args.action == "stop":
@@ -3099,6 +3183,181 @@ def cmd_cert(args):
         emit_obj(_ok(res))
     else:
         _die_arg("cert 需要: status | install | remove")
+
+
+def cmd_transparent_proxy(args):
+    """透明代理控制（WinDivert NETWORK 层重定向，需管理员权限）。
+
+    将出站 HTTP(80)/HTTPS(443) 流量重定向到本地代理，应用无需配置代理即可被抓包。
+    start 需要 Windows + 管理员权限 + pydivert，失败时给明确提示。
+    """
+    if args.action == "status":
+        res = _req("GET", "/transparent-proxy/status")
+        data = _ok(res)
+        # 非 Windows 或未提权时给出明确提示
+        if isinstance(data, dict):
+            if not data.get("supported"):
+                data.setdefault("hint", "透明代理仅 Windows 可用（依赖 WinDivert）")
+            elif not data.get("running") and data.get("last_error"):
+                le = data.get("last_error", "")
+                if "管理员" in le or "admin" in le.lower():
+                    data["hint"] = "需要管理员权限。请运行: python -m telnix.cli system restart-as-admin"
+        emit_obj(data)
+    elif args.action == "start":
+        # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+        res = _req_with_windivert_ack("POST", "/transparent-proxy/start")
+        data = _ok(res)
+        emit_obj(data)
+    elif args.action == "stop":
+        res = _req("POST", "/transparent-proxy/stop")
+        data = _ok(res)
+        emit_obj(data)
+    else:
+        _die_arg("transparent-proxy 需要: status | start | stop")
+
+
+def cmd_auto_reply(args):
+    """自动修改规则管理（list/get/create/enable/disable/delete）。
+
+    与 intercept 命令互补：auto-reply create 专注 Python 脚本规则，
+    支持 --script-path 从本地 .py 文件加载脚本内容，方便 agent 操作。
+    """
+    sub = getattr(args, "sub", "")
+    if sub == "list":
+        res = _req("GET", "/auto-reply/rules")
+        rules = _ok(res)
+        rules = rules if isinstance(rules, list) else []
+        for r in rules:
+            if isinstance(r, dict) and "rule_id" not in r:
+                r["rule_id"] = r.get("id")
+        emit_list(rules, json_array=getattr(args, "json_array", False))
+    elif sub == "get":
+        res = _req("GET", "/auto-reply/rules")
+        rules = _ok(res)
+        rules = rules if isinstance(rules, list) else []
+        target = None
+        for r in rules:
+            if isinstance(r, dict) and str(r.get("id")) == str(args.id):
+                target = r
+                break
+        if not target:
+            _die_arg(f"规则不存在: {args.id}")
+        emit_obj(target)
+    elif sub == "create":
+        if not args.pattern:
+            _die_arg("auto-reply create 需要 --pattern")
+        if not args.action_type:
+            _die_arg("auto-reply create 需要 --action")
+        body: dict = {
+            "enabled": not getattr(args, "disabled", False),
+            "match_mode": args.match_mode,
+            "pattern": args.pattern,
+            "action": args.action_type,
+            "note": args.note or "",
+            "method_filter": args.method_filter or "",
+            "status_filter": args.status_filter or "",
+            "pid_filter": args.pid_filter or "",
+            "process_filter": args.process_filter or "",
+        }
+        if args.action_type == "script":
+            # script 动作：modify_rules 是 Python 脚本源码（str）
+            if args.script_path:
+                if not os.path.isfile(args.script_path):
+                    _die_arg(f"脚本文件不存在: {args.script_path}")
+                try:
+                    with open(args.script_path, "r", encoding="utf-8") as f:
+                        source = f.read()
+                except OSError as e:
+                    _die_arg(f"读取脚本文件失败: {e}")
+                body["modify_rules"] = source
+            elif args.script:
+                body["modify_rules"] = args.script
+            else:
+                _die_arg("action=script 时需要 --script-path 或 --script 参数")
+            body["mock_status"] = None
+            body["mock_headers"] = {}
+            body["mock_body"] = ""
+        else:
+            # 非 script 动作：用 parse_action 解析 action_spec
+            if not args.action_spec:
+                _die_arg(f"action={args.action_type} 时需要 --action-spec（如 'set-json key value'）")
+            try:
+                a = parse_action(args.action_spec)
+            except ValueError as e:
+                _die_arg(str(e))
+            if a.get("action"):
+                body["action"] = a["action"]
+            body["mock_status"] = a.get("mock_status")
+            body["mock_headers"] = a.get("mock_headers")
+            body["mock_body"] = a.get("mock_body", "")
+            body["modify_rules"] = a.get("modify_rules", [])
+        res = _req("POST", "/auto-reply/rules", body)
+        created = _ok(res)
+        emit_obj({"created": True,
+                  "rule_id": created.get("id") if isinstance(created, dict) else None,
+                  "pattern": args.pattern, "action": body["action"]})
+    elif sub == "enable":
+        res = _req("PUT", f"/auto-reply/rules/{args.id}", {"enabled": True})
+        _ok(res)
+        emit_obj({"rule_id": args.id, "enabled": True})
+    elif sub == "disable":
+        res = _req("PUT", f"/auto-reply/rules/{args.id}", {"enabled": False})
+        _ok(res)
+        emit_obj({"rule_id": args.id, "enabled": False})
+    elif sub == "delete":
+        res = _req("DELETE", f"/auto-reply/rules/{args.id}")
+        _ok(res)
+        emit_obj({"deleted": True, "rule_id": args.id})
+    elif sub == "test-script":
+        # 测试 Python 脚本（不创建规则，用 mock 数据走 worker 子进程）
+        # agent 可在创建规则前先用此命令验证脚本逻辑
+        if args.script_path:
+            if not os.path.isfile(args.script_path):
+                _die_arg(f"脚本文件不存在: {args.script_path}")
+            try:
+                with open(args.script_path, "r", encoding="utf-8") as f:
+                    script_source = f.read()
+            except OSError as e:
+                _die_arg(f"读取脚本文件失败: {e}")
+        elif args.script:
+            script_source = args.script
+        else:
+            _die_arg("test-script 需要 --script-path 或 --script 参数")
+            return
+        # 解析 mock headers JSON
+        try:
+            mock_headers = json.loads(args.mock_headers) if args.mock_headers else {}
+        except json.JSONDecodeError as e:
+            _die_arg(f"--mock-headers JSON 解析失败: {e}")
+            return
+        body = {
+            "script": script_source,
+            "mock_request": {
+                "host": args.mock_host,
+                "path": args.mock_path,
+                "method": args.mock_method,
+                "scheme": args.mock_scheme,
+                "http_version": args.mock_http_version,
+                "headers": mock_headers,
+                "body": args.mock_body or "",
+            },
+        }
+        # 可选：mock_response（提供则同时调用 on_response）
+        if args.mock_resp_status is not None:
+            try:
+                resp_headers = json.loads(args.mock_resp_headers) if args.mock_resp_headers else {}
+            except json.JSONDecodeError as e:
+                _die_arg(f"--mock-resp-headers JSON 解析失败: {e}")
+                return
+            body["mock_response"] = {
+                "status_code": int(args.mock_resp_status),
+                "headers": resp_headers,
+                "body": args.mock_resp_body or "",
+            }
+        res = _req("POST", "/auto-reply/test-script", body, timeout=15.0)
+        emit_obj(_ok(res))
+    else:
+        _die_arg(f"auto-reply 未知操作: {sub}")
 
 
 def cmd_log_tail(args):
@@ -3599,6 +3858,84 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("action", choices=["status", "install", "remove"], help="操作: status|install|remove")
     sp.set_defaults(func=cmd_cert)
 
+    # transparent-proxy（WinDivert NETWORK 层重定向，需管理员权限）
+    sp = sub.add_parser("transparent-proxy",
+                        help="透明代理控制（WinDivert 重定向 80/443，需管理员权限）")
+    sp.add_argument("action", choices=["status", "start", "stop"],
+                    help="操作: status=查看状态（运行中/重定向包数/NAT表/错误），"
+                         "start=启动（需 Windows + 管理员 + pydivert），stop=停止")
+    sp.set_defaults(func=cmd_transparent_proxy)
+
+    # auto-reply（自动修改规则管理，list/get/create/enable/disable/delete）
+    sp = sub.add_parser("auto-reply",
+                        help="自动修改规则管理（list/get/create/enable/disable/delete，create 支持 --script-path）")
+    sp_sub = sp.add_subparsers(dest="sub", required=True)
+    sp_ar_list = sp_sub.add_parser("list", help="列出所有规则（NDJSON，含命中统计）")
+    sp_ar_list.add_argument("--json-array", action="store_true", help="输出 JSON 数组")
+    sp_ar_list.set_defaults(func=cmd_auto_reply)
+    sp_ar_get = sp_sub.add_parser("get", help="查看规则详情")
+    sp_ar_get.add_argument("id", help="规则 ID")
+    sp_ar_get.set_defaults(func=cmd_auto_reply)
+    sp_ar_create = sp_sub.add_parser("create",
+                                     help="创建规则（支持 --script-path 从 .py 文件加载 Python 脚本）")
+    sp_ar_create.add_argument("--pattern", required=True,
+                              help="URL 匹配 pattern（如 *api.example.com*/v1/*）")
+    sp_ar_create.add_argument("--action", required=True, dest="action_type",
+                              choices=["script", "mock", "modify_response", "modify_request", "mock_request"],
+                              help="动作类型: script=Python脚本, mock=伪造响应, modify_response=改响应, "
+                                   "modify_request=改请求, mock_request=写死请求转发")
+    sp_ar_create.add_argument("--script-path", default="",
+                              help="action=script 时：从本地 .py 文件加载脚本内容（agent 友好，与 --script 互斥）")
+    sp_ar_create.add_argument("--script", default="",
+                              help="action=script 时：内联 Python 脚本源码（与 --script-path 互斥）")
+    sp_ar_create.add_argument("--action-spec", default="",
+                              help="非 script 动作时：动作规范字符串（如 'set-json key value' / 'mock 200 {}'），"
+                                   "复用 intercept add 的语法")
+    sp_ar_create.add_argument("--match-mode", choices=["wildcard", "exact", "regex"],
+                              default="wildcard", help="匹配模式（默认 wildcard）")
+    sp_ar_create.add_argument("--note", default="", help="规则备注")
+    sp_ar_create.add_argument("--method-filter", default="", help="方法过滤（逗号分隔）")
+    sp_ar_create.add_argument("--status-filter", default="", help="状态码过滤（逗号分隔）")
+    sp_ar_create.add_argument("--pid-filter", default="", help="PID 过滤")
+    sp_ar_create.add_argument("--process-filter", default="", help="进程名过滤")
+    sp_ar_create.add_argument("--disabled", action="store_true", help="创建为禁用状态")
+    sp_ar_create.set_defaults(func=cmd_auto_reply)
+    sp_ar_enable = sp_sub.add_parser("enable", help="启用规则")
+    sp_ar_enable.add_argument("id", help="规则 ID")
+    sp_ar_enable.set_defaults(func=cmd_auto_reply)
+    sp_ar_disable = sp_sub.add_parser("disable", help="禁用规则")
+    sp_ar_disable.add_argument("id", help="规则 ID")
+    sp_ar_disable.set_defaults(func=cmd_auto_reply)
+    sp_ar_delete = sp_sub.add_parser("delete", help="删除规则")
+    sp_ar_delete.add_argument("id", help="规则 ID")
+    sp_ar_delete.set_defaults(func=cmd_auto_reply)
+    # test-script：测试 Python 脚本执行（不创建规则，agent 友好）
+    # 用法：auto-reply test-script --script-path ./my_hook.py
+    #       auto-reply test-script --script "def on_request(ctx): ..." --mock-resp-status 200
+    sp_ar_test = sp_sub.add_parser("test-script",
+        help="测试 Python 脚本执行（不创建规则，用 mock 数据走 worker 子进程）")
+    sp_ar_test.add_argument("--script-path", default="",
+        help="从本地 .py 文件加载脚本（与 --script 互斥）")
+    sp_ar_test.add_argument("--script", default="",
+        help="内联 Python 脚本源码（与 --script-path 互斥）")
+    sp_ar_test.add_argument("--mock-host", default="api.example.com", help="mock 请求 host")
+    sp_ar_test.add_argument("--mock-path", default="/v1/user", help="mock 请求 path")
+    sp_ar_test.add_argument("--mock-method", default="GET",
+        choices=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+        help="mock 请求方法")
+    sp_ar_test.add_argument("--mock-scheme", default="https", help="mock 请求 scheme")
+    sp_ar_test.add_argument("--mock-http-version", default="HTTP/1.1", help="mock HTTP 版本")
+    sp_ar_test.add_argument("--mock-headers", default="",
+        help="mock 请求 headers（JSON 对象字符串，如 '{\"User-Agent\":\"test\"}'）")
+    sp_ar_test.add_argument("--mock-body", default="", help="mock 请求 body 字符串")
+    # 可选：mock 响应（提供则同时调用 on_response）
+    sp_ar_test.add_argument("--mock-resp-status", type=int, default=None,
+        help="mock 响应状态码（提供则同时测试 on_response 钩子）")
+    sp_ar_test.add_argument("--mock-resp-headers", default="",
+        help="mock 响应 headers（JSON 对象字符串）")
+    sp_ar_test.add_argument("--mock-resp-body", default="", help="mock 响应 body 字符串")
+    sp_ar_test.set_defaults(func=cmd_auto_reply)
+
     # log
     sp = sub.add_parser("log", help="日志管理")
     sp_sub = sp.add_subparsers(dest="sub", required=True)
@@ -3617,13 +3954,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp_export.set_defaults(func=cmd_log_export)
 
     # system
-    sp = sub.add_parser("system", help="系统控制（重启/退出/管理员重启/防火墙放行/可选依赖安装）")
+    sp = sub.add_parser("system", help="系统控制（重启/退出/管理员重启/防火墙放行/可选依赖安装/WinDivert 风险提示）")
     sp.add_argument("action",
                     choices=["restart", "quit", "restart-as-admin", "firewall-allow", "firewall-status",
-                             "install-dep", "install-dep-status"],
+                             "install-dep", "install-dep-status",
+                             "windivert-warning-status", "windivert-warning-ack"],
                     help="操作: restart=重启前后端，quit=退出 Telnix，restart-as-admin=以管理员身份重启（UAC 提权），"
                          "firewall-allow=防火墙放行 8888/18901 端口（手机抓包必备），firewall-status=查看放行规则状态，"
-                         "install-dep=pip 安装可选依赖（如 mitmproxy），install-dep-status=查询安装任务状态")
+                         "install-dep=pip 安装可选依赖（如 mitmproxy），install-dep-status=查询安装任务状态，"
+                         "windivert-warning-status=查询 WinDivert 风险提示状态，windivert-warning-ack=确认 WinDivert 风险提示（永久不再提示）")
     sp.add_argument("--package", default="mitmproxy",
                    help="install-dep 时指定包名（默认 mitmproxy）")
     sp.add_argument("--json", action="store_true", help="仅输出 JSON，stderr 提示信息静默（agent 友好）")
