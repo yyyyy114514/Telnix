@@ -7,6 +7,7 @@ from ..proxy.raw_capture import (
     start_raw_capture, stop_raw_capture, raw_capture_status,
 )
 from . import err, ok
+from .system import check_windivert_ack_or_block
 
 router = APIRouter()
 
@@ -28,7 +29,12 @@ async def raw_start(request: Request, body: RawStartBody):
     """启动 TCP/UDP 抓包。需要管理员权限 + pydivert。
 
     无活动会话时自动创建一个，避免要求用户先去抓包页点开始。
+    首次启用前必须确认 WinDivert 风险提示（Windows 平台），未确认时返回 403 + need_ack=true。
     """
+    # WinDivert 风险提示检查（仅 Windows + 未确认时拦截）
+    block = check_windivert_ack_or_block()
+    if block is not None:
+        return block
     from datetime import datetime
     from .. import db
     state = request.app.state.telnix
@@ -56,23 +62,3 @@ async def raw_stop():
     if success:
         return ok({"running": False, "msg": msg})
     return err(msg)
-
-
-@router.post("/raw/install-pydivert")
-async def install_pydivert():
-    """安装 pydivert 包（pip install pydivert）。"""
-    import subprocess
-    import sys
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "pydivert"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0:
-            return ok(
-                {"installed": True, "output": result.stdout[-800:]},
-                "pydivert 安装成功",
-            )
-        return err(f"安装失败: {result.stderr[-800:]}")
-    except Exception as e:  # noqa: BLE001
-        return err(f"安装异常: {e}")

@@ -6,6 +6,7 @@ import hljs from 'highlight.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useFlowsStore } from '../stores/flows'
 import { api, type AiChat, type AiMessage, type Flow, type Settings } from '../api/client'
+import { saveFlowSnapshot, getFlowSnapshot } from '../utils/aiFlowSnapshot'
 
 const router = useRouter()
 
@@ -75,7 +76,10 @@ async function loadPendingFlows() {
   const list: Flow[] = []
   for (const id of ids) {
     try {
-      list.push(await api.getFlow(id))
+      const flow = await api.getFlow(id)
+      list.push(flow)
+      // 同步存快照：发送到 AI 之前先备份，避免后端重启后丢失
+      saveFlowSnapshot(flow)
     } catch {
       /* skip */
     }
@@ -93,11 +97,15 @@ async function loadChatFlows(flowIds: number[]) {
   chatFlowsLoading.value = true
   const list: Flow[] = []
   for (const id of flowIds) {
+    // 优先调后端 API；失败时（如后端重启后 flow 表被清空）回退到本地快照
+    let flow: Flow | null = null
     try {
-      list.push(await api.getFlow(id))
+      flow = await api.getFlow(id)
     } catch {
-      /* skip */
+      /* 后端拿不到，尝试本地快照 */
+      flow = await getFlowSnapshot(id)
     }
+    if (flow) list.push(flow)
   }
   chatFlows.value = list
   // 默认展开第一条

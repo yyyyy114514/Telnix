@@ -8,3 +8,4 @@ brotli>=1.1
 h2>=4.1.0
 mitmproxy>=10.0
 ip2region>=2.0.0
+pydivert>=0.2.4

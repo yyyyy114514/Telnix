@@ -1,5 +1,6 @@
 """AI 分析 API：分析流量 + 多轮对话 + 记录管理。"""
 
+import asyncio
 import json
 
 from fastapi import APIRouter
@@ -28,9 +29,9 @@ class UpdateTitleRequest(BaseModel):
 
 
 def _build_flow_context(flow_ids: list[int]) -> str:
-    """从 flow_ids 构建流量上下文文本。"""
-    flows = [db.get_flow(fid) for fid in flow_ids]
-    flows = [f for f in flows if f]
+    """从 flow_ids 构建流量上下文文本（按 id 批量查询，消除 N+1）。"""
+    by_id = db.get_flows_by_ids(flow_ids)
+    flows = [by_id[fid] for fid in flow_ids if fid in by_id]
     return deepseek._build_flow_context(flows)
 
 
@@ -52,8 +53,8 @@ async def analyze(body: AnalyzeRequest):
     无 flow_ids（自由对话）时不调用 API，只创建空聊天记录，
     等用户通过 /ai/chat 发首条消息再调用，避免浪费 token 生成问候语。
     """
-    flows = [db.get_flow(fid) for fid in body.flow_ids] if body.flow_ids else []
-    flows = [f for f in flows if f]
+    by_id = db.get_flows_by_ids(body.flow_ids) if body.flow_ids else {}
+    flows = [by_id[fid] for fid in body.flow_ids if fid in by_id]
 
     flow_context = _build_flow_context(body.flow_ids)
     title = _make_title(flows) if flows else "自由对话"
@@ -68,8 +69,8 @@ async def analyze(body: AnalyzeRequest):
             "tool_results": [],
         })
 
-    # 有流量：调用 AI 分析
-    result = deepseek.analyze_flows(body.flow_ids)
+    # 有流量：调用 AI 分析（同步阻塞调用移到线程池，避免阻塞事件循环）
+    result = await asyncio.to_thread(deepseek.analyze_flows, body.flow_ids)
     if not result.get("ok"):
         return err(result.get("error", "分析失败"))
 
@@ -111,8 +112,9 @@ async def chat(body: ChatRequest):
     if body.flow_ids:
         flow_context = _build_flow_context(body.flow_ids)
 
-    # 调用 AI
-    result = deepseek.chat(
+    # 调用 AI（同步阻塞调用移到线程池，避免阻塞事件循环）
+    result = await asyncio.to_thread(
+        deepseek.chat,
         history_list,
         flow_context,
         body.message,

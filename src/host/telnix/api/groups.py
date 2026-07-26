@@ -50,11 +50,8 @@ def _serialize_group(group: dict, include_flows: bool = False) -> dict:
     out = dict(group)
     out["flow_ids"] = _parse_flow_ids(group.get("flow_ids", ""))
     if include_flows:
-        flows = []
-        for fid in out["flow_ids"]:
-            flow = db.get_flow(fid)
-            if flow:
-                flows.append(flow)
+        by_id = db.get_flows_by_ids(out["flow_ids"])
+        flows = [by_id[fid] for fid in out["flow_ids"] if fid in by_id]
         out["flows"] = flows
     return out
 

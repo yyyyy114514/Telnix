@@ -47,7 +47,20 @@ export default defineConfig({
     rollupOptions: {
       external: ['monaco-editor'],
       output: {
-        manualChunks: undefined,
+        // 手动分包：把体积大、变动频率不同的依赖拆成独立 chunk，
+        // 提升浏览器缓存命中率与并行加载速度（本地桌面端加载也更平滑）。
+        manualChunks(id: string) {
+          if (id.includes('node_modules')) {
+            if (id.includes('echarts') || id.includes('zrender')) return 'echarts'
+            if (id.includes('codemirror') || id.includes('@codemirror')) return 'codemirror'
+            if (id.includes('element-plus')) return 'element-plus'
+            if (
+              id.includes('vue/') || id.includes('@vue/') ||
+              id.includes('vue-router') || id.includes('pinia') ||
+              id.includes('@vueuse/')
+            ) return 'vue-core'
+          }
+        },
       },
     },
   },

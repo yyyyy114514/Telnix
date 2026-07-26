@@ -6,6 +6,7 @@ import { useCaptureStore } from './stores/capture'
 import { useFlowsStore } from './stores/flows'
 import { api } from './api/client'
 import CertBanner from './components/CertBanner.vue'
+import WinDivertWarningDialog from './components/WinDivertWarningDialog.vue'
 import { syncPrefs } from './stores/prefs'
 
 const capture = useCaptureStore()
@@ -377,6 +378,8 @@ function onSystemCmd(cmd: string) {
       <div class="content flex-1 overflow-hidden">
         <router-view />
       </div>
+      <!-- WinDivert 风险提示全局对话框（首次启用相关功能时弹出） -->
+      <WinDivertWarningDialog />
       <!-- 状态栏 -->
       <footer class="status-bar mono">
         <span class="sb-item">

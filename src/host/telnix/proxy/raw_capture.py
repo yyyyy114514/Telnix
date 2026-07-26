@@ -599,12 +599,12 @@ def start_raw_capture(session_id: int, pid_filter: set[int] | None = None,
     if not IS_WINDOWS:
         return False, ("当前平台不支持 TCP/UDP 抓包（WinDivert 是 Windows 专属驱动）。"
                        "macOS/Linux 上可使用 HTTP 代理抓包功能。")
-    # 检查 pydivert 是否可用
+    # 检查 pydivert 是否可用（已加入 requirements.txt，正常情况下不会缺失）
     try:
         import pydivert  # type: ignore  # noqa: F401
     except ImportError:
-        return False, ("pydivert 未安装。请运行: pip install pydivert。"
-                       "首次使用需安装此依赖。")
+        return False, ("pydivert 未安装。该依赖已在 requirements.txt 中声明，"
+                       "请执行 pip install -r requirements.txt 完整安装依赖。")
     _raw_capture = RawCapture(session_id)
     if pid_filter:
         _raw_capture.set_pid_filter(pid_filter)

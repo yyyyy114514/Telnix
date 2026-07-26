@@ -6,6 +6,7 @@ from ..proxy.dns_hijack import (
     start_hijack, stop_hijack, update_rules, hijack_status, clear_log,
 )
 from . import err, ok
+from .system import check_windivert_ack_or_block
 
 router = APIRouter()
 
@@ -37,7 +38,12 @@ async def start(body: StartBody):
 
     需要管理员权限 + WinDivert 驱动。
     启动时传入初始规则；运行中可通过 /dns-hijack/rules 热更新。
+    首次启用前必须确认 WinDivert 风险提示（Windows 平台），未确认时返回 403 + need_ack=true。
     """
+    # WinDivert 风险提示检查（仅 Windows + 未确认时拦截）
+    block = check_windivert_ack_or_block()
+    if block is not None:
+        return block
     success, msg = start_hijack(body.rules, body.default_ip)
     if success:
         return ok({"running": True}, msg)

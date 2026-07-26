@@ -131,7 +131,18 @@ class H2Client:
                 ack_batch: list[tuple[int, int]] = []  # [(flow_controlled_length, stream_id)]
                 reset_streams: list[int] = []  # 需要reset的pushed stream id
                 with self._lock:
-                    events = self._conn.receive_data(data)
+                    try:
+                        events = self._conn.receive_data(data)
+                    except Exception as e:  # noqa: BLE001
+                        # 部分服务器返回的 header value 前后有空格等违规字符，
+                        # h2 严格遵循 RFC 7540 会抛 ProtocolError。这里优雅关闭
+                        # 连接（上层会重新建连），不让线程异常退出污染日志。
+                        try:
+                            logger.warning(f"[h2-reader] {self.host}:{self.port} "
+                                           f"receive_data 失败: {type(e).__name__}: {e}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        break
                     pending_out = self._conn.data_to_send() or b""
                     # 批量收集需要 acknowledge 的 DataReceived 事件
                     for event in events:
@@ -236,7 +247,13 @@ class H2Client:
 
         except Exception as e:  # noqa: BLE001
             # 记录异常便于诊断，避免 reader 静默死亡后调用方等到 30s 超时
-            logger.warning("h2-reader", f"h2 reader 线程异常退出: {type(e).__name__}: {e}")
+            # 注意：标准 logging 不支持 logger.warning(name, msg) 形式，
+            # 必须用 f-string 或 %s 占位符，否则 logging 自身会抛 TypeError
+            try:
+                logger.warning(f"[h2-reader] {self.host}:{self.port} reader 线程异常退出: "
+                               f"{type(e).__name__}: {e}")
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             self._closed = True
             with self._lock:
@@ -409,7 +426,10 @@ class H2Client:
         except OSError:
             pass
         except Exception as e:  # noqa: BLE001
-            logger.debug("h2-close", f"close 异常: {e}")
+            try:
+                logger.debug(f"[h2-close] {self.host}:{self.port} close 异常: {e}")
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:

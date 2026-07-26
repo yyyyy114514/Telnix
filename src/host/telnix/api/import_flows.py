@@ -148,14 +148,8 @@ async def import_flows(body: ImportRequest = Body(...)):
         db.delete_session(session_id)
         return err("未找到可导入的流量")
 
-    # 批量插入
-    inserted = 0
-    for flow in flows_to_insert:
-        try:
-            db.insert_flow(flow)
-            inserted += 1
-        except Exception:  # noqa: BLE001
-            continue
+    # 批量插入（单事务 + SAVEPOINT 失败隔离，远快于逐条 insert + 逐条提交）
+    inserted = db.insert_flows_batch(flows_to_insert)
 
     return ok({
         "session_id": session_id,
