@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -49,11 +49,15 @@ async def list_flows(session_id: int, limit: int = 100, offset: int = 0,
                      host: str = "", process: str = "",
                      status_code: int | None = None, method: str = "",
                      since_id: int = 0, protocol: str = "",
-                     tag: str = "", has_tags: bool = False):
+                     tag: str = "", has_tags: bool = False,
+                     lite: bool = Query(False)):
     """获取会话流量列表（支持过滤 + 增量查询 + 标签过滤）。
 
     - tag: 只返回带指定标签的流量（tags 字段 LIKE 匹配）
     - has_tags: True 时只返回 tags 非空的流量
+    - lite: True 时只返回轻量字段（不含 request_body/response_body/raw_data），
+      用于列表加速（选中详情时再单独 GET /flows/{id} 补齐）。
+      默认 False 以保持前端兼容（前端未传 lite 时返回完整字段）。
     """
     if not db.get_session(session_id):
         return err("会话不存在")
@@ -63,6 +67,7 @@ async def list_flows(session_id: int, limit: int = 100, offset: int = 0,
         status_code=status_code, method=method or None,
         since_id=since_id, protocol=protocol or None,
         tag=tag or None,
+        lite=lite,
     )
     if has_tags:
         flows = [f for f in flows if f.get("tags")]
@@ -143,14 +148,31 @@ async def flows_stats(group_by: str = "host",
 
     group_by: host / process / content_type / status_code / method
     返回 {groups: [{key, label, count}], total}
+
+    性能优化：2 秒 TTL 内存缓存，避免统计图高频轮询时重复执行聚合 SQL。
+    缓存整个返回结构（包括 code/data/msg），命中直接返回。
     """
+    global _stats_cache_ts
+    import time
+    now = time.time()
+    if _stats_cache and (now - _stats_cache_ts) < 2.0:
+        return _stats_cache
     groups = db.get_flows_stats(
         group_by=group_by,
         host=host or None,
         process=process or None,
     )
     total = sum(g["count"] for g in groups)
-    return ok({"groups": groups, "total": total, "group_by": group_by})
+    resp = ok({"groups": groups, "total": total, "group_by": group_by})
+    _stats_cache.clear()
+    _stats_cache.update(resp)
+    _stats_cache_ts = now
+    return resp
+
+
+# stats 缓存：缓存完整返回结构，2 秒 TTL
+_stats_cache: dict = {}
+_stats_cache_ts: float = 0.0
 
 
 @router.get("/flows/overview")

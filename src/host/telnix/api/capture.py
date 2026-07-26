@@ -48,6 +48,8 @@ async def status(request: Request):
         "pinning_suspected": pinning_suspected,
         "started_at": state.started_at,
         "h2_stats": h2_stats,
+        # 队列满时丢弃的流量计数（监控写入背压）
+        "flow_dropped_count": db._flow_dropped_count,  # noqa: SLF001
     })
 
 

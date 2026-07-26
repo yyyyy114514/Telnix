@@ -18,13 +18,15 @@ import threading
 import time
 import traceback
 import zlib
+from collections import OrderedDict
 from datetime import datetime
 from urllib.parse import urlsplit
 
 from .. import db
 from .. import logger
 from ..auto_reply.rules import (
-    find_matching_rule, has_active_rules, host_matches_any_rule)
+    find_matching_rule, has_active_rules, has_active_rules_fast,
+    host_matches_any_rule)
 from ..cert_info import get_cert_info
 from ..clash.client import get_upstream_proxy
 from ..ip_region import lookup as ip_region_lookup
@@ -36,6 +38,11 @@ from . import throttle
 # 记录到 DB 的 body 上限（字节）。超过则截断并加标记，避免大 body 阻塞代理线程
 # （视频/图片流可能几 MB ~ 几十 MB，base64 编码后 3x 膨胀 + DB INSERT 慢）
 MAX_RECORDED_BODY = 512 * 1024  # 512KB
+MAX_STREAM_BODY = 256 * 1024 * 1024  # 256MB 防御上限：无长度响应 read_until_close 硬上限，防极端 OOM
+
+# SSLContext 缓存上限（按 cert_path 缓存，LRU 淘汰最久未用）
+# 性能优化：避免长跑场景下不同 host 的证书无限累积导致内存增长
+_SSL_CTX_CACHE_MAX = 500
 
 # 大响应体阈值：超过此大小跳过解压，直接转发原始字节。
 # 性能优化：解压几百 KB 的 gzip/br 需几十~几百 ms，阻塞代理线程。
@@ -43,6 +50,32 @@ MAX_RECORDED_BODY = 512 * 1024  # 512KB
 # 仍会记录前 512KB（截断）用于 Inspector 查看，但不解压。
 # 1MB→256KB：网页常见 200-800KB gzip JSON/HTML，256KB 以内才解压，减少主线程阻塞
 MAX_DECOMPRESS_BODY = 256 * 1024  # 256KB
+
+
+# 性能优化（v11）：跳过规则匹配的 throttle 日志
+# 避免每请求都记录"跳过规则匹配"，每 60s 最多记录一次 DEBUG 日志
+_skip_rule_match_count: int = 0
+_skip_rule_match_last_log_ts: float = 0.0
+_SKIP_LOG_INTERVAL: float = 60.0  # 秒
+
+
+def _log_skip_rule_match(reason: str):
+    """throttle 记录'跳过规则匹配'日志（每 60s 最多一次 DEBUG）。
+
+    线程安全说明：_skip_rule_match_count += 1 在 GIL 下不是严格原子的，
+    但日志计数偶尔丢失几个无所谓，不值得加锁。
+    """
+    global _skip_rule_match_count, _skip_rule_match_last_log_ts
+    now = time.time()
+    _skip_rule_match_count += 1
+    if now - _skip_rule_match_last_log_ts >= _SKIP_LOG_INTERVAL:
+        logger.debug(
+            "proxy",
+            f"[auto-reply] {reason}，跳过规则匹配",
+            f"近 {_SKIP_LOG_INTERVAL:.0f}s 内共 {_skip_rule_match_count} 次请求跳过"
+        )
+        _skip_rule_match_count = 0
+        _skip_rule_match_last_log_ts = now
 
 
 def _truncate_for_record(b: bytes) -> str:
@@ -387,7 +420,9 @@ class SocketReader:
     def read_until_close(self) -> bytes:
         data = bytearray(self.buf)
         self.buf.clear()
-        while True:
+        # 防御性上限：无 Content-Length/chunked 的响应（如视频流）会一直读到连接关闭，
+        # 设硬上限防止极端情况下把整条流全量缓冲进内存导致 OOM。
+        while len(data) < MAX_STREAM_BODY:
             try:
                 chunk = self.sock.recv(65536)
             except OSError:
@@ -491,7 +526,8 @@ class ProxyServer:
         from .h2_forward import H2ClientPool
         self._h2_pool = H2ClientPool()
         # SSL bump 的 SSLContext 缓存（按 cert_path 缓存，避免每次创建）
-        self._ssl_ctx_cache: dict[str, ssl.SSLContext] = {}
+        # 用 OrderedDict 实现 LRU：访问时 move_to_end，超上限时 popitem(last=False) 淘汰最久未用
+        self._ssl_ctx_cache: "OrderedDict[str, ssl.SSLContext]" = OrderedDict()
         self._ssl_ctx_lock = threading.Lock()
         # 转发到目标用的 SSL context（全局复用一个）
         self._forward_ssl_ctx = ssl.create_default_context()
@@ -839,9 +875,29 @@ class ProxyServer:
             if self._ignored_pids or self._ignored_names:
                 return True
         # 有启用的自动回复规则时需要解密 HTTPS，也需要 PID
-        return has_active_rules()
+        # 性能优化（v11）：用 fast 检查（无锁读模块级标志位）
+        return has_active_rules_fast()
 
     def _handle_client(self, client_sock: socket.socket, client_addr):
+        # 先 peek 第一字节判断是否是 HTTP 流量
+        # 透明代理模式下，HTTPS 流量（TLS ClientHello 0x16）会被重定向到本地代理，
+        # 此时不是 HTTP 协议，需要走 raw TCP 隧道（不解密，仅字节转发）
+        try:
+            first_byte = client_sock.recv(1, socket.MSG_PEEK)
+        except OSError:
+            first_byte = b""
+
+        # HTTP method 首字符是大写字母 A-Z（GET/POST/PUT/DELETE/HEAD/OPTIONS/CONNECT/PATCH）
+        # TLS handshake 首字节是 0x16，其他二进制协议也不是 ASCII 字母
+        is_http_like = bool(first_byte) and 0x41 <= first_byte[0] <= 0x5A
+
+        if not is_http_like:
+            # 非 HTTP 流量：尝试 raw TCP 隧道（透明代理反查原目标）
+            if self._try_raw_tunnel(client_sock, client_addr):
+                return
+            # 反查失败（非透明代理模式或 NAT 表无条目）：关闭连接
+            return
+
         reader = SocketReader(client_sock)
 
         first_line = reader.read_line()
@@ -861,6 +917,88 @@ class ProxyServer:
             self._handle_http(client_sock, reader, first_line, pid, proc_name,
                               scheme="http")
 
+    def _try_raw_tunnel(self, client_sock: socket.socket, client_addr) -> bool:
+        """透明代理模式下的 raw TCP 隧道转发（不解密）。
+
+        用于 HTTPS(443) 透明代理：WinDivert 把出站 443 流量重定向到本地代理端口，
+        但 TLS 字节流不是 HTTP 协议，代理无法解析。
+        此方法通过 transparent_proxy 的 NAT 表反查原目标 IP:Port，
+        建立到原目标的 TCP 连接，做双向字节转发（端到端 TLS，不解密）。
+
+        返回 True 表示已处理（无论成功失败），False 表示非透明代理模式或反查失败。
+        """
+        # 懒导入避免非透明模式下加载 WinDivert 模块
+        try:
+            from .transparent_proxy import get_transparent_proxy
+        except ImportError:  # noqa: BLE001
+            return False
+        proxy = get_transparent_proxy()
+        if not proxy.running:
+            return False
+        # client_addr = (ip, port)，port 是客户端源端口
+        client_src_port = client_addr[1] if len(client_addr) >= 2 else 0
+        if client_src_port == 0:
+            return False
+        target = proxy.lookup_reverse(client_src_port)
+        if not target:
+            return False
+        orig_dst_ip, orig_dst_port = target
+
+        # 建立到原目标的 TCP 连接
+        try:
+            target_sock = socket.create_connection(
+                (orig_dst_ip, orig_dst_port), timeout=10
+            )
+        except OSError:
+            return True  # 已处理（连接失败也返回 True 避免走 HTTP 流程）
+
+        # 双向字节转发（不解密）
+        try:
+            self._tunnel_raw(client_sock, target_sock)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                target_sock.close()
+            except OSError:
+                pass
+        return True
+
+    def _tunnel_raw(self, client_sock: socket.socket, target_sock: socket.socket):
+        """双向字节转发（无 HTTP 解析），用于 raw TCP 隧道。
+
+        与 _tunnel 的区别：
+        - _tunnel 用于 CONNECT 隧道，reader 已消耗了 HTTP 头
+        - _tunnel_raw 用于透明代理，可能没有 HTTP 头需要消耗，直接双向转发
+        """
+        client_sock.settimeout(None)
+        target_sock.settimeout(None)
+
+        def _fwd(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except OSError:
+                pass
+            finally:
+                try:
+                    # 通知对端 EOF
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+        import threading
+        t1 = threading.Thread(target=_fwd, args=(client_sock, target_sock), daemon=True)
+        t2 = threading.Thread(target=_fwd, args=(target_sock, client_sock), daemon=True)
+        t1.start()
+        t2.start()
+        # 等任一方结束即可（另一方会因 shutdown 而退出）
+        t1.join()
+        t2.join()
+
     # ---------- HTTPS CONNECT ----------
 
     def _handle_connect(self, client_sock, reader, connect_line, pid, proc_name):
@@ -877,10 +1015,11 @@ class ProxyServer:
         # - 未抓包但有启用的自动修改规则：仅 bump 匹配某条规则 pattern 的 host
         #   避免对所有 HTTPS 都 bump 导致钉扎站点（edge/bing/bilibili 等）断连
         # - 证书已装 + 非忽略进程 + 非专注外进程
+        # 性能优化（v11）：用 has_active_rules_fast() 无锁读，避免每 CONNECT 都进 _cache_lock
         if self.capturing:
             need_bump = True
-        elif has_active_rules():
-            # 有规则但未抓包：只 bump 匹配规则的 host
+        elif has_active_rules_fast():
+            # 有规则但未抓包：只 bump 匹配规则的 host（结果有 LRU 缓存）
             need_bump = host_matches_any_rule(host)
         else:
             need_bump = False
@@ -915,6 +1054,7 @@ class ProxyServer:
         except Exception:  # noqa: BLE001
             return
         # 缓存 SSLContext（按 cert_path），避免每次 CONNECT 都创建
+        # LRU：命中时 move_to_end 标记为最近使用，超上限时 popitem(last=False) 淘汰最久未用
         with self._ssl_ctx_lock:
             ssl_ctx = self._ssl_ctx_cache.get(cert_path)
             if ssl_ctx is None:
@@ -928,6 +1068,12 @@ class ProxyServer:
                 except Exception:  # noqa: BLE001
                     pass
                 self._ssl_ctx_cache[cert_path] = ssl_ctx
+                # 超上限淘汰最久未用的条目（LRU）
+                if len(self._ssl_ctx_cache) > _SSL_CTX_CACHE_MAX:
+                    self._ssl_ctx_cache.popitem(last=False)
+            else:
+                # 命中：标记为最近使用（移到队尾）
+                self._ssl_ctx_cache.move_to_end(cert_path)
         try:
             tls_sock = ssl_ctx.wrap_socket(client_sock, server_side=True)
         except (ssl.SSLError, OSError) as e:
@@ -1143,9 +1289,18 @@ class ProxyServer:
         # §4.1 请求阶段匹配：传 method/pid/process_name（status_code 此时无，传 None）
         # 请求阶段无法匹配带 status_filter 的规则（filter_str 非空但 value 为 None → 不匹配）
         # 那些规则会在响应阶段（modify_response 分支）重新匹配
-        rule = self._match_auto_reply(
-            orig_url, method=method, status_code=None,
-            pid=pid, process_name=proc_name)
+        # 性能优化（v11）：无启用规则时跳过 _match_auto_reply，避免每请求都进 _cache_lock
+        if has_active_rules_fast():
+            rule = self._match_auto_reply(
+                orig_url, method=method, status_code=None,
+                pid=pid, process_name=proc_name)
+        else:
+            rule = None
+            # throttle 日志：记录跳过原因（capturing off 或无规则）
+            if not self.capturing:
+                _log_skip_rule_match("capturing off 且无启用规则")
+            else:
+                _log_skip_rule_match("无启用规则")
         if rule:
             logger.info("proxy", f"匹配到自动回复规则: action={rule['action']}, pattern={rule['pattern']}",
                         f"URL={orig_url}")
@@ -1386,7 +1541,8 @@ class ProxyServer:
         # 自动回复：修改响应
         # §4.1 响应阶段重新匹配：如果请求阶段未匹配上（可能因 status_filter 限制），
         # 现在拿到 status_code 后再匹配一次，让带 status_filter 的 modify_response 规则生效
-        if rule is None:
+        # 性能优化（v11）：无启用规则时跳过（请求阶段已检查过，但规则可能在转发期间变更）
+        if rule is None and has_active_rules_fast():
             rule = self._match_auto_reply(
                 orig_url, method=method, status_code=status,
                 pid=pid, process_name=proc_name)

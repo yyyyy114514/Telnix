@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Flow } from '../api/client'
@@ -11,7 +11,8 @@ const capture = useCaptureStore()
 const flowsStore = useFlowsStore()
 const router = useRouter()
 
-const flows = ref<Flow[]>([])
+// 性能优化：flows 列表只做顶层替换（无 .push 单条），用 shallowRef 避免对每条 flow 深度代理
+const flows = shallowRef<Flow[]>([])
 const selectedId = ref<number | null>(null)
 const selectedHex = ref('')
 const selectedRaw = ref('')
@@ -557,12 +558,12 @@ onUnmounted(() => {
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? `自动滚动：暂停中（${flowsStore.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="top">
+      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? `自动滚动：暂停中（${flowsStore.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="bottom">
         <el-button size="small" :type="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="flowsStore.autoScroll = !flowsStore.autoScroll">
           <el-icon><Bottom /></el-icon>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="top">
+      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
         <el-button
           size="small"
           :type="multiSelectMode ? 'warning' : 'default'"

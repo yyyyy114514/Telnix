@@ -186,6 +186,10 @@ def init_db():
 
     默认启动时清空 flows 表并重置自增序列，避免 ID 无限累积。
     设置环境变量 TELNIX_KEEP_FLOWS=1 可保留历史流量。
+
+    性能优化：清空 flows 时用 DROP TABLE + CREATE TABLE 替代 DELETE FROM flows。
+    DELETE 需逐行删除并写 WAL 日志，行数多时耗时几秒；DROP+CREATE 直接释放页，
+    不写 WAL，瞬时完成（< 1ms）。同样适用于 sessions 表与 sqlite_sequence。
     """
     db_path = get_db_path()
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -206,16 +210,63 @@ def init_db():
         conn.executescript(SCHEMA_INDEXES)
         # 默认启动清空 flows 并重置自增序列（避免 ID 累积到上万）
         # 用环境变量 TELNIX_KEEP_FLOWS=1 可保留历史
+        # 性能优化：DROP+CREATE 比 DELETE 快几个数量级（不写 WAL，不逐行删除）
         if os.environ.get("TELNIX_KEEP_FLOWS") != "1":
-            conn.execute("DELETE FROM flows")
-            # 重置 sqlite_sequence 让 id 从 1 重新开始
-            conn.execute(
-                "DELETE FROM sqlite_sequence WHERE name='flows'"
-            )
-            conn.execute("DELETE FROM sessions")
-            conn.execute(
-                "DELETE FROM sqlite_sequence WHERE name='sessions'"
-            )
+            # DROP + CREATE flows（含所有字段，与 SCHEMA_TABLES 中定义一致）
+            conn.execute("DROP TABLE IF EXISTS flows")
+            conn.execute("""
+                CREATE TABLE flows (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    pid INTEGER,
+                    process_name TEXT,
+                    method TEXT,
+                    url TEXT,
+                    scheme TEXT,
+                    host TEXT,
+                    path TEXT,
+                    request_headers TEXT,
+                    request_body TEXT,
+                    status_code INTEGER,
+                    response_headers TEXT,
+                    response_body TEXT,
+                    duration_ms INTEGER,
+                    size INTEGER,
+                    breakpoint_status TEXT DEFAULT NULL,
+                    tags TEXT DEFAULT '',
+                    tag_note TEXT DEFAULT '',
+                    protocol TEXT DEFAULT 'http',
+                    raw_data TEXT DEFAULT NULL,
+                    src_port INTEGER DEFAULT NULL,
+                    dst_port INTEGER DEFAULT NULL,
+                    remote_ip TEXT DEFAULT NULL,
+                    ip_region TEXT DEFAULT NULL,
+                    cert_info TEXT DEFAULT NULL,
+                    http_version TEXT DEFAULT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                )
+            """)
+            # 重建索引（DROP TABLE 会删掉所有索引）
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_session ON flows(session_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_host ON flows(host)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_process ON flows(process_name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_protocol ON flows(protocol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_ip_region ON flows(ip_region)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_remote_ip ON flows(remote_ip)")
+            # DROP + CREATE sessions
+            conn.execute("DROP TABLE IF EXISTS sessions")
+            conn.execute("""
+                CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT
+                )
+            """)
+            # 删除 sqlite_sequence 残留（DROP TABLE 后该表条目会自动删，但保险）
+            conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('flows', 'sessions')")
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v)
@@ -464,15 +515,59 @@ def insert_flow(flow: dict) -> int:
         return cur.lastrowid
 
 
+def insert_flows_batch(flows: list[dict]) -> int:
+    """批量插入流量（单事务提交 + SAVEPOINT 失败隔离），远快于逐条 insert。
+
+    返回成功插入的条数；单条插入失败仅跳过该条，不影响其余。
+    """
+    if not flows:
+        return 0
+    inserted = 0
+    with get_connection() as conn:
+        for flow in flows:
+            cols = list(flow.keys())
+            placeholders = ",".join("?" * len(cols))
+            col_str = ",".join(cols)
+            try:
+                conn.execute("SAVEPOINT batch_ins")
+                conn.execute(
+                    f"INSERT INTO flows({col_str}) VALUES({placeholders})",
+                    list(flow.values()),
+                )
+                conn.execute("RELEASE batch_ins")
+                inserted += 1
+            except Exception:  # noqa: BLE001
+                conn.execute("ROLLBACK TO batch_ins")
+                conn.execute("RELEASE batch_ins")
+                continue
+    return inserted
+
+
+def get_flows_by_ids(ids: list[int]) -> dict[int, dict]:
+    """按 id 列表批量获取 flow，返回 {id: flow} 映射，消除逐条查询的 N+1。"""
+    if not ids:
+        return {}
+    unique = list(dict.fromkeys(ids))
+    placeholders = ",".join("?" * len(unique))
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM flows WHERE id IN ({placeholders})", unique
+        ).fetchall()
+    return {r["id"]: dict(r) for r in rows}
+
+
 # 性能优化：异步批量写入 flows，减少高并发下 SQLite 写锁竞争
 # 代理线程把 flow 数据入队（非阻塞），后台线程批量 INSERT + COMMIT
-_flow_queue: "queue.Queue[dict | None]" = queue.Queue()
+# 队列加上限 50000，防止极端场景下内存无限增长；满时丢弃最旧条目并计数
+_flow_queue: "queue.Queue[dict | None]" = queue.Queue(maxsize=50000)
 _flow_flush_event = threading.Event()
 _flow_flush_done = threading.Event()
 _flow_writer_started = False
 _flow_writer_lock = threading.Lock()
 # 内存级 max_flow_id 缓存：_flush_batch 插入后更新，避免 SSE 连接时查 SELECT MAX(id)
 _max_flow_id_cache = 0
+# 队列满时丢弃的流量计数（在 /status 端点暴露，用于监控背压）
+_flow_dropped_count = 0
 
 
 def _start_flow_writer():
@@ -613,9 +708,25 @@ def insert_flow_async(flow: dict):
 
     用于非断点场景（_record_flow），代理线程无需等待 DB 写完。
     SSE 通知在 _flush_batch INSERT 后触发（带 flow.id），而非此处入队时。
+
+    队列满时丢弃最旧的条目（get_nowait 后 put）并计数，避免代理线程阻塞。
     """
+    global _flow_dropped_count
     _start_flow_writer()
-    _flow_queue.put(flow)
+    try:
+        _flow_queue.put_nowait(flow)
+    except queue.Full:
+        # 队列满：丢弃最旧条目腾出空间，记录丢弃计数
+        try:
+            _flow_queue.get_nowait()
+            _flow_queue.put_nowait(flow)
+            _flow_dropped_count += 1
+        except queue.Empty:  # noqa: BLE001
+            # 极端竞态：其他线程已取走，直接 put
+            _flow_queue.put_nowait(flow)
+        except queue.Full:  # noqa: BLE001
+            # 仍然满：放弃本条并计数
+            _flow_dropped_count += 1
 
 
 # ---------- SSE 流量推送 ----------
@@ -853,9 +964,22 @@ def get_flows(session_id: int, limit: int = 100, offset: int = 0,
               host: str | None = None, process: str | None = None,
               status_code: int | None = None, method: str | None = None,
               since_id: int = 0, protocol: str | None = None,
-              tag: str | None = None) -> list[dict]:
-    """获取会话流量列表，支持按 host/进程/状态码/方法/增量/协议/标签过滤。"""
-    sql = "SELECT * FROM flows WHERE session_id=?"
+              tag: str | None = None,
+              lite: bool = False) -> list[dict]:
+    """获取会话流量列表，支持按 host/进程/状态码/方法/增量/协议/标签过滤。
+
+    lite=True 时 SELECT 不包含 request_body / response_body / raw_data 字段，
+    用于列表加速（选中详情时再单独 GET /flows/{id} 补齐）。
+    """
+    # lite 模式：排除大字段（request_body/response_body/raw_data），只返回列表展示所需字段
+    select_cols = (
+        "id, session_id, timestamp, pid, process_name, method, url, scheme, "
+        "host, path, request_headers, status_code, response_headers, "
+        "duration_ms, size, breakpoint_status, tags, tag_note, protocol, "
+        "src_port, dst_port, remote_ip, ip_region, cert_info, http_version"
+        if lite else "*"
+    )
+    sql = f"SELECT {select_cols} FROM flows WHERE session_id=?"
     args: list = [session_id]
     if host:
         sql += " AND host LIKE ?"
@@ -894,28 +1018,35 @@ def search_flows(session_id: int, body_regex: str | None = None,
                  offset_end: int | None = None) -> list[dict]:
     """跨 body 正则/二进制搜索流量。session_id=0 表示跨所有会话搜索。
 
-    过滤条件（AND 关系）：
-    - body_regex: 对 request_body/response_body/url/path 做正则匹配
-    - binary_hex: 对 request_body/response_body 的原始字节做 hex 子串匹配
-    - header_regex: 对 request_headers/response_headers 做正则匹配
-    - method/status_code/pid/process_name: 精确匹配
-    - offset_start/offset_end: 二进制搜索时只在 [offset_start, offset_end) 范围内查找
+    性能优化：精确字段过滤（method/status/pid/process_name）下推到 SQL WHERE，
+    只投影搜索所需列（不含 raw_data 等大字段），避免把全量全列流量拉进内存。
     """
     import re
+    # 只投影搜索所需列，避免 SELECT * 拉取 raw_data 等大字段
+    proj = ("id, session_id, method, status_code, pid, process_name, "
+            "url, path, request_body, response_body, request_headers, response_headers")
+    clauses = []
+    args = []
     if session_id and session_id > 0:
-        rows = get_flows(session_id, limit=10000)
-    else:
-        # session_id=0：跨会话搜索所有流量
-        rows, _ = get_all_flows(limit=10000)
-    # 精确字段过滤（先过滤掉不匹配的，减少后续正则运算量）
+        clauses.append("session_id=?")
+        args.append(session_id)
     if method:
-        rows = [f for f in rows if (f.get("method") or "").upper() == method.upper()]
+        clauses.append("UPPER(method)=UPPER(?)")
+        args.append(method)
     if status_code:
-        rows = [f for f in rows if f.get("status_code") == status_code]
+        clauses.append("status_code=?")
+        args.append(status_code)
     if pid:
-        rows = [f for f in rows if f.get("pid") == pid]
+        clauses.append("pid=?")
+        args.append(pid)
     if process_name:
-        rows = [f for f in rows if (f.get("process_name") or "") == process_name]
+        clauses.append("process_name=?")
+        args.append(process_name)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = f"SELECT {proj} FROM flows{where} ORDER BY id DESC LIMIT ?"
+    args.append(10000)
+    with get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
     results = []
     rx = re.compile(body_regex) if body_regex else None
     hrx = re.compile(header_regex) if header_regex else None

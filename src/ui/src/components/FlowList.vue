@@ -246,6 +246,10 @@ function onPopupDragUp() {
 onUnmounted(() => {
   window.removeEventListener('mousemove', onPopupDragMove)
   window.removeEventListener('mouseup', onPopupDragUp)
+  // 清理自动滚动暂停定时器，避免组件卸载后回调仍触发访问已卸载的 store/refs
+  if (scrollPauseTimer !== null) clearTimeout(scrollPauseTimer)
+  // 清理多选工具栏显隐定时器
+  if (floatBarTimer !== null) clearTimeout(floatBarTimer)
 })
 
 // ---------- 专注模式 ----------
@@ -1240,12 +1244,12 @@ onMounted(() => {
         </el-button>
       </el-tooltip>
       <div v-if="actionsRight" class="flex-1"></div>
-      <el-tooltip :content="store.autoScroll ? (store.autoScrollPaused ? `自动滚动：暂停中（${store.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="top">
+      <el-tooltip :content="store.autoScroll ? (store.autoScrollPaused ? `自动滚动：暂停中（${store.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="bottom">
         <el-button size="small" :type="store.autoScroll ? (store.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="store.autoScroll = !store.autoScroll">
           <el-icon><Bottom /></el-icon>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="top">
+      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
         <el-button
           size="small"
           :type="multiSelectMode ? 'warning' : 'default'"
@@ -1649,6 +1653,7 @@ onMounted(() => {
       <div
         v-for="f in displayFlows"
         :key="f.id"
+        v-memo="[f.id, f.breakpoint_status, store.selectedId === f.id, selectedFlowIds.has(f.id), gridCols]"
         class="fl-row mono"
         :class="[rowClass(f), { selected: store.selectedId === f.id, checked: selectedFlowIds.has(f.id) }]"
         :style="{ gridTemplateColumns: gridCols }"

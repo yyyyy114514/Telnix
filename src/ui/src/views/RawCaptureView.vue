@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type RawStatus, type Flow } from '../api/client'
@@ -12,13 +12,14 @@ const capture = useCaptureStore()
 const flowsStore = useFlowsStore()
 const router = useRouter()
 
-const rawStatus = ref<RawStatus>({ running: false, is_admin: false, pydivert_installed: false })
+const rawStatus = ref<RawStatus>({ running: false, is_admin: false, pydivert_installed: true })
 const filterStr = ref('tcp or udp')
 const pidFilter = ref('')
 const portFilter = ref('')
 // 协议筛选（前端过滤，只含 tcp/udp，不含 http）
 const protoFilter = ref<string[]>([])
-const flows = ref<Flow[]>([])
+// 性能优化：flows 列表只做顶层替换（无 .push 单条），用 shallowRef 避免对每条 flow 深度代理
+const flows = shallowRef<Flow[]>([])
 const selectedId = ref<number | null>(null)
 const selectedHex = ref('')
 const hexField = ref<'raw_data' | 'request_body' | 'response_body'>('raw_data')
@@ -26,8 +27,6 @@ const hexField = ref<'raw_data' | 'request_body' | 'response_body'>('raw_data')
 const detailTab = ref<'hex' | 'protocol'>('hex')
 // 当前已加载的最大 flow id，用于增量轮询
 const maxFlowId = ref(0)
-// 安装 pydivert 状态
-const installingPydivert = ref(false)
 // 管理员重启中
 const restartingAsAdmin = ref(false)
 
@@ -601,10 +600,6 @@ async function onToggle() {
         ElMessage.warning('需要管理员权限，请点击「管理员重启」')
         return
       }
-      if (!rawStatus.value.pydivert_installed) {
-        ElMessage.warning('pydivert 未安装，请点击「安装 pydivert」')
-        return
-      }
       const body: any = { filter_str: filterStr.value }
       if (pidFilter.value.trim()) {
         body.pid_filter = pidFilter.value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
@@ -633,20 +628,6 @@ async function restartAsAdmin() {
   } catch (e: any) {
     ElMessage.error('重启失败：' + (e?.message || e))
     restartingAsAdmin.value = false
-  }
-}
-
-// 安装 pydivert
-async function installPydivert() {
-  installingPydivert.value = true
-  try {
-    const r: any = await api.installPydivert()
-    ElMessage.success('pydivert 安装成功')
-    await loadStatus()
-  } catch (e: any) {
-    ElMessage.error('安装失败：' + (e?.message || e))
-  } finally {
-    installingPydivert.value = false
   }
 }
 
@@ -733,7 +714,7 @@ onUnmounted(() => {
       <el-button
         :type="rawStatus.running ? 'danger' : 'primary'"
         size="small"
-        :disabled="!rawStatus.running && (!rawStatus.is_admin || !rawStatus.pydivert_installed)"
+        :disabled="!rawStatus.running && !rawStatus.is_admin"
         @click="onToggle"
       >
         <el-icon><component :is="rawStatus.running ? 'VideoPause' : 'VideoPlay'" /></el-icon>
@@ -742,9 +723,6 @@ onUnmounted(() => {
       <div class="raw-status-tags">
         <el-tag size="small" :type="rawStatus.is_admin ? 'success' : 'danger'">
           {{ rawStatus.is_admin ? '管理员' : '非管理员' }}
-        </el-tag>
-        <el-tag size="small" :type="rawStatus.pydivert_installed ? 'success' : 'warning'">
-          {{ rawStatus.pydivert_installed ? 'pydivert 已装' : 'pydivert 未装' }}
         </el-tag>
         <el-tag v-if="rawStatus.running" size="small" type="success">抓包中</el-tag>
         <!-- 非管理员：提供管理员重启按钮 -->
@@ -757,16 +735,6 @@ onUnmounted(() => {
         >
           <el-icon><Key /></el-icon>&nbsp;管理员重启
         </el-button>
-        <!-- pydivert 未装：提供安装按钮 -->
-        <el-button
-          v-if="!rawStatus.pydivert_installed"
-          size="small"
-          type="primary"
-          :loading="installingPydivert"
-          @click="installPydivert"
-        >
-          <el-icon><Download /></el-icon>&nbsp;安装 pydivert
-        </el-button>
       </div>
       <div class="flex-1"></div>
       <span class="text-dim mono" style="font-size: 11px">
@@ -778,11 +746,6 @@ onUnmounted(() => {
     <div v-if="!rawStatus.is_admin" class="raw-warn-bar">
       <el-icon><WarningFilled /></el-icon>
       <span>TCP/UDP 抓包需要管理员权限。当前非管理员运行，点击右侧「管理员重启」以管理员身份重启 Telnix。</span>
-    </div>
-    <!-- pydivert 未装警告条 -->
-    <div v-else-if="!rawStatus.pydivert_installed" class="raw-warn-bar">
-      <el-icon><WarningFilled /></el-icon>
-      <span>未安装 pydivert 驱动。点击右侧「安装 pydivert」自动安装。</span>
     </div>
 
     <!-- 过滤栏（图标按钮风格，参照 FlowList） -->
@@ -813,12 +776,12 @@ onUnmounted(() => {
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? `自动滚动：暂停中（${flowsStore.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="top">
+      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? `自动滚动：暂停中（${flowsStore.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="bottom">
         <el-button size="small" :type="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="flowsStore.autoScroll = !flowsStore.autoScroll">
           <el-icon><Bottom /></el-icon>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="top">
+      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
         <el-button
           size="small"
           :type="multiSelectMode ? 'warning' : 'default'"
