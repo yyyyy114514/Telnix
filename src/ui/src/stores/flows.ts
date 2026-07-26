@@ -5,6 +5,8 @@ import { api, type Flow } from '../api/client'
 // SSE 推送：替代 500ms 轮询，新 flow 入库后立即推送，UI 延迟 <50ms
 // EventSource 自动重连，无需手动管理。后端 /flows/stream 推送 lite 字段。
 let sseSource: EventSource | null = null
+// SSE 连接状态：连接正常时前端无需再跑流量兜底轮询（由 SSE 推送即可）
+const sseActive = ref(false)
 
 const CACHE_KEY = 'telnix_flows_cache'
 const CACHE_THRESHOLD_KEY = 'telnix_cache_threshold'
@@ -400,6 +402,7 @@ export const useFlowsStore = defineStore('flows', () => {
     if (sseSource) return
     try {
       sseSource = new EventSource('/api/flows/stream')
+      sseSource.onopen = () => { sseActive.value = true }
       sseSource.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
@@ -426,6 +429,8 @@ export const useFlowsStore = defineStore('flows', () => {
         }
       }
       sseSource.onerror = () => {
+        // 连接异常：标记 SSE 失活，让前端回退到流量兜底轮询
+        sseActive.value = false
         // EventSource 会自动重连，无需手动处理
         // 重连后 onmessage 收到 init 事件会自动补齐漏掉的 flow
       }
@@ -439,6 +444,7 @@ export const useFlowsStore = defineStore('flows', () => {
       sseSource.close()
       sseSource = null
     }
+    sseActive.value = false
   }
 
   // 初始化时恢复缓存（同步更新 maxFlowId，避免首次轮询用 0 拉全量导致重复）
@@ -488,5 +494,6 @@ export const useFlowsStore = defineStore('flows', () => {
     patchFlows,
     startSSE,
     stopSSE,
+    sseActive,
   }
 })

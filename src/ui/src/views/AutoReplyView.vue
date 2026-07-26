@@ -174,8 +174,10 @@ async function batchSetEnabled(enabled: boolean) {
 
 const actionLabel: Record<string, string> = {
   mock: 'Mock 返回',
+  mock_request: '请求 Mock',
   modify_request: '修改请求',
   modify_response: '修改响应',
+  script: 'Python 脚本',
 }
 const matchLabel: Record<string, string> = {
   wildcard: '通配符',
@@ -193,7 +195,7 @@ onMounted(load)
         <el-icon><SetUp /></el-icon>&nbsp;自动修改规则
       </div>
       <div style="display: flex; gap: 8px; align-items: center">
-        <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="top">
+        <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
           <el-button
             size="small"
             :type="multiSelectMode ? 'warning' : 'default'"

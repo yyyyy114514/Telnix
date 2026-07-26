@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
-import type { AutoReplyRule, ModifyRule } from '../api/client'
+import { ref, watch, computed, reactive, nextTick, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
+import type { AutoReplyRule, ModifyRule, ScriptTestResult } from '../api/client'
+import { api } from '../api/client'
 import CodeEditor from './CodeEditor.vue'
 import MonacoEditor from './MonacoEditor.vue'
 
@@ -170,7 +172,16 @@ function removeModifyByIdx(list: ModifyRule[], idx: number) {
 
 function save() {
   if (!form.value.pattern.trim()) {
+    ElMessage.warning('请填写 URL 模式')
     return
+  }
+  // 脚本规则：检查 modify_rules 是否有内容
+  if (form.value.action === 'script') {
+    const script = form.value.modify_rules
+    if (typeof script !== 'string' || !script.trim()) {
+      ElMessage.warning('请填写脚本内容')
+      return
+    }
   }
   // 提交前把 mock_headers 字符串解析为 dict
   const payload = { ...form.value }
@@ -193,6 +204,204 @@ const opOptions = [
   { label: '替换', value: 'replace' },
   { label: '删除', value: 'remove' },
 ]
+
+// ---------- Python 脚本测试面板 ----------
+const testPanelVisible = ref(false)
+const testRunning = ref(false)
+const testResult = ref<ScriptTestResult | null>(null)
+
+// Monaco 编辑器高度跟随测试面板内容高度（ResizeObserver 精确测量，避免 stretch 循环引用）
+const testPanelSideRef = ref<HTMLElement | null>(null)
+const editorHeight = ref('220px')
+let resizeObserver: ResizeObserver | null = null
+
+function updateEditorHeight() {
+  if (testPanelSideRef.value && testPanelVisible.value) {
+    // 用 scrollHeight 拿到内容真实高度（含 padding，不含 border）
+    const h = testPanelSideRef.value.scrollHeight
+    editorHeight.value = `${h}px`
+  } else {
+    editorHeight.value = '220px'
+  }
+}
+
+watch(testPanelVisible, (visible) => {
+  if (visible) {
+    nextTick(() => {
+      if (testPanelSideRef.value) {
+        if (!resizeObserver) {
+          resizeObserver = new ResizeObserver(updateEditorHeight)
+          resizeObserver.observe(testPanelSideRef.value)
+        }
+        updateEditorHeight()
+      }
+    })
+  } else {
+    editorHeight.value = '220px'
+    if (resizeObserver) {
+      resizeObserver.disconnect()
+      resizeObserver = null
+    }
+  }
+})
+
+// mode 切换时也需要重新测量（testMock.mode 变化导致内容块显隐）
+watch(() => testMock.mode, () => {
+  if (testPanelVisible.value) {
+    nextTick(updateEditorHeight)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+})
+
+// ---------- Python 文件选择（便于 agent / 用户从本地 .py 加载脚本）----------
+const pyFileInputRef = ref<HTMLInputElement | null>(null)
+
+function pickPyFile() {
+  // 触发原生文件选择对话框
+  pyFileInputRef.value?.click()
+}
+
+function onPyFilePicked(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  // 限制 1MB，避免加载过大文件
+  if (file.size > 1024 * 1024) {
+    ElMessage.warning('文件过大（>1MB），请选择较小的 Python 脚本文件')
+    input.value = ''
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const content = reader.result as string
+    form.value.modify_rules = content
+    ElMessage.success(`已加载 ${file.name}（${file.size} 字节）`)
+    input.value = ''  // 重置，允许再次选择同一文件
+  }
+  reader.onerror = () => {
+    ElMessage.error('读取文件失败')
+    input.value = ''
+  }
+  reader.readAsText(file)
+}
+
+// 默认预设（方便用户上手）
+const testMock = reactive({
+  host: 'api.example.com',
+  path: '/v1/user',
+  method: 'GET',
+  scheme: 'https',
+  httpVersion: 'HTTP/1.1',
+  // headers 用 JSON 字符串编辑，便于多行/复制
+  headers: '{\n  "User-Agent": "telnix-test/1.0",\n  "Accept": "application/json"\n}',
+  body: '',
+  // 模拟响应（可选；enableResp 控制是否启用）
+  enableResp: false,
+  respStatus: 200,
+  respHeaders: '{\n  "Content-Type": "application/json"\n}',
+  respBody: '{"code": 0, "data": {"id": 1}}',
+  // 测试模式：request 只请求 / response 只响应 / both 请求+响应
+  mode: 'both' as 'request' | 'response' | 'both',
+})
+
+function resetTestResult() {
+  testResult.value = null
+}
+
+function parseHeadersJson(s: string): Record<string, string> | null {
+  if (!s.trim()) return {}
+  try {
+    const obj = JSON.parse(s)
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+      ElMessage.warning('Headers 必须是 JSON 对象')
+      return null
+    }
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(obj)) {
+      out[String(k)] = String(v)
+    }
+    return out
+  } catch {
+    ElMessage.warning('Headers JSON 解析失败')
+    return null
+  }
+}
+
+async function runTest() {
+  if (!testPanelVisible.value) return
+  const script = (form.value.modify_rules as string) || ''
+  if (!script.trim()) {
+    ElMessage.warning('请先填写脚本内容')
+    return
+  }
+
+  const reqHeaders = parseHeadersJson(testMock.headers)
+  if (reqHeaders === null) return
+
+  // mode 决定是否需要 mock_response：
+  // - request : 不需要
+  // - response: 需要（用户若未填 respBody 也允许，给默认空响应）
+  // - both    : 需要（同时调用 on_request + on_response）
+  const mode = testMock.mode
+  let mockResp = null
+  if (mode !== 'request') {
+    const respHeaders = parseHeadersJson(testMock.respHeaders)
+    if (respHeaders === null) return
+    mockResp = {
+      status_code: Number(testMock.respStatus) || 200,
+      headers: respHeaders,
+      body: testMock.respBody || '',
+    }
+  }
+
+  testRunning.value = true
+  resetTestResult()
+  try {
+    const result = await api.testScript({
+      script,
+      mock_request: {
+        host: testMock.host,
+        path: testMock.path,
+        method: testMock.method,
+        scheme: testMock.scheme,
+        http_version: testMock.httpVersion,
+        headers: reqHeaders,
+        body: testMock.body || '',
+      },
+      mock_response: mockResp,
+      mode,
+    })
+    testResult.value = result
+  } catch (e: any) {
+    testResult.value = {
+      ok: false,
+      duration_ms: 0,
+      error: e?.message || String(e),
+      traceback: '',
+      request_phase: null,
+      response_phase: null,
+    }
+  } finally {
+    testRunning.value = false
+  }
+}
+
+// 弹窗宽度：展开测试面板时变宽以容纳左右分栏
+const dialogWidth = computed(() => testPanelVisible.value ? '1080px' : '720px')
+
+// 阶段 action -> el-tag type
+function phaseActionTagType(action: string): 'success' | 'danger' | 'warning' | 'info' {
+  if (action === 'drop') return 'danger'
+  if (action === 'mock') return 'warning'
+  if (action === 'continue') return 'success'
+  return 'info'
+}
 </script>
 
 <template>
@@ -200,11 +409,13 @@ const opOptions = [
     :model-value="modelValue"
     @update:model-value="close"
     :title="rule?.id ? '编辑自动修改规则' : '新建自动修改规则'"
-    width="720px"
+    :width="dialogWidth"
     :close-on-click-modal="false"
     align-center
     :append-to-body="true"
     :lock-scroll="true"
+    class="rule-editor-dialog"
+    :class="{ 'test-panel-open': testPanelVisible && isScript, 'script-mode': isScript }"
   >
     <!-- 顶部说明 -->
     <el-alert
@@ -468,19 +679,403 @@ const opOptions = [
 
       <!-- Python 脚本配置 -->
       <template v-if="isScript">
-        <el-form-item label="脚本">
+        <el-form-item label="脚本" class="script-form-item">
           <div class="script-section">
             <div class="section-hint">
               定义 <code>on_request(ctx)</code> / <code>on_response(ctx)</code> 函数处理请求/响应。
               <br />脚本在独立 worker 子进程运行，可 <code>import json/re/...</code>，单次调用超时 5 秒。
               <br />返回 <code>{"drop": True}</code> 拒绝请求；返回 <code>{"mock": True, "status": 200, "headers": {}, "body": b""}</code> 伪造响应。
             </div>
-            <MonacoEditor
-              :model-value="(form.modify_rules as string) || ''"
-              @update:model-value="(v: string) => (form.modify_rules = v)"
-              language="python"
-              height="420px"
-            />
+
+            <div class="script-test-toolbar">
+              <el-button
+                size="small"
+                :type="testPanelVisible ? 'success' : 'primary'"
+                plain
+                @click="testPanelVisible = !testPanelVisible"
+              >
+                <el-icon><VideoPlay v-if="!testPanelVisible" /><VideoPause v-else /></el-icon>
+                &nbsp;{{ testPanelVisible ? '收起测试面板' : '展开测试面板' }}
+              </el-button>
+              <el-button size="small" plain @click="pickPyFile">
+                <el-icon><Upload /></el-icon>&nbsp;从 .py 文件加载
+              </el-button>
+              <input
+                ref="pyFileInputRef"
+                type="file"
+                accept=".py,text/x-python"
+                style="display:none"
+                @change="onPyFilePicked"
+              />
+            </div>
+
+            <div class="script-with-test" :class="{ expanded: testPanelVisible }">
+              <!-- 左侧 70%：Monaco 编辑器（不展开时单列高度 220px，展开时高度跟随内容） -->
+              <div class="script-editor-side">
+                <MonacoEditor
+                  :model-value="(form.modify_rules as string) || ''"
+                  @update:model-value="(v: string) => (form.modify_rules = v)"
+                  language="python"
+                  :height="editorHeight"
+                >
+                  <!-- 全屏放大时使用的测试面板内容 -->
+                  <template #test-panel>
+                    <div class="test-panel-header">
+                      <span class="test-panel-title">
+                        <el-icon><Cpu /></el-icon>&nbsp;测试面板
+                      </span>
+                    </div>
+                    <div class="test-panel-body">
+                      <!-- 测试模式：只请求 / 只响应 / 请求响应 -->
+                      <div class="test-block">
+                        <div class="test-block-title">测试模式</div>
+                        <el-radio-group v-model="testMock.mode" size="small">
+                          <el-radio-button value="request">只请求</el-radio-button>
+                          <el-radio-button value="response">只响应</el-radio-button>
+                          <el-radio-button value="both">请求+响应</el-radio-button>
+                        </el-radio-group>
+                        <div class="test-mode-hint">
+                          <span v-if="testMock.mode === 'request'">仅调用 <code>on_request</code>，跳过 <code>on_response</code></span>
+                          <span v-else-if="testMock.mode === 'response'">仅调用 <code>on_response</code>，跳过 <code>on_request</code></span>
+                          <span v-else>先调用 <code>on_request</code>，再调用 <code>on_response</code></span>
+                        </div>
+                      </div>
+
+                      <!-- 模拟请求（只在 mode != response 时需要填写） -->
+                      <div v-if="testMock.mode !== 'response'" class="test-block">
+                        <div class="test-block-title">模拟请求</div>
+                        <div class="test-row">
+                          <el-input v-model="testMock.host" size="small" placeholder="host" class="mono" />
+                        </div>
+                        <div class="test-row">
+                          <el-input v-model="testMock.path" size="small" placeholder="path" class="mono" />
+                        </div>
+                        <div class="test-row-2">
+                          <el-select v-model="testMock.method" size="small" style="width: 100px">
+                            <el-option v-for="m in HTTP_METHODS" :key="m" :label="m" :value="m" />
+                          </el-select>
+                          <el-select v-model="testMock.scheme" size="small" style="width: 90px">
+                            <el-option label="https" value="https" />
+                            <el-option label="http" value="http" />
+                          </el-select>
+                          <el-select v-model="testMock.httpVersion" size="small" style="flex: 1">
+                            <el-option label="HTTP/1.1" value="HTTP/1.1" />
+                            <el-option label="HTTP/2" value="HTTP/2" />
+                          </el-select>
+                        </div>
+                        <div class="test-label">Headers (JSON)</div>
+                        <el-input
+                          v-model="testMock.headers"
+                          type="textarea"
+                          :rows="4"
+                          size="small"
+                          class="mono"
+                          placeholder='{"Content-Type": "application/json"}'
+                        />
+                        <div class="test-label">Body</div>
+                        <el-input
+                          v-model="testMock.body"
+                          type="textarea"
+                          :rows="3"
+                          size="small"
+                          class="mono"
+                          placeholder="请求体（可为空）"
+                        />
+                      </div>
+
+                      <!-- 模拟响应（只在 mode != request 时需要填写） -->
+                      <div v-if="testMock.mode !== 'request'" class="test-block">
+                        <div class="test-block-title">模拟响应</div>
+                        <div class="test-row-2">
+                          <span class="test-label-inline">状态码</span>
+                          <el-input-number
+                            v-model="testMock.respStatus"
+                            size="small"
+                            :min="100"
+                            :max="599"
+                            controls-position="right"
+                            style="width: 110px"
+                          />
+                        </div>
+                        <div class="test-label">Headers (JSON)</div>
+                        <el-input
+                          v-model="testMock.respHeaders"
+                          type="textarea"
+                          :rows="3"
+                          size="small"
+                          class="mono"
+                        />
+                        <div class="test-label">Body</div>
+                        <el-input
+                          v-model="testMock.respBody"
+                          type="textarea"
+                          :rows="3"
+                          size="small"
+                          class="mono"
+                        />
+                      </div>
+
+                      <!-- 运行按钮 -->
+                      <div class="test-run-row">
+                        <el-button
+                          type="primary"
+                          size="small"
+                          :loading="testRunning"
+                          @click="runTest"
+                        >
+                          <el-icon><VideoPlay /></el-icon>&nbsp;运行测试
+                        </el-button>
+                        <el-button
+                          v-if="testResult"
+                          size="small"
+                          @click="resetTestResult"
+                        >清空结果</el-button>
+                      </div>
+
+                      <!-- 结果显示 -->
+                      <div v-if="testResult" class="test-result">
+                        <div class="test-result-meta">
+                          <el-tag :type="testResult.ok ? 'success' : 'danger'" size="small">
+                            {{ testResult.ok ? '成功' : '失败' }}
+                          </el-tag>
+                          <span class="test-duration">耗时 {{ testResult.duration_ms }}ms</span>
+                        </div>
+
+                        <div v-if="testResult.error" class="test-error">
+                          <div class="test-error-msg">{{ testResult.error }}</div>
+                          <pre v-if="testResult.traceback" class="test-traceback">{{ testResult.traceback }}</pre>
+                        </div>
+
+                        <div v-if="testResult.request_phase" class="test-phase">
+                          <div class="test-phase-title">
+                            on_request 阶段
+                            <el-tag size="small" :type="phaseActionTagType(testResult.request_phase.action)">
+                              {{ testResult.request_phase.action }}
+                            </el-tag>
+                            <el-tag v-if="!testResult.request_phase.available" size="small" type="info">未定义</el-tag>
+                            <el-tag v-else-if="testResult.request_phase.modified" size="small" type="warning">已修改</el-tag>
+                          </div>
+                          <div v-if="testResult.request_phase.error" class="test-phase-error">
+                            {{ testResult.request_phase.error }}
+                          </div>
+                          <template v-else-if="testResult.request_phase.available">
+                            <div v-if="testResult.request_phase.action === 'mock'" class="test-mock-info">
+                              Mock 响应：{{ testResult.request_phase.mock_status }}
+                            </div>
+                            <div class="test-sub-label">Headers</div>
+                            <pre class="test-pre">{{ JSON.stringify(testResult.request_phase.headers, null, 2) }}</pre>
+                            <div class="test-sub-label">Body</div>
+                            <pre class="test-pre">{{ testResult.request_phase.body || '(空)' }}</pre>
+                          </template>
+                        </div>
+
+                        <div v-if="testResult.response_phase" class="test-phase">
+                          <div class="test-phase-title">
+                            on_response 阶段
+                            <el-tag size="small" :type="phaseActionTagType(testResult.response_phase.action)">
+                              {{ testResult.response_phase.action }}
+                            </el-tag>
+                            <el-tag v-if="!testResult.response_phase.available" size="small" type="info">未定义</el-tag>
+                            <el-tag v-else-if="testResult.response_phase.modified" size="small" type="warning">已修改</el-tag>
+                          </div>
+                          <div v-if="testResult.response_phase.error" class="test-phase-error">
+                            {{ testResult.response_phase.error }}
+                          </div>
+                          <template v-else-if="testResult.response_phase.available">
+                            <div class="test-sub-label">Status: {{ testResult.response_phase.status_code }}</div>
+                            <div class="test-sub-label">Headers</div>
+                            <pre class="test-pre">{{ JSON.stringify(testResult.response_phase.headers, null, 2) }}</pre>
+                            <div class="test-sub-label">Body</div>
+                            <pre class="test-pre">{{ testResult.response_phase.body || '(空)' }}</pre>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </MonacoEditor>
+              </div>
+
+              <!-- 右侧 30%：测试面板（dialog 内左右分栏时显示） -->
+              <transition name="test-slide">
+                <div v-if="testPanelVisible" ref="testPanelSideRef" class="test-panel-side">
+                  <div class="test-panel-header">
+                    <span class="test-panel-title">
+                      <el-icon><Cpu /></el-icon>&nbsp;测试面板
+                    </span>
+                    <el-button link size="small" @click="testPanelVisible = false">收起</el-button>
+                  </div>
+
+                  <div class="test-panel-body">
+                    <!-- 测试模式：只请求 / 只响应 / 请求响应 -->
+                    <div class="test-block">
+                      <div class="test-block-title">测试模式</div>
+                      <el-radio-group v-model="testMock.mode" size="small">
+                        <el-radio-button value="request">只请求</el-radio-button>
+                        <el-radio-button value="response">只响应</el-radio-button>
+                        <el-radio-button value="both">请求+响应</el-radio-button>
+                      </el-radio-group>
+                      <div class="test-mode-hint">
+                        <span v-if="testMock.mode === 'request'">仅调用 <code>on_request</code>，跳过 <code>on_response</code></span>
+                        <span v-else-if="testMock.mode === 'response'">仅调用 <code>on_response</code>，跳过 <code>on_request</code></span>
+                        <span v-else>先调用 <code>on_request</code>，再调用 <code>on_response</code></span>
+                      </div>
+                    </div>
+
+                    <!-- 模拟请求（只在 mode != response 时需要填写） -->
+                    <div v-if="testMock.mode !== 'response'" class="test-block">
+                      <div class="test-block-title">模拟请求</div>
+                      <div class="test-row">
+                        <el-input v-model="testMock.host" size="small" placeholder="host" class="mono" />
+                      </div>
+                      <div class="test-row">
+                        <el-input v-model="testMock.path" size="small" placeholder="path" class="mono" />
+                      </div>
+                      <div class="test-row-2">
+                        <el-select v-model="testMock.method" size="small" style="width: 100px">
+                          <el-option v-for="m in HTTP_METHODS" :key="m" :label="m" :value="m" />
+                        </el-select>
+                        <el-select v-model="testMock.scheme" size="small" style="width: 90px">
+                          <el-option label="https" value="https" />
+                          <el-option label="http" value="http" />
+                        </el-select>
+                        <el-select v-model="testMock.httpVersion" size="small" style="flex: 1">
+                          <el-option label="HTTP/1.1" value="HTTP/1.1" />
+                          <el-option label="HTTP/2" value="HTTP/2" />
+                        </el-select>
+                      </div>
+                      <div class="test-label">Headers (JSON)</div>
+                      <el-input
+                        v-model="testMock.headers"
+                        type="textarea"
+                        :rows="4"
+                        size="small"
+                        class="mono"
+                        placeholder='{"Content-Type": "application/json"}'
+                      />
+                      <div class="test-label">Body</div>
+                      <el-input
+                        v-model="testMock.body"
+                        type="textarea"
+                        :rows="3"
+                        size="small"
+                        class="mono"
+                        placeholder="请求体（可为空）"
+                      />
+                    </div>
+
+                    <!-- 模拟响应（只在 mode != request 时需要填写） -->
+                    <div v-if="testMock.mode !== 'request'" class="test-block">
+                      <div class="test-block-title">模拟响应</div>
+                      <div class="test-row-2">
+                        <span class="test-label-inline">状态码</span>
+                        <el-input-number
+                          v-model="testMock.respStatus"
+                          size="small"
+                          :min="100"
+                          :max="599"
+                          controls-position="right"
+                          style="width: 110px"
+                        />
+                      </div>
+                      <div class="test-label">Headers (JSON)</div>
+                      <el-input
+                        v-model="testMock.respHeaders"
+                        type="textarea"
+                        :rows="3"
+                        size="small"
+                        class="mono"
+                      />
+                      <div class="test-label">Body</div>
+                      <el-input
+                        v-model="testMock.respBody"
+                        type="textarea"
+                        :rows="3"
+                        size="small"
+                        class="mono"
+                      />
+                    </div>
+
+                    <!-- 运行按钮 -->
+                    <div class="test-run-row">
+                      <el-button
+                        type="primary"
+                        size="small"
+                        :loading="testRunning"
+                        @click="runTest"
+                      >
+                        <el-icon><VideoPlay /></el-icon>&nbsp;运行测试
+                      </el-button>
+                      <el-button
+                        v-if="testResult"
+                        size="small"
+                        @click="resetTestResult"
+                      >清空结果</el-button>
+                    </div>
+
+                    <!-- 结果显示 -->
+                    <div v-if="testResult" class="test-result">
+                      <div class="test-result-meta">
+                        <el-tag :type="testResult.ok ? 'success' : 'danger'" size="small">
+                          {{ testResult.ok ? '成功' : '失败' }}
+                        </el-tag>
+                        <span class="test-duration">耗时 {{ testResult.duration_ms }}ms</span>
+                      </div>
+
+                      <div v-if="testResult.error" class="test-error">
+                        <div class="test-error-msg">{{ testResult.error }}</div>
+                        <pre v-if="testResult.traceback" class="test-traceback">{{ testResult.traceback }}</pre>
+                      </div>
+
+                      <!-- 请求阶段结果 -->
+                      <div v-if="testResult.request_phase" class="test-phase">
+                        <div class="test-phase-title">
+                          on_request 阶段
+                          <el-tag size="small" :type="phaseActionTagType(testResult.request_phase.action)">
+                            {{ testResult.request_phase.action }}
+                          </el-tag>
+                          <el-tag v-if="!testResult.request_phase.available" size="small" type="info">未定义</el-tag>
+                          <el-tag v-else-if="testResult.request_phase.modified" size="small" type="warning">已修改</el-tag>
+                        </div>
+                        <div v-if="testResult.request_phase.error" class="test-phase-error">
+                          {{ testResult.request_phase.error }}
+                        </div>
+                        <template v-else-if="testResult.request_phase.available">
+                          <div v-if="testResult.request_phase.action === 'mock'" class="test-mock-info">
+                            Mock 响应：{{ testResult.request_phase.mock_status }}
+                          </div>
+                          <div class="test-sub-label">Headers</div>
+                          <pre class="test-pre">{{ JSON.stringify(testResult.request_phase.headers, null, 2) }}</pre>
+                          <div class="test-sub-label">Body</div>
+                          <pre class="test-pre">{{ testResult.request_phase.body || '(空)' }}</pre>
+                        </template>
+                      </div>
+
+                      <!-- 响应阶段结果 -->
+                      <div v-if="testResult.response_phase" class="test-phase">
+                        <div class="test-phase-title">
+                          on_response 阶段
+                          <el-tag size="small" :type="phaseActionTagType(testResult.response_phase.action)">
+                            {{ testResult.response_phase.action }}
+                          </el-tag>
+                          <el-tag v-if="!testResult.response_phase.available" size="small" type="info">未定义</el-tag>
+                          <el-tag v-else-if="testResult.response_phase.modified" size="small" type="warning">已修改</el-tag>
+                        </div>
+                        <div v-if="testResult.response_phase.error" class="test-phase-error">
+                          {{ testResult.response_phase.error }}
+                        </div>
+                        <template v-else-if="testResult.response_phase.available">
+                          <div class="test-sub-label">Status: {{ testResult.response_phase.status_code }}</div>
+                          <div class="test-sub-label">Headers</div>
+                          <pre class="test-pre">{{ JSON.stringify(testResult.response_phase.headers, null, 2) }}</pre>
+                          <div class="test-sub-label">Body</div>
+                          <pre class="test-pre">{{ testResult.response_phase.body || '(空)' }}</pre>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </transition>
+            </div>
           </div>
         </el-form-item>
       </template>
@@ -503,21 +1098,230 @@ const opOptions = [
   padding: 6px 10px; border-radius: 4px;
   line-height: 1.6;
 }
-.section-hint code {
-  background: rgba(0,0,0,0.3);
-  color: #ffffff;
-  padding: 1px 5px; border-radius: 3px;
-  font-family: 'Consolas', 'Monaco', monospace;
-}
+/* code 标签使用全局 main.css 样式（亮/暗模式均正常），
+   不再覆盖颜色，避免亮色模式白字+淡灰底不可读 */
 .field-hint {
   font-size: 12px; color: var(--on-text-muted);
   margin-top: 2px; line-height: 1.5;
 }
-.field-hint code {
-  background: rgba(0,0,0,0.3);
-  color: #ffffff;
-  padding: 1px 5px; border-radius: 3px;
+.mono { font-family: 'Consolas', 'Monaco', monospace; }
+
+/* ---------- Python 脚本测试面板 ---------- */
+.script-section { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.script-test-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+
+.script-with-test {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.script-with-test.expanded {
+  /* 展开时左右分栏：68% 编辑器 + 30% 测试面板（间距 2%） */
+  flex-direction: row;
+  align-items: flex-start;  /* 顶部对齐，两侧各自按内容高度，MonacoEditor 高度由 JS 测量同步 */
+  gap: 10px;
+}
+/* 默认（不展开）：编辑器全宽 */
+.script-editor-side {
+  width: 100%;
+}
+/* 展开时：编辑器左 68% */
+.script-with-test.expanded .script-editor-side {
+  flex: 0 0 68%;
+  min-width: 0;
+}
+.test-panel-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--on-border, #333);
+  border-radius: 6px;
+  background: var(--on-bg-elevated, var(--on-bg, #fff));
+  /* 不再设固定高度/overflow:hidden，让 dialog body 滚动 */
+}
+.test-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--on-bg-hover, #f6f8fa);
+  border-bottom: 1px solid var(--on-border, #d0d7de);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--on-text, #1f2328);
+  flex: 0 0 auto;
+}
+.test-panel-title { display: inline-flex; align-items: center; }
+.test-panel-body {
+  /* 不再 flex:1 + overflow-y:auto，让面板自然高度，dialog body 统一滚动 */
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.test-mode-hint {
+  font-size: 11px;
+  color: var(--on-text-muted);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.test-block {
+  border: 1px solid var(--on-border-light, #e1e4e8);
+  border-radius: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--on-bg, #fff);
+}
+.test-block-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-text, #1f2328);
+  margin-bottom: 2px;
+}
+.test-row { display: flex; gap: 6px; }
+.test-row-2 { display: flex; gap: 6px; align-items: center; }
+.test-label {
+  font-size: 11px;
+  color: var(--on-text-muted);
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+.test-label-inline {
+  font-size: 11px;
+  color: var(--on-text-muted);
+  white-space: nowrap;
+}
+.test-run-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.test-result {
+  border: 1px solid var(--on-border-light, #e1e4e8);
+  border-radius: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--on-bg-hover, #f6f8fa);
+}
+.test-result-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.test-duration {
+  font-size: 12px;
+  color: var(--on-text-muted);
+}
+.test-error {
+  background: rgba(207, 34, 46, 0.08);
+  border: 1px solid var(--on-error, #cf222e);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.test-error-msg {
+  color: var(--on-error, #cf222e);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.test-traceback {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--on-text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow-y: auto;
   font-family: 'Consolas', 'Monaco', monospace;
 }
-.mono { font-family: 'Consolas', 'Monaco', monospace; }
+.test-phase {
+  border-left: 2px solid var(--on-accent, #0d9488);
+  padding: 4px 8px;
+  background: var(--on-bg, #fff);
+  border-radius: 0 4px 4px 0;
+}
+.test-phase-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-text, #1f2328);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.test-phase-error {
+  font-size: 11px;
+  color: var(--on-error, #cf222e);
+  padding: 2px 4px;
+}
+.test-mock-info {
+  font-size: 11px;
+  color: var(--on-warn, #9a6700);
+  margin: 2px 0;
+}
+.test-sub-label {
+  font-size: 11px;
+  color: var(--on-text-muted);
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+.test-pre {
+  margin: 0;
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  background: var(--on-bg-hover, #f6f8fa);
+  border: 1px solid var(--on-border-light, #e1e4e8);
+  border-radius: 3px;
+  padding: 4px 6px;
+  color: var(--on-text, #1f2328);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+/* 展开测试面板的滑入动画 */
+.test-slide-enter-active, .test-slide-leave-active {
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+.test-slide-enter-from, .test-slide-leave-to {
+  opacity: 0;
+  transform: translateX(20px);
+  max-width: 0;
+}
+</style>
+
+<!-- 非 scoped：append-to-body 后弹窗在 body 下，scoped 样式无法触达 -->
+<style>
+.rule-editor-dialog.el-dialog {
+  /* 弹窗整体不超过视口高度，留出标题/底部按钮空间 */
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto !important;
+  transition: width 0.2s ease;
+}
+.rule-editor-dialog .el-dialog__body {
+  /* body 内部滚动，标题和底部按钮始终可见。
+     不再因 test-panel-open 切换 overflow（避免左右两栏独立滚动） */
+  flex: 1;
+  overflow-y: auto;
+  max-height: calc(92vh - 110px); /* 减去标题(~55px) + 底部按钮(~55px) */
+}
 </style>

@@ -1,4 +1,5 @@
 import axios, { type AxiosResponse } from 'axios'
+import { waitForWindivertAck } from '../stores/windivertWarning'
 
 // ============ 类型定义 ============
 
@@ -7,6 +8,17 @@ export interface ApiResult<T = any> {
   code: number
   data: T
   msg: string
+  /** WinDivert 风险提示标记：true 表示需要先弹窗让用户确认 */
+  need_ack?: boolean
+}
+
+/** WinDivert 风险提示状态 */
+export interface WindivertWarningStatus {
+  needed: boolean
+  message: string
+  brief?: string
+  ack: boolean
+  platform: string
 }
 
 /** 抓包状态 */
@@ -66,6 +78,27 @@ export interface FlowsResult {
   total: number
 }
 
+/** 技术栈识别结果项 */
+export interface TechFingerprint {
+  name: string
+  category: string  // server / language / framework / frontend / cms / cdn_waf / analytics / build_tool
+  confidence: 'high' | 'medium' | 'low'
+  version?: string
+}
+
+/** 透明代理状态 */
+export interface TransparentProxyStatus {
+  supported: boolean
+  running: boolean
+  redirected_count?: number
+  passed_count?: number
+  nat_table_size?: number
+  last_error?: string
+  local_port?: number
+  redirect_ports?: number[]
+  hint?: string
+}
+
 /** 进程信息 */
 export interface ProcessInfo {
   pid: number
@@ -105,6 +138,51 @@ export interface ModifyRule {
   op: string // replace | append | remove
   key?: string
   value?: string
+}
+
+/** 脚本测试：模拟请求 */
+export interface ScriptMockRequest {
+  host: string
+  path: string
+  method: string
+  scheme: string
+  http_version?: string
+  headers: Record<string, string>
+  body: string
+}
+
+/** 脚本测试：模拟响应（可选，提供则调用 on_response） */
+export interface ScriptMockResponse {
+  status_code: number
+  headers: Record<string, string>
+  body: string
+}
+
+/** 脚本测试：单个阶段结果 */
+export interface ScriptTestPhase {
+  available: boolean       // 脚本是否定义了对应阶段函数
+  action: string           // continue | drop | mock
+  modified: boolean        // 是否对该阶段做了修改
+  headers: Record<string, string>
+  body: string
+  error: string | null
+  traceback: string
+  // 请求阶段独有：mock 响应字段
+  mock_status?: number | null
+  mock_headers?: Record<string, string> | null
+  mock_body?: string
+  // 响应阶段独有：状态码
+  status_code?: number
+}
+
+/** 脚本测试结果 */
+export interface ScriptTestResult {
+  ok: boolean
+  duration_ms: number
+  error: string | null
+  traceback: string | null
+  request_phase: ScriptTestPhase | null
+  response_phase: ScriptTestPhase | null
 }
 
 /** AI 聊天记录 */
@@ -256,6 +334,8 @@ const client = axios.create({
 const AI_TIMEOUT = 180000
 
 // 响应拦截器：解包 {code, data, msg}
+// 特殊处理 WinDivert 风险提示：检测到 need_ack=true 时弹全局对话框，
+// 用户确认 → 调 ack API 持久化 → 重试原请求；用户取消 → 拒绝原请求
 client.interceptors.response.use(
   (response: AxiosResponse<ApiResult>) => {
     const res = response.data
@@ -263,18 +343,65 @@ client.interceptors.response.use(
       if (res.code === 0) {
         return res.data as any
       }
+      // code != 0：检查是否为 WinDivert 需要确认（HTTP 200 但业务码 -1 + need_ack）
+      if (res.need_ack === true) {
+        return _handleWindivertAck(response, res.msg || '需要确认 WinDivert 风险提示')
+      }
       return Promise.reject(new Error(res.msg || '请求失败'))
     }
     return res as any
   },
   (error) => {
-    const msg = error?.response?.data?.msg
+    // HTTP 4xx/5xx 错误：检查是否为 WinDivert 需要确认（403 + need_ack=true）
+    const errData = error?.response?.data
+    if (errData && errData.need_ack === true) {
+      return _handleWindivertAck(error.response, errData.msg || '需要确认 WinDivert 风险提示')
+    }
+    const msg = errData?.msg
     if (msg) {
       return Promise.reject(new Error(msg))
     }
     return Promise.reject(error)
   }
 )
+
+/**
+ * 处理 WinDivert 风险提示：弹全局对话框等用户响应，确认后调 ack API 持久化并重试原请求。
+ *
+ * @param resp 原始 axios response（用于取 config 重试请求）
+ * @param msg 后端返回的提示文本
+ */
+async function _handleWindivertAck(resp: AxiosResponse, msg: string): Promise<any> {
+  // 拉取后端最新的风险说明文本（含 brief 摘要）
+  let fullMsg = msg
+  let briefMsg = ''
+  try {
+    const w = await client.get('/system/windivert-warning')
+    if (w && typeof w === 'object') {
+      const wd = w as any
+      if (wd.message) fullMsg = wd.message
+      if (wd.brief) briefMsg = wd.brief
+    }
+  } catch {
+    /* 拉取失败时用后端在错误响应里给的 msg 兜底 */
+  }
+  // 弹全局对话框，等待用户响应
+  const accepted = await waitForWindivertAck(fullMsg, briefMsg)
+  if (!accepted) {
+    return Promise.reject(new Error('用户取消了 WinDivert 风险提示确认'))
+  }
+  // 用户确认：调 ack API 持久化（永久不再提示）
+  try {
+    await client.post('/system/windivert-warning/ack')
+  } catch {
+    /* ack 失败不阻塞重试，下次还会再弹 */
+  }
+  // 重试原请求
+  if (resp?.config) {
+    return client.request(resp.config)
+  }
+  return Promise.reject(new Error('无法重试原请求（缺少 config）'))
+}
 
 // 由于拦截器已解包，这里把 AxiosPromise 转为 Promise<T>
 async function get<T = any>(url: string, params?: any): Promise<T> {
@@ -318,6 +445,15 @@ export const api = {
   replayFlowOverride: (id: number, override: ReplayOverride) =>
     post(`/flows/${id}/replay`, override),
 
+  // 技术栈识别
+  getTechFingerprint: (id: number) =>
+    get<{ items: TechFingerprint[]; count: number }>(`/flows/${id}/tech-fingerprint`),
+
+  // 透明代理模式
+  transparentProxyStatus: () => get<TransparentProxyStatus>('/transparent-proxy/status'),
+  transparentProxyStart: () => post<{ running: boolean; msg: string }>('/transparent-proxy/start'),
+  transparentProxyStop: () => post<{ running: boolean; msg: string }>('/transparent-proxy/stop'),
+
   // 断点
   getBpStatus: () => get<BpStatus>('/breakpoint/status'),
   setBpRequest: (body: { enabled: boolean }) => post('/breakpoint/request', body),
@@ -336,6 +472,14 @@ export const api = {
   exportRulesUrl: () => '/api/auto-reply/rules/export',
   importRules: (rules: any[], mode: string = 'merge') =>
     post<{ imported: number; mode: string }>('/auto-reply/rules/import', { rules, mode }),
+  // 测试 Python 脚本（不发起真实请求，用 mock 数据走 worker 子进程）
+  // mode: "request" 只请求 / "response" 只响应 / "both" 请求+响应
+  testScript: (body: {
+    script: string
+    mock_request: ScriptMockRequest
+    mock_response?: ScriptMockResponse | null
+    mode?: 'request' | 'response' | 'both'
+  }) => post<ScriptTestResult>('/auto-reply/test-script', body, 15000),
   // 流量删除
   deleteFlow: (id: number) => del(`/flows/${id}`),
   batchDeleteFlows: (ids: number[]) => post('/flows/batch-delete', { ids }),
@@ -361,6 +505,10 @@ export const api = {
   getPendingAdminActions: () => get<{ items: any[] }>('/system/pending-admin-actions'),
   respondAdminRequest: (rid: string, response: 'accept' | 'reject') =>
     post(`/system/admin-request/${rid}/respond`, { response }),
+
+  // WinDivert 风险提示
+  getWindivertWarning: () => get<WindivertWarningStatus>('/system/windivert-warning'),
+  ackWindivertWarning: () => post<{ ack: boolean }>('/system/windivert-warning/ack'),
 
   // 可选依赖安装（mitmproxy 等）
   installDep: (pkg: string) => post('/system/install-dep', { package: pkg }),
@@ -453,7 +601,6 @@ export const api = {
   rawStart: (body: { pid_filter?: number[]; port_filter?: number[]; filter_str?: string }) =>
     post('/raw/start', body),
   rawStop: () => post('/raw/stop'),
-  installPydivert: () => post<{ installed: boolean; output: string }>('/raw/install-pydivert'),
 
   // 搜索与统计
   searchFlows: (body: { session_id: number; body_regex?: string; binary_hex?: string; limit?: number }) =>

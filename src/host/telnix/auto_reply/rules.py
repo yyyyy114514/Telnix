@@ -12,6 +12,11 @@
 - 修复空 list falsy bug（无规则时每次查 DB）
 - TTL 从 2 秒提到 10 秒，靠 invalidate_cache 主动失效
 - 排序在加载时一次完成，不再每请求 sorted()
+
+性能优化（v11，未抓包场景）：
+- 模块级 _has_rules 标志位：无锁读，避免高并发下每请求都进 _cache_lock
+- host_matches_any_rule 结果 LRU 缓存：未抓包时每次 CONNECT 都查，缓存避免重复遍历
+- has_active_rules_fast()：用 _has_rules 快速判断，无规则时跳过 find_matching_rule
 """
 
 import re
@@ -27,13 +32,29 @@ _cache: tuple[list[dict], list[re.Pattern | None], list[dict]] | None = None
 _cache_ts: float = 0.0
 _CACHE_TTL = 10.0  # 提到 10 秒，靠 invalidate_cache 主动失效
 
+# 性能优化（v11）：模块级标志位，无锁读
+# _load_rules 时更新；invalidate_cache 后置 False（保守）
+# 在 invalidate_cache 到下次 _load_rules 之间可能短暂不准，但最坏只是多调一次 find_matching_rule
+_has_rules: bool = False
+
+# 性能优化（v11）：host_matches_any_rule 结果缓存
+# 未抓包但有规则时，每次 HTTPS CONNECT 都会查 host_matches_any_rule
+# 同一 host 反复连接（keep-alive 断开后重连）时，缓存避免重复遍历所有规则
+_host_match_cache: dict[str, bool] = {}
+_host_match_lock = threading.Lock()
+_HOST_CACHE_MAX = 1024  # 上限，避免无界增长
+
 
 def invalidate_cache():
     """规则变更后调用，清空缓存。"""
-    global _cache_ts, _cache
+    global _cache_ts, _cache, _has_rules
     with _cache_lock:
         _cache_ts = 0.0
         _cache = None  # 彻底清空，下次 _load_rules 重新加载
+        _has_rules = False  # 保守置 False，下次 _load_rules 会重新计算
+    # 清空 host 匹配缓存（规则变了，旧结果失效）
+    with _host_match_lock:
+        _host_match_cache.clear()
 
 
 def _load_rules() -> tuple[list[dict], list[re.Pattern | None], list[dict]]:
@@ -44,7 +65,7 @@ def _load_rules() -> tuple[list[dict], list[re.Pattern | None], list[dict]]:
     - compiled_regexes: 每条规则预编译的正则（与 rules 一一对应，None=编译失败）
     - filters: 每条规则预拆分的 filter dict {method_parts, status_parts, ...}
     """
-    global _cache, _cache_ts
+    global _cache, _cache_ts, _has_rules
     now = time.time()
     with _cache_lock:
         if _cache is not None and now - _cache_ts < _CACHE_TTL:
@@ -60,6 +81,8 @@ def _load_rules() -> tuple[list[dict], list[re.Pattern | None], list[dict]]:
             filters.append(_precompile_filters(r))
         _cache = (raw_rules, compiled, filters)
         _cache_ts = now
+        # 更新模块级标志位（无锁读用）
+        _has_rules = bool(raw_rules)
         return _cache
 
 
@@ -205,6 +228,24 @@ def has_active_rules() -> bool:
     return bool(rules)
 
 
+def has_active_rules_fast() -> bool:
+    """快速检查是否有启用的规则（无锁读模块级标志位）。
+
+    性能优化（v11）：避免高并发下每请求都进 _cache_lock。
+    - 首次调用（_has_rules=False）会触发 _load_rules 加载并更新标志位
+    - 后续调用直接读 _has_rules，无锁
+    - 规则变更时 invalidate_cache 会置 False，下次调用重新加载
+
+    用于未抓包时的早期短路：无规则时跳过 _match_auto_reply 等开销。
+    """
+    if _has_rules:
+        return True
+    # _has_rules 为 False 可能是"未加载"或"确实无规则"
+    # 调用 _load_rules 触发加载（如果未加载），更新标志位
+    # 下次调用就能直接读 _has_rules
+    return has_active_rules()
+
+
 def host_matches_any_rule(host: str) -> bool:
     """检查 host 是否匹配某条启用规则的 pattern（用于精细化 SSL bump 决策）。
 
@@ -213,15 +254,37 @@ def host_matches_any_rule(host: str) -> bool:
 
     匹配方式：把 host 当成 URL 的一部分（`https://{host}/`）跑 find_matching_rule。
     pattern 通配符如 `*httpbin.org*` 会匹配 `https://httpbin.org/`。
+
+    性能优化（v11）：结果缓存。未抓包时每次 HTTPS CONNECT 都会查此函数，
+    同一 host 反复连接（keep-alive 断开后重连）时缓存避免重复遍历。
     """
     if not host:
         return False
-    # 构造伪 URL 跑规则匹配（pattern 通常针对完整 URL 或 host）
+    # 快速路径：确认无规则（_cache 已加载且为空）时直接返回 False
+    # 注意：_has_rules=False 可能是"未加载"或"确实无规则"
+    # _load_rules() 会区分这两种情况（加载后 _has_rules 会被正确设置）
+    if not _has_rules and _cache is not None:
+        # _cache 已加载但 _has_rules=False → 确实无规则
+        return False
+    # 查缓存（仅在有可能有规则时才查，避免无规则时填充缓存）
+    with _host_match_lock:
+        cached = _host_match_cache.get(host)
+    if cached is not None:
+        return cached
+    # 缓存未命中：遍历规则
     pseudo_url = f"https://{host}/"
     rules, compiled_regexes, _ = _load_rules()
+    matched = False
     for i, rx in enumerate(compiled_regexes):
         if rx is None:
             continue
         if rx.search(pseudo_url) or rx.search(host):
-            return True
-    return False
+            matched = True
+            break
+    # 写缓存（带上限保护）
+    with _host_match_lock:
+        if len(_host_match_cache) >= _HOST_CACHE_MAX:
+            # 简单 FIFO 淘汰：弹出一个最旧的 key
+            _host_match_cache.pop(next(iter(_host_match_cache)), None)
+        _host_match_cache[host] = matched
+    return matched

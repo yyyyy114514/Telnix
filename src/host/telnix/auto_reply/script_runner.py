@@ -11,6 +11,12 @@
 - 一个规则对应一个 ScriptRunner 实例（各自独立 worker，脚本互不影响）
 - 同步调用（proxy 在请求处理线程中直接 call，不并发）
 - worker stdout 严格逐行 JSON，stderr 写入日志文件供排查
+
+性能优化（v11，未抓包场景）：
+- worker 闲置超过 WORKER_IDLE_TIMEOUT（5 分钟）自动停止，释放内存
+- 后台守护线程每 60s 扫描所有 runner，停止闲置 worker
+- 下次有流量时 _call 会自动重启 worker（懒启动）
+- 避免用户曾经触发过脚本规则后 worker 永久常驻占内存（每个约 20-30MB）
 """
 
 import base64
@@ -33,6 +39,13 @@ CALL_TIMEOUT = 5.0
 # worker 启动超时（秒）：启动后应立即写一行 {"ready": true}
 STARTUP_TIMEOUT = 3.0
 
+# 性能优化（v11）：worker 闲置超时（秒）。超过此时间无调用则自动停止 worker。
+# 5 分钟：平衡内存节省与重启开销（worker 启动约 100-300ms）
+WORKER_IDLE_TIMEOUT = 300.0
+
+# 后台扫描间隔（秒）
+_IDLE_SCAN_INTERVAL = 60.0
+
 # 全局锁：每个 runner 实例自己的锁（避免多线程同时调用同一 worker）
 # 同一规则的多次调用串行，不同规则可并行（各自独立 worker）
 
@@ -42,6 +55,8 @@ class ScriptRunner:
 
     一个 ScriptRunner 实例对应一条 action=script 的规则。
     proxy 在匹配到该规则时，调用 run_request / run_response。
+
+    性能优化（v11）：记录 _last_call_ts，后台线程扫描闲置 worker 并停止。
     """
 
     def __init__(self, rule_id: str, script: str):
@@ -52,6 +67,9 @@ class ScriptRunner:
         self._lock = threading.Lock()
         self._stderr_log: Optional[str] = None
         self._last_error: Optional[str] = None  # 最近的脚本错误（供 UI 展示）
+        # 性能优化（v11）：最后调用时间戳，用于闲置检测
+        # 初始化为 0.0，表示从未调用过（启动后若未被调用，_idle_scan 会停止它）
+        self._last_call_ts: float = 0.0
 
     def reload(self, script: str):
         """更新脚本内容并重启 worker。"""
@@ -76,6 +94,43 @@ class ScriptRunner:
         with self._lock:
             self._kill_worker_locked()
 
+    def is_idle(self, threshold: float = WORKER_IDLE_TIMEOUT) -> bool:
+        """是否闲置超过 threshold 秒（用于后台扫描）。"""
+        if self._proc is None:
+            return False  # worker 已停止，无需再停
+        if self._last_call_ts == 0.0:
+            # 从未调用过：用进程启动时间估算
+            return False  # 启动后立即闲置的情况由 _idle_scan 通过 _start_ts 处理
+        return (time.time() - self._last_call_ts) > threshold
+
+    def stop_if_idle(self, threshold: float = WORKER_IDLE_TIMEOUT) -> bool:
+        """如果闲置超过 threshold，停止 worker。返回是否实际停止。
+
+        供后台扫描线程调用。加锁后检查，避免与正在调用的线程冲突。
+        """
+        with self._lock:
+            if self._proc is None:
+                return False
+            # 检查闲置时间
+            now = time.time()
+            if self._last_call_ts > 0:
+                idle_secs = now - self._last_call_ts
+            else:
+                # _last_call_ts == 0：worker 已启动但还未调用过
+                # 这种情况不应发生（_start_worker_locked 后立即 _call），
+                # 但保险起见用 0 表示"刚启动"，不停止
+                return False
+            if idle_secs <= threshold:
+                return False
+            # 闲置超时，停止 worker
+            logger.info(
+                "script",
+                f"[auto-reply] worker 闲置 {int(idle_secs)}s 超过 {int(threshold)}s，自动停止: rule={self.rule_id}",
+                ""
+            )
+            self._kill_worker_locked()
+            return True
+
     # ---------- 内部 ----------
 
     def _call(self, req: dict) -> Optional[dict]:
@@ -88,6 +143,8 @@ class ScriptRunner:
             assert self._proc is not None
             assert self._proc.stdin is not None
             assert self._proc.stdout is not None
+            # 性能优化（v11）：更新最后调用时间戳
+            self._last_call_ts = time.time()
 
             line = json.dumps(req, ensure_ascii=False) + "\n"
             try:
@@ -283,6 +340,8 @@ def get_runner(rule_id: str, script: str) -> ScriptRunner:
         if r is None:
             r = ScriptRunner(rule_id, script)
             _runners[rule_id] = r
+            # 首次创建 runner 时懒启动闲置扫描线程
+            _ensure_idle_scan_started()
         elif r.script != script:
             r.reload(script)
         return r
@@ -314,6 +373,58 @@ def stop_all():
         _runners.clear()
     for r in runners:
         r.stop()
+    # 停止后台扫描线程
+    global _idle_scan_running
+    _idle_scan_running = False
+    # 立即唤醒扫描线程（Event.set 中断 wait），避免等待整个扫描间隔才退出
+    _idle_scan_stop_event.set()
+
+
+# ---------- 性能优化（v11）：worker 闲置扫描线程 ----------
+# 后台 daemon 线程，每 60s 扫描所有 runner，停止闲置超过 WORKER_IDLE_TIMEOUT 的 worker
+# 避免用户曾经触发过脚本规则后 worker 永久常驻占内存
+_idle_scan_running: bool = False
+_idle_scan_thread: Optional[threading.Thread] = None
+# 用 Event 实现可中断的 sleep：stop_all 时 set() 立即唤醒扫描线程退出
+_idle_scan_stop_event: threading.Event = threading.Event()
+
+
+def _idle_scan_loop():
+    """后台扫描线程：定期停止闲置 worker。"""
+    while _idle_scan_running:
+        try:
+            # 拷贝 runner 列表（避免长时间持锁）
+            with _runners_lock:
+                runners = list(_runners.values())
+            stopped_count = 0
+            for r in runners:
+                try:
+                    if r.stop_if_idle(WORKER_IDLE_TIMEOUT):
+                        stopped_count += 1
+                except Exception:  # noqa: BLE001
+                    # 单个 runner 扫描异常不能让线程退出
+                    pass
+            if stopped_count > 0:
+                logger.info(
+                    "script",
+                    f"[auto-reply] 闲置扫描：停止 {stopped_count} 个闲置 worker",
+                    ""
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        # 等待下次扫描（用 Event.wait 实现可中断的 sleep，stop_all 时立即唤醒）
+        _idle_scan_stop_event.wait(_IDLE_SCAN_INTERVAL)
+
+
+def _ensure_idle_scan_started():
+    """启动后台扫描线程（懒启动，首次创建 runner 时触发）。"""
+    global _idle_scan_running, _idle_scan_thread
+    if _idle_scan_running and _idle_scan_thread is not None:
+        return
+    _idle_scan_running = True
+    _idle_scan_thread = threading.Thread(
+        target=_idle_scan_loop, daemon=True, name="script-idle-scan")
+    _idle_scan_thread.start()
 
 
 def get_runner_error(rule_id: str) -> Optional[str]:

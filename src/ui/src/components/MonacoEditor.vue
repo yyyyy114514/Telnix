@@ -141,6 +141,8 @@ watch(() => props.readOnly, (newVal) => {
 
 // ---------- 放大编辑器 ----------
 const bigVisible = ref(false)
+// 放大时是否显示 test-panel 插槽（由父组件传入插槽时自动启用）
+const bigShowTestPanel = ref(true)
 function openBigEditor() {
   bigVisible.value = true
 }
@@ -165,11 +167,16 @@ function openBigEditor() {
     ></div>
     <BigMonacoEditor
       v-model="bigVisible"
+      v-model:show-test-panel="bigShowTestPanel"
       :title="expandTitle || 'Python 脚本编辑'"
       :text="modelValue || ''"
       :language="language || 'python'"
       @update:text="(v: string) => emit('update:modelValue', v)"
-    />
+    >
+      <template v-if="$slots['test-panel']" #test-panel>
+        <slot name="test-panel"></slot>
+      </template>
+    </BigMonacoEditor>
   </div>
 </template>
 

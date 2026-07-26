@@ -10,17 +10,20 @@ setupMonaco()
 /**
  * BigMonacoEditor：放大版 Monaco 编辑器（全屏对话框）
  *
- * Monaco 通过 @guolao/vue-monaco-editor 的 loader 从 CDN 加载，不参与 Vite 构建。
+ * 支持可选 #test-panel 插槽，展开时左右分栏（编辑器 70% + 测试面板 30%）。
  */
 const props = defineProps<{
   modelValue: boolean
   title?: string
   text: string
   language?: string // 默认 'python'
+  /** 是否显示测试面板插槽 */
+  showTestPanel?: boolean
 }>()
 const emit = defineEmits<{
   'update:modelValue': [boolean]
   'update:text': [string]
+  'update:showTestPanel': [boolean]
   'save': []
 }>()
 
@@ -180,11 +183,25 @@ function formatDoc() {
         <div class="bm-actions">
           <span class="bm-lang text-dim">{{ language || 'python' }}</span>
           <el-button size="small" @click="formatDoc">格式化</el-button>
+          <el-button
+            v-if="$slots['test-panel']"
+            size="small"
+            :type="showTestPanel ? 'success' : 'primary'"
+            plain
+            @click="$emit('update:showTestPanel', !showTestPanel)"
+          >
+            {{ showTestPanel ? '收起测试' : '展开测试' }}
+          </el-button>
           <span class="bm-hint text-dim">Esc 关闭</span>
         </div>
       </div>
     </template>
-    <div ref="editorHost" class="bm-editor-host"></div>
+    <div class="bm-body" :class="{ 'with-test': showTestPanel && $slots['test-panel'] }">
+      <div ref="editorHost" class="bm-editor-host"></div>
+      <div v-if="showTestPanel && $slots['test-panel']" class="bm-test-panel">
+        <slot name="test-panel"></slot>
+      </div>
+    </div>
   </el-dialog>
 </template>
 
@@ -216,10 +233,53 @@ function formatDoc() {
   font-size: 11px;
 }
 .bm-editor-host {
-  height: calc(100vh - 120px);
+  height: 100%;
   width: 100%;
+  min-height: 0;  /* flex 子项允许收缩 */
   border: 1px solid var(--on-border-light, #333);
   border-radius: 4px;
   overflow: hidden;
+}
+
+/* 全屏 dialog body 去掉 padding，让 bm-body 撑满 */
+.big-monaco-dialog :deep(.el-dialog__body) {
+  padding: 0;
+}
+/* 带 test-panel 时左右分栏：70% 编辑器 + 30% 测试面板 */
+.bm-body {
+  display: block;
+  height: calc(100vh - 55px);  /* 减去 header 高度 */
+  overflow: hidden;  /* 整体页面不滚动 */
+  padding: 10px;
+  box-sizing: border-box;
+}
+.bm-body.with-test {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;  /* 两侧等高，撑满 bm-body 高度 */
+}
+.bm-body.with-test .bm-editor-host {
+  flex: 0 0 68%;
+  min-width: 0;
+}
+.bm-test-panel {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--on-border, #333);
+  border-radius: 6px;
+  background: var(--on-bg-elevated, var(--on-bg, #fff));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;  /* flex 子项允许收缩，让内部可滚动 */
+}
+.bm-test-panel :deep(.test-panel-header) {
+  flex: 0 0 auto;
+}
+/* 全屏模式下：测试面板内容超出时只滚动 body 内部，编辑器固定不滚动 */
+.bm-test-panel :deep(.test-panel-body) {
+  flex: 1;
+  overflow-y: auto !important;
+  min-height: 0;
 }
 </style>

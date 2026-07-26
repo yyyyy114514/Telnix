@@ -1,5 +1,8 @@
 """自动回复规则 CRUD API。"""
 
+import base64
+import time
+import traceback
 import uuid
 from datetime import datetime
 
@@ -489,3 +492,306 @@ async def delete_rule(rule_id: str):
     except Exception:  # noqa: BLE001
         pass
     return ok({"deleted": True})
+
+
+@router.get("/auto-reply/rules/{rule_id}/script-error")
+async def get_script_error(rule_id: str):
+    """查询脚本规则最近一次错误（语法错误 / 运行异常 / 超时）。
+
+    仅对 action=script 的规则有意义；其他规则返回 error=None。
+    """
+    try:
+        from ..auto_reply.script_runner import get_runner_error
+        err_msg = get_runner_error(rule_id)
+    except Exception as e:  # noqa: BLE001
+        err_msg = f"查询错误失败: {e}"
+    return ok({"error": err_msg})
+
+
+# ---------- 脚本测试 ----------
+
+
+class MockRequest(BaseModel):
+    """测试用模拟请求。"""
+    host: str = "api.example.com"
+    path: str = "/v1/user"
+    method: str = "GET"
+    scheme: str = "https"
+    http_version: str = "HTTP/1.1"
+    headers: dict = {}
+    body: str = ""
+
+
+class MockResponse(BaseModel):
+    """测试用模拟响应（可选，用于测试 on_response 钩子）。"""
+    status_code: int = 200
+    headers: dict = {}
+    body: str = ""
+
+
+class TestScriptReq(BaseModel):
+    """测试脚本请求体。"""
+    script: str
+    mock_request: MockRequest = MockRequest()
+    mock_response: MockResponse | None = None
+
+
+def _decode_body(b: bytes) -> str:
+    """尝试解码 body 为字符串（前端展示用）。"""
+    if not b:
+        return ""
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"<binary {len(b)} bytes>"
+
+
+def _b64decode_safe(s: str) -> bytes:
+    if not s:
+        return b""
+    try:
+        return base64.b64decode(s)
+    except Exception:  # noqa: BLE001
+        return b""
+
+
+def _parse_request_phase(resp: dict | None, mock_req: MockRequest) -> dict:
+    """解析 on_request 阶段结果，构造前端可读结构。"""
+    orig_headers = {k: str(v) for k, v in (mock_req.headers or {}).items()}
+    orig_body = (mock_req.body or "").encode("utf-8")
+
+    if resp is None:
+        return {
+            "available": False,
+            "action": "continue",
+            "modified": False,
+            "headers": orig_headers,
+            "body": mock_req.body or "",
+            "mock_status": None,
+            "mock_headers": None,
+            "mock_body": "",
+            "error": None,
+            "traceback": "",
+        }
+
+    action = resp.get("action", "continue")
+    modified_headers = orig_headers
+    if resp.get("request_headers"):
+        modified_headers = {k: str(v) for k, v in resp["request_headers"].items()}
+    modified_body = orig_body
+    if resp.get("request_body_b64"):
+        modified_body = _b64decode_safe(resp["request_body_b64"])
+
+    modified = (
+        resp.get("request_headers") is not None
+        or resp.get("request_body_b64") is not None
+    )
+    return {
+        "available": True,
+        "action": action,
+        "modified": modified,
+        "headers": modified_headers,
+        "body": _decode_body(modified_body),
+        "mock_status": resp.get("mock_status"),
+        "mock_headers": resp.get("mock_headers"),
+        "mock_body": _decode_body(_b64decode_safe(resp.get("mock_body_b64") or "")),
+        "error": resp.get("error"),
+        "traceback": resp.get("traceback", ""),
+    }
+
+
+def _parse_response_phase(resp: dict | None, mock_resp: MockResponse) -> dict:
+    """解析 on_response 阶段结果。"""
+    orig_headers = {k: str(v) for k, v in (mock_resp.headers or {}).items()}
+    orig_body = (mock_resp.body or "").encode("utf-8")
+    orig_status = int(mock_resp.status_code or 200)
+
+    if resp is None:
+        return {
+            "available": False,
+            "action": "continue",
+            "modified": False,
+            "status_code": orig_status,
+            "headers": orig_headers,
+            "body": mock_resp.body or "",
+            "error": None,
+            "traceback": "",
+        }
+
+    action = resp.get("action", "continue")
+    modified_headers = orig_headers
+    if resp.get("response_headers"):
+        modified_headers = {k: str(v) for k, v in resp["response_headers"].items()}
+    modified_body = orig_body
+    if resp.get("response_body_b64"):
+        modified_body = _b64decode_safe(resp["response_body_b64"])
+    modified_status = orig_status
+    if resp.get("status_code") is not None:
+        modified_status = int(resp["status_code"])
+
+    modified = (
+        resp.get("response_headers") is not None
+        or resp.get("response_body_b64") is not None
+        or resp.get("status_code") is not None
+    )
+    return {
+        "available": True,
+        "action": action,
+        "modified": modified,
+        "status_code": modified_status,
+        "headers": modified_headers,
+        "body": _decode_body(modified_body),
+        "error": resp.get("error"),
+        "traceback": resp.get("traceback", ""),
+    }
+
+
+@router.post("/auto-reply/test-script")
+async def test_script(body: dict):
+    """测试 Python 脚本执行（不发起真实请求）。
+
+    请求体：
+        {
+            "script": "def on_request(ctx): ...",
+            "mock_request": {host, path, method, scheme, http_version, headers, body},
+            "mock_response": {status_code, headers, body}  # 可选
+            "mode": "request" | "response" | "both"  # 默认 "both"
+        }
+
+    mode 说明：
+        - "request"  : 只调用 on_request（忽略 mock_response）
+        - "response" : 只调用 on_response（需要 mock_response，跳过 on_request 修改）
+        - "both"     : on_request + on_response（默认）
+
+    返回：
+        {
+            "ok": true/false,
+            "duration_ms": int,
+            "error": str | null,
+            "traceback": str | null,
+            "request_phase": {...} | null,
+            "response_phase": {...} | null
+        }
+
+    安全：脚本在独立 worker 子进程运行（与生产环境一致），单次调用 5s 超时，
+    所有异常被捕获，不会让后端崩溃。
+    """
+    from ..auto_reply.script_runner import ScriptRunner, build_ctx, _b64encode
+
+    script = body.get("script", "") or ""
+    if not script.strip():
+        return err("脚本内容为空")
+
+    mode = (body.get("mode") or "both").lower()
+    if mode not in ("request", "response", "both"):
+        return err(f"mode 必须为 request/response/both，收到: {mode}")
+
+    mr_raw = body.get("mock_request") or {}
+    try:
+        mock_req = MockRequest(**mr_raw)
+    except Exception as e:  # noqa: BLE001
+        return err(f"mock_request 参数无效: {e}")
+
+    mock_resp_raw = body.get("mock_response")
+    mock_resp: MockResponse | None = None
+    if mock_resp_raw is not None:
+        try:
+            mock_resp = MockResponse(**mock_resp_raw)
+        except Exception as e:  # noqa: BLE001
+            return err(f"mock_response 参数无效: {e}")
+
+    # 模式校验：response/both 模式必须有 mock_response
+    if mode in ("response", "both") and mock_resp is None:
+        return err(f"mode={mode} 需要提供 mock_response")
+
+    # 构造请求 ctx（与生产 build_ctx 完全一致）
+    req_body_bytes = (mock_req.body or "").encode("utf-8")
+    url = f"{mock_req.scheme}://{mock_req.host}{mock_req.path}"
+    ctx_req = build_ctx(
+        host=mock_req.host,
+        path=mock_req.path,
+        method=mock_req.method.upper(),
+        url=url,
+        scheme=mock_req.scheme,
+        pid=None,
+        process_name="",
+        session_id=None,
+        request_headers={k: str(v) for k, v in (mock_req.headers or {}).items()},
+        request_body=req_body_bytes,
+    )
+
+    # 临时 runner（不放入全局注册表，避免污染生产规则状态）
+    test_id = f"__test_{uuid.uuid4().hex[:8]}"
+    runner = ScriptRunner(test_id, script)
+    start = time.time()
+
+    try:
+        # 阶段 1：on_request（"response" 模式跳过）
+        req_resp = None
+        if mode in ("request", "both"):
+            req_resp = runner.run_request(ctx_req)
+
+        # 阶段 2：on_response（"request" 模式跳过）
+        resp_resp = None
+        if mode in ("response", "both") and mock_resp is not None:
+            ctx_resp = dict(ctx_req)
+            ctx_resp["status_code"] = int(mock_resp.status_code or 200)
+            ctx_resp["response_headers"] = {
+                k: str(v) for k, v in (mock_resp.headers or {}).items()
+            }
+            resp_body_bytes = (mock_resp.body or "").encode("utf-8")
+            ctx_resp["response_body_b64"] = _b64encode(resp_body_bytes)
+            resp_resp = runner.run_response(ctx_resp)
+
+        duration_ms = int((time.time() - start) * 1000)
+
+        # worker 启动失败 / 调用失败：run_request 返回 None
+        last_error = runner.get_last_error()
+        if req_resp is None and mode != "response":
+            return ok({
+                "ok": False,
+                "duration_ms": duration_ms,
+                "error": last_error or "脚本执行失败（worker 未启动或调用超时）",
+                "traceback": "",
+                "request_phase": None,
+                "response_phase": None,
+            })
+
+        req_phase = _parse_request_phase(req_resp, mock_req) if req_resp is not None else None
+        resp_phase = None
+        if mock_resp is not None and resp_resp is not None:
+            resp_phase = _parse_response_phase(resp_resp, mock_resp)
+
+        # 收集阶段内的运行时错误（脚本异常被 worker 捕获，action=continue + error 字段）
+        phase_error = None
+        phase_traceback = ""
+        if req_phase and req_phase.get("error"):
+            phase_error = f"on_request: {req_phase['error']}"
+            phase_traceback = req_phase.get("traceback", "")
+        elif resp_phase and resp_phase.get("error"):
+            phase_error = f"on_response: {resp_phase['error']}"
+            phase_traceback = resp_phase.get("traceback", "")
+
+        return ok({
+            "ok": phase_error is None,
+            "duration_ms": duration_ms,
+            "error": phase_error,
+            "traceback": phase_traceback,
+            "request_phase": req_phase,
+            "response_phase": resp_phase,
+        })
+    except Exception as e:  # noqa: BLE001
+        # 兜底：任何未预期异常都返回错误，不让后端崩溃
+        return ok({
+            "ok": False,
+            "duration_ms": int((time.time() - start) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+            "request_phase": None,
+            "response_phase": None,
+        })
+    finally:
+        try:
+            runner.stop()
+        except Exception:  # noqa: BLE001
+            pass
