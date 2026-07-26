@@ -2,26 +2,75 @@
 
 > 本文档面向 **AI agent**。读完即可用 CLI 或 HTTP API 控制 Telnix 抓包、改包、重放、发包。
 
-Telnix 是 Windows 上的 HTTP/HTTPS 抓包工具（类似 Fiddler/Charles），支持 SSL bump 解密 HTTPS、自动回复（改字段/mock 响应）、断点、重放、发包（Composer）、导出。提供 **CLI**（给 agent 主用）和 **HTTP API**（CLI 的底层，复杂场景兜底）。
+Telnix 是跨平台 HTTP/HTTPS 抓包工具（类似 Fiddler/Charles），支持 SSL bump 解密 HTTPS、自动回复（改字段/mock 响应）、断点、重放、发包（Composer）、导出。提供 **CLI**（给 agent 主用）和 **HTTP API**（CLI 的底层，复杂场景兜底）。
+
+> **平台支持**：Windows 完整支持；macOS / Linux 上 HTTP/HTTPS 抓包、SSL bump、自动修改、断点、重放、发包、AI 分析、规则、会话管理、MCP/CLI 全部可用。**仅 WinDivert 相关功能（TCP/UDP 抓包、透明代理、DNS 劫持）、winreg 相关功能（系统代理自动配置）、UAC 提权（`system restart-as-admin`）仅 Windows 可用**，在 mac/linux 上调用会返回结构化错误（`{"ok": false, "error": "...", "hint": "..."}`），agent 按提示引导用户手动操作即可。详见 [§平台支持矩阵](#平台支持矩阵)。
+
+---
+
+## 平台支持矩阵
+
+> 标记：✅ 全平台 / ⚠️ 部分平台 / ❌ 仅 Windows
+
+| 命令分类 | CLI 命令 | Windows | macOS | Linux | 备注 |
+|---|---| :---: | :---: | :---: | --- |
+| 抓包控制 | `capture start/stop/clear/pause/resume` | ✅ | ✅ | ✅ | HTTP/HTTPS 核心功能 |
+| 流量查询 | `packets list/list-all/get/search/stats/endpoints/timeline/trace/analyze/watch/export/tag/diff/delete` | ✅ | ✅ | ✅ | |
+| 拦截规则 | `intercept add/list/del/hits/toggle/update/export/import/template-*` | ✅ | ✅ | ✅ | |
+| 重放/发包 | `replay` / `send` / `replay-batch` | ✅ | ✅ | ✅ | |
+| 导出 | `export` | ✅ | ✅ | ✅ | |
+| 断点 | `breakpoint status/on/off/release/timeout` | ✅ | ✅ | ✅ | |
+| 专注模式 | `focus status/on/off` | ✅ | ✅ | ✅ | PID 反查用 psutil 替代 GetExtendedTcpTable |
+| 进程管理 | `processes list/ignore/unignore/ignore-host/...` | ✅ | ✅ | ✅ | |
+| 会话管理 | `sessions list/show/switch/delete/create` | ✅ | ✅ | ✅ | |
+| 日志 | `log tail/clear/export` | ✅ | ✅ | ✅ | |
+| 设置 | `settings get/set/engine` | ✅ | ✅ | ✅ | |
+| 系统控制-通用 | `system restart/quit` | ✅ | ✅ | ✅ | mac/linux 用 subprocess 重启（无 UAC） |
+| 可选依赖 | `system install-dep/install-dep-status` | ✅ | ✅ | ✅ | pip install mitmproxy |
+| Agent 工作区 | `agent start/end/status` | ✅ | ✅ | ✅ | |
+| 自动修改规则 | `auto-reply list/get/create/enable/disable/delete` | ✅ | ✅ | ✅ | |
+| **证书管理** | `cert status` | ✅ | ✅ | ✅ | |
+| **证书管理** | `cert install/remove` | ✅ | ✅ | ⚠️ | macOS 用 `security add-trusted-cert`；Linux 需手动 `update-ca-certificates` |
+| **系统代理** | `proxy status` | ✅ | ⚠️ | ⚠️ | mac/linux 恒返回 `system_proxy_on=false`（用户手动配置） |
+| **系统代理** | `proxy on/off` | ✅ | ❌ | ❌ | winreg 是 Windows 专属；mac/linux 手动配置浏览器/系统代理为 `127.0.0.1:8888` |
+| **TCP/UDP 抓包** | `raw status/install/start/stop` | ✅ | ❌ | ❌ | WinDivert 是 Windows 内核驱动；mac/linux 用 Wireshark 抓非 HTTP 协议 |
+| **透明代理** | `transparent-proxy status/start/stop` | ✅ | ❌ | ❌ | WinDivert NETWORK 层重定向，仅 Windows + 管理员；`status` 在 mac/linux 返回 `supported=false` |
+| **DNS 劫持** | HTTP API `/dns-hijack/*`（无 CLI 命令） | ✅ | ❌ | ❌ | WinDivert 拦截 UDP 53，仅 Windows + 管理员；mac/linux 用 `/etc/hosts` 或 dnsmasq |
+| **管理员重启** | `system restart-as-admin` | ✅ | ❌ | ❌ | UAC 是 Windows 专属；mac/linux 用 `sudo ./start.sh` 替代 |
+
+> **总结**：CLI 命令中绝大多数（抓包/查询/拦截/重放/断点/专注/进程/会话/日志/设置/agent/自动修改）全平台可用，仅 WinDivert 相关（raw / transparent-proxy / dns-hijack）、winreg 相关（proxy on/off）、UAC（system restart-as-admin）三个类别共约 10 个命令仅 Windows 可用。Agent 编排时若调用 Windows 专属命令，会收到 stderr 输出 `{"ok": false, "error": "...", "hint": "..."}` + 退出码 1，按 `hint` 字段提示用户手动操作即可。
+
+### macOS / Linux 上的替代方案
+
+| 想做的事 | Windows 命令（不可用） | mac/linux 替代 |
+|---|---|---|
+| 开启系统代理 | `proxy on` | 手动配置浏览器/系统代理为 `127.0.0.1:8888`（mac：系统偏好设置→网络→代理；Linux GNOME：设置→网络→网络代理→手动） |
+| 以管理员身份运行 | `system restart-as-admin` | `sudo ./start.sh`（先 `pip install -e .` 装好依赖，或用 `./scripts/install-deps-linux.sh` / `install-deps-mac.sh`） |
+| 抓 TCP/UDP/非 HTTP 协议 | `raw start` | Wireshark（mac/linux 原生支持） |
+| 抓无代理感知应用的流量 | `transparent-proxy start` | 在浏览器/系统层手动配代理，或用 `iptables`(Linux) / `pf`(macOS) 做端口重定向 |
+| DNS 劫持 | `dns-hijack start` | 修改 `/etc/hosts`（sudo）或用 dnsmasq |
+| 安装 HTTPS 根证书 | `cert install` | macOS：`security add-trusted-cert`；Linux：`sudo trust anchor <cert>` 或 `sudo cp cert.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates` |
 
 ---
 
 ## 启动参数（agent 必读）
 
-后端启动命令 `python -m Telnix`（工作目录 `src\host`），支持以下参数：
+后端启动命令 `python -m telnix`（工作目录 `src\host`），支持以下参数：
 
 | 参数 | 说明 |
 |---|---|
-| `--no-browser` | 不自动打开浏览器，agent 自动化场景必用（避免干扰用户）。等价环境变量 `Telnix_NO_BROWSER=1` |
+| `--no-browser` | 不自动打开浏览器，agent 自动化场景必用（避免干扰用户）。等价环境变量 `TELNIX_NO_BROWSER=1` |
 | `--help` | 查看帮助 |
 
 ```bash
 # agent 启动后端，不开浏览器
-python -m Telnix --no-browser
+python -m telnix --no-browser
 
 # 或用环境变量
-Telnix_NO_BROWSER=1 python -m Telnix
+TELNIX_NO_BROWSER=1 python -m telnix
 ```
+
+> **macOS / Linux 启动**：用 `python3 -m telnix`（注意 `python3` 而非 `python`），或用项目根目录的 `./start.sh` 一键脚本（等价于 Windows 的 `run.ps1`）。详见 [README.md 的 macOS / Linux 安装与运行章节](README.md)。
 
 **用户设置存储**：用户设置（GUI 偏好、列顺序、导航顺序、主题、缓存阈值等）存在 `<data_dir>/settings.json`（原子写入 + 线程锁），不再用 SQLite。首次启动若 JSON 不存在但 SQLite 有数据会自动迁移。用户可在 GUI 设置页点「打开设置文件」用记事本直接编辑。
 
@@ -68,6 +117,7 @@ Telnix_NO_BROWSER=1 python -m Telnix
 | 安装可选依赖（mitmproxy） | `system install-dep` + `system install-dep-status` 轮询 | [§3.21.1](#3211-system-install-dep--在线安装可选依赖如-mitmproxy) |
 | 查看设置 / 写入设置 | `settings get [-k KEY]` / `settings set -k KEY -v VALUE` | [§3.21.2](#3212-settings--设置管理get--set--engine) |
 | 切换代理引擎 | `settings engine [builtin\|async\|mitmproxy]` + `system restart` | [§3.21.2](#3212-settings--设置管理get--set--engine) |
+| WinDivert 风险提示查询/确认 | `system windivert-warning-status` / `system windivert-warning-ack` | [§3.21.3](#3213-system-windivert-warning--windivert-风险提示查询确认) |
 | 从零发包（Composer） | `send --url ... --method ...` | [§3.22](#322-send--从零发包composer) |
 | 接管会话前清场（保留原状，事后询问用户是否退出） | `agent start` / `agent end` | [§3.23](#323-agent--agent-工作模式保留原状end-不关代理不退出) |
 | 批量导入规则 | `intercept import rules.json` | [§3.14](#314-intercept-exportimport--拦截规则导入导出) |
@@ -665,25 +715,39 @@ python -m telnix.cli export \
   - 不指定 `-o` 输出到 stdout 时，Windows 仍用 Unix 管道（需 bash 环境，如 Git Bash/WSL），此时会打 stderr 警告提示"二进制 body 用管道需 bash 环境，Windows 建议用 -o 指定文件"。
 - **`packets export`（单 flow 导出，§3.3）同理**：`packets export 42 --format curl -o req.sh` 在 Windows 上若 body 是二进制，会额外生成 `req_body.bin`，规则同上。
 
-### 3.7 `proxy` — 系统代理开关
+### 3.7 `proxy` — 系统代理开关 ❌ 仅 Windows（on/off）
+
+> **平台支持**：`proxy status` 全平台（mac/linux 恒返回 `system_proxy_on=false`）；`proxy on/off` **仅 Windows**（写注册表，mac/linux 调用返回"不支持"错误）。mac/linux 需手动配置浏览器/系统代理为 `127.0.0.1:8888`。
 
 ```bash
-python -m telnix.cli proxy status   # 查状态
-python -m telnix.cli proxy on       # 开系统代理（让所有软件走 Telnix）
-python -m telnix.cli proxy off      # 关系统代理（不影响规则，规则走 SSL bump 仍生效）
+python -m telnix.cli proxy status   # 查状态（mac/linux 恒返回 false）
+python -m telnix.cli proxy on       # 开系统代理（让所有软件走 Telnix）❌ 仅 Windows
+python -m telnix.cli proxy off      # 关系统代理（不影响规则，规则走 SSL bump 仍生效）❌ 仅 Windows
 ```
 
 输出：`{"system_proxy_on": true, "proxy_host": "127.0.0.1", "proxy_port": 8888}`
 
 ### 3.8 `cert` — 证书管理
 
+> **平台支持**：`cert status` 全平台；`cert install/remove` 在 Windows/macOS 可用（macOS 用 `security add-trusted-cert`，安装时会弹窗要求密码授权），**Linux 需手动安装**（不同发行版命令不同，详见 [README.md 平台支持矩阵](README.md)）。
+
 ```bash
 python -m telnix.cli cert status    # {"installed": true}
-python -m telnix.cli cert install   # 装根证书到系统信任库（首次必做）
-python -m telnix.cli cert remove    # 从系统信任库卸载根证书
+python -m telnix.cli cert install   # 装根证书到系统信任库（首次必做）✅ Win/mac ⚠️ Linux 需手动
+python -m telnix.cli cert remove    # 从系统信任库卸载根证书 ✅ Win/mac ⚠️ Linux 需手动
 ```
 
 **HTTPS 解密前置条件**：`cert_installed=true`。没装证书的话，HTTPS 流量只能看到 CONNECT 但解不开 payload，拦截规则也不会生效。`remove` 用于卸载证书（如换机器或不再使用 Telnix 时清理）。
+
+> **Linux 手动安装证书**：
+> ```bash
+> # Debian / Ubuntu
+> sudo cp <data_dir>/certs/telnix_root.crt /usr/local/share/ca-certificates/telnix_root.crt
+> sudo update-ca-certificates
+> # RHEL / CentOS
+> sudo trust anchor <data_dir>/certs/telnix_root.crt
+> ```
+> `<data_dir>` 默认是 `~/.telnix`，可用 `python3 -c "from telnix.config import get_cert_dir; print(get_cert_dir())"` 查询。
 
 ### 3.9 `log` — 日志
 
@@ -708,25 +772,27 @@ python -m telnix.cli log export --keyword "证书"    # 不指定 -o 则输出�
 - `log clear`：清空所有日志。
 - `log export`：导出日志为 JSONL 格式（每行一个 JSON 对象）。支持 `--level`/`--category`/`--keyword` 过滤。`-o` 指定文件路径，不指定则输出到 stdout。
 
-### 3.10 `raw` — TCP/UDP 原始抓包（WinDivert）
+### 3.10 `raw` — TCP/UDP 原始抓包（WinDivert）❌ 仅 Windows
 
-网络层抓包，独立于 HTTP 代理。能抓非 HTTP 协议（Steam P2P、protobuf、自定义 TCP 协议等）。**需管理员权限 + pydivert 驱动**。
+> **平台支持**：**仅 Windows**。WinDivert 是 Windows 内核驱动，macOS / Linux 无等价物。mac/linux 上 `raw status` 返回 `is_admin=false`、`pydivert_installed=false`；`raw install/start/stop` 调用会返回"仅 Windows 支持"错误。如需在 mac/linux 抓非 HTTP 协议（Steam P2P、protobuf、自定义 TCP 协议等），请使用 **Wireshark**（mac/linux 原生支持）。
+
+网络层抓包，独立于 HTTP 代理。能抓非 HTTP 协议（Steam P2P、protobuf、自定义 TCP 协议等）。**需 Windows + 管理员权限 + pydivert 驱动**。
 
 ```bash
-# 查状态（管理员？pydivert 装了？在跑？）
+# 查状态（管理员？pydivert 装了？在跑？）❌ mac/linux 恒返回 false
 python -m telnix.cli raw status
 # {"running": false, "is_admin": true, "pydivert_installed": false, "hint": "运行: python -m telnix.cli raw install"}
 
-# 一键安装 pydivert（调后端 pip install，驱动 WinDivert64.sys 随包附带）
+# 一键安装 pydivert（调后端 pip install，驱动 WinDivert64.sys 随包附带）❌ 仅 Windows
 python -m telnix.cli raw install
 # {"installed": true, "output": "Successfully installed pydivert..."}
 
-# 启动（需先 capture start 拿到 session_id）
+# 启动（需先 capture start 拿到 session_id）❌ 仅 Windows
 python -m telnix.cli capture start
 python -m telnix.cli raw start [--pid 1234] [--port 443] [--filter 'tcp or udp']
 # {"running": true}
 
-# 停止
+# 停止 ❌ 仅 Windows
 python -m telnix.cli raw stop
 # {"running": false}
 ```
@@ -741,6 +807,8 @@ python -m telnix.cli raw stop
 - **SNIFF 模式不断网**：`raw_capture.py:84` 用 `WINDIVERT_FLAG_SNIFF`（只嗅探不拦截），包正常流转。默认 filter 排除 8888/18901 端口和环回地址，抓本地服务要自定义 `--bpf`。
 
 **首次使用提示**：`pydivert_installed=false` 时直接 `raw install`。WinDivert64.sys 驱动由 pydivert 自带，首次运行会自动加载。
+
+**WinDivert 风险提示（首次启用未确认时拦截）**：`raw start` 入口会先调 `check_windivert_ack_or_block()` 检查 `settings.json` 的 `windivert_warning_acknowledged`，未确认时返回 `403 + need_ack=true`，CLI 自动走原生弹窗流程（见 [§3.21.3](#3213-system-windivert-warning--windivert-风险提示查询确认)），用户选「是」后立即 ack=1 并自动重试 `raw start`；选「否」则 CLI stderr 输出 `{"ok": false, "rejected_by_user": true, ...}` + 退出码 1。已确认后所有 WinDivert 相关端点直接放行不再弹窗。重置为未确认：`settings set -k windivert_warning_acknowledged -v 0`。
 
 ### 3.11 `focus` — 专注模式（只抓指定进程/host，跨类 OR 匹配）
 
@@ -1183,24 +1251,27 @@ curl -X POST http://127.0.0.1:18901/api/import \
 
 ### 3.21 `system` — 系统控制（重启 / 退出 / 管理员重启）
 
+> **平台支持**：`system restart/quit/install-dep/install-dep-status` 全平台（mac/linux 用 subprocess 重启，无 UAC）；**`system restart-as-admin` 仅 Windows**（UAC 是 Windows 专属机制），mac/linux 调用返回"仅 Windows 支持"错误，请用 `sudo ./start.sh` 替代。
+
 ```bash
-# 重启前后端服务（同进程内 os.execv 重启，继承同一控制台）
+# 重启前后端服务（Windows 用 ShellExecuteW，mac/linux 用 subprocess.Popen）✅ 全平台
 python -m telnix.cli system restart
 # {"restarting": true}
 
-# 退出 Telnix（关闭前后端 + 清系统代理）
+# 退出 Telnix（关闭前后端 + 清系统代理，mac/linux 无代理可清）✅ 全平台
 python -m telnix.cli system quit
 # {"quitting": true}
 
-# 以管理员身份重启（GUI 用户确认 + UAC 提权，用于 TCP/UDP 抓包等需管理员的功能）
+# 以管理员身份重启（GUI 用户确认 + UAC 提权，用于 TCP/UDP 抓包等需管理员的功能）❌ 仅 Windows
 python -m telnix.cli system restart-as-admin
 # 用户同意：{"restarting": true, "as_admin": true, "approved": true, "message": "用户已批准..."}
 # 用户拒绝：stderr 输出 {"ok": false, "error": "...", "rejected_by_user": true, ...}，退出码 1
+# mac/linux 调用：stderr 输出 {"ok": false, "error": "restart-as-admin 仅 Windows 支持（UAC 提权），macOS/Linux 请用 sudo 手动以 root 身份运行 Telnix"}，退出码 1
 ```
 
-- `system restart`：重启前后端。用于修改后端代码或配置后生效，或后端异常时恢复。重启前会自动关闭系统代理。重启后保留原启动参数（如 `--no-browser`）。
-- `system quit`：完全退出 Telnix。清系统代理 + 关闭服务。agent 收尾时用。
-- `system restart-as-admin`：**以管理员身份重启，走 GUI 用户确认流程**：
+- `system restart`：重启前后端。用于修改后端代码或配置后生效，或后端异常时恢复。重启前会自动关闭系统代理（mac/linux 无操作）。重启后保留原启动参数（如 `--no-browser`）。**mac/linux 行为差异**：Windows 用 `ShellExecuteW('open')` 启动完全独立的新进程；mac/linux 用 `subprocess.Popen(start_new_session=True)` 脱离父进程会话。
+- `system quit`：完全退出 Telnix。清系统代理（mac/linux 无操作）+ 关闭服务。agent 收尾时用。
+- `system restart-as-admin`：**仅 Windows**，以管理员身份重启，走 GUI 用户确认流程：
   1. CLI 调 `POST /system/request-admin-restart` 创建 pending 请求
   2. 后端立即在桌面弹**原生 Windows 置顶 Yes/No 弹窗**（`MB_TOPMOST | MB_SYSTEMMODAL | MB_SETFOREGROUND`，任务栏图标闪烁，默认聚焦「否」按钮防误按）
   3. 用户点「是」→ 后端调 UAC 提权（ShellExecuteW runas）→ CLI 收到 `{"approved": true, ...}`
@@ -1208,11 +1279,12 @@ python -m telnix.cli system restart-as-admin
   5. CLI 长轮询最多 3 分钟（3 次 × 60s），超时也按拒绝处理
   - 提权时透传原启动参数（`--no-browser` 等），管理员进程行为一致
   - agent 可通过 `rejected_by_user: true` 字段区分"用户主动拒绝"和"超时/错误"
+  - **mac/linux 替代**：`sudo ./start.sh`（先 `pip install -e .` 装好依赖），或 `sudo python3 -m telnix`
 - 底层 API：
-  - `POST /system/restart`、`POST /system/quit`、`POST /system/clear-proxy`、`POST /system/enable-proxy`
-  - `POST /system/restart-as-admin`（兼容旧接口，直接弹 UAC 不经 GUI 确认）
-  - `POST /system/request-admin-restart` + `GET /system/admin-request/{id}/wait` + `POST /system/admin-request/{id}/respond`（新 GUI 确认流程）
-  - `POST /system/install-dep` + `GET /system/install-dep/status` + `POST /system/install-dep/cancel`（可选依赖在线安装）
+  - `POST /system/restart`、`POST /system/quit`、`POST /system/clear-proxy`、`POST /system/enable-proxy`（mac/linux 上 clear/enable-proxy 无操作）
+  - `POST /system/restart-as-admin`（兼容旧接口，直接弹 UAC 不经 GUI 确认；mac/linux 返回错误）
+  - `POST /system/request-admin-restart` + `GET /system/admin-request/{id}/wait` + `POST /system/admin-request/{id}/respond`（新 GUI 确认流程，mac/linux 上 `_show_native_message_box` 退化返回 'yes' 但 `_do_shell_elevate` 仍返回错误）
+  - `POST /system/install-dep` + `GET /system/install-dep/status` + `POST /system/install-dep/cancel`（可选依赖在线安装，全平台 pip install）
 
 #### 3.21.1 `system install-dep` — 在线安装可选依赖（如 mitmproxy）
 
@@ -1296,6 +1368,50 @@ python -m telnix.cli settings engine mitmproxy
   - 指定 NAME → 切换引擎。`mitmproxy` 未安装时返回 `{"ok": false, ...}` + 退出码 1，并给出 `system install-dep` 修复建议
   - **切换后必须 `system restart`** 才能让新引擎加载到当前进程
 - 底层 API：`GET /settings` + `PUT /settings`（任意 key 写入，list/dict 自动 JSON 序列化、bool 转 1/0）
+
+#### 3.21.3 `system windivert-warning` — WinDivert 风险提示查询/确认
+
+> **背景**：WinDivert64.sys 是 Windows 内核驱动，Telnix 用它做 TCP/UDP 抓包 / 透明代理 / DNS 劫持。该驱动常被漏洞利用工具使用，部分杀毒软件（360 / 火绒 / Windows Defender）可能将其作为"漏洞驱动"拦截或报警。**首次启用相关功能前必须让用户知情同意**，确认后写入 `settings.json` 的 `windivert_warning_acknowledged=1` 永久不再提示。
+
+```bash
+# 查询 WinDivert 风险提示状态（needed / ack / message / brief / platform）
+python -m telnix.cli system windivert-warning-status
+# {"needed": true, "ack": false, "platform": "win32",
+#  "message": "即将启用的功能需要加载 WinDivert64.sys 内核驱动...\n是否确认开启？",
+#  "brief": "即将加载 WinDivert64.sys 内核驱动...不会对您的设备带来安全隐患。"}
+# stderr: [Telnix] WinDivert 风险提示状态:
+#         needed = true   # 是否需要提示（仅 Windows + 未确认时为 true）
+#         ack    = false  # 当前是否已确认
+#         platform = win32
+
+# 永久确认（标记 ack=1，后续所有 WinDivert 相关端点直接放行不再弹窗）
+python -m telnix.cli system windivert-warning-ack
+# {"ack": true, "msg": "已确认 WinDivert 风险提示，后续不再提示"}
+# stderr: [Telnix] 已确认 WinDivert 风险提示，后续不再提示
+```
+
+- `system windivert-warning-status`：查询状态。`needed=true` 表示 Windows 平台且未确认，下次 `raw start` / `transparent-proxy start` / `dns-hijack start` 会被拦截。
+- `system windivert-warning-ack`：永久确认（写入 `settings.json`）。**agent 主动场景**慎用——一般应让用户在弹窗里选择，而非 agent 直接调 ack 跳过。
+- **重置为未确认**：`settings set -k windivert_warning_acknowledged -v 0`（下次启用相关功能时再次弹窗）。
+
+**触发流程**（`raw start` / `transparent-proxy start` 自动处理，agent 无需手动调本组子命令）：
+
+1. CLI 调 `POST /raw/start` 等端点 → 后端检测 `windivert_warning_acknowledged != 1` → 返回 `403 + need_ack=true`
+2. CLI 的 `_req_with_windivert_ack` 自动调 `POST /system/request-windivert-ack` 创建 pending 请求 + 弹**原生 Windows 置顶 Yes/No 弹窗**（`MB_TOPMOST | MB_SYSTEMMODAL | MB_SETFOREGROUND`，任务栏图标闪烁，默认聚焦「否」按钮防误按）
+3. 用户点「是」→ 后端立即 ack=1 持久化 → CLI 长轮询 `GET /system/windivert-ack-request/{rid}/wait` 收到 `status=accepted` → 自动重试原请求
+4. 用户点「否」→ CLI 收到 `status=rejected` → stderr 输出 `{"ok": false, "rejected_by_user": true, "error": "用户拒绝了 WinDivert 风险提示", ...}` + 退出码 1
+5. 用户 3 分钟无响应 → CLI stderr 输出 `{"ok": false, "error": "等待用户响应 WinDivert 风险提示超时（3 分钟无响应）", ...}` + 退出码 1，提示「可在 GUI 设置页确认，或请用户在场后重试」
+
+**MCP 等价工具**：`system_windivert_warning_status` / `system_windivert_warning_ack`（参数与返回同 CLI），触发流程由 `_api_with_windivert_ack` 自动处理。
+
+**底层 API**：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/system/windivert-warning` | 查询是否需要提示 + 风险说明文本 + 当前 ack 状态 |
+| POST | `/api/system/windivert-warning/ack` | 标记为已确认（永久不再提示，GUI 用） |
+| POST | `/api/system/request-windivert-ack` | 创建 pending ack 请求 + 弹原生 MessageBox（CLI/MCP 用，非 Windows/已 ack 时返回 `skipped=true`） |
+| GET | `/api/system/windivert-ack-request/{rid}/wait` | 长轮询等待用户响应（60s 超时返回 `status=pending`，CLI/MCP 最多重试 3 次覆盖 3 分钟） |
 
 ### 3.22 `send` — 从零发包（Composer）
 
@@ -1446,6 +1562,132 @@ agent end                ← 恢复原状 + 移除 agent 添加的忽略进程�
 - **关闭 Telnix 的正确方式**：agent 询问用户同意后调 `system quit`，后端退出时 atexit 钩子自动清系统代理，无需 agent 手动清理
 - **忽略进程的语义**：`agent start` 添加的忽略进程只在 `agent end` 时移除；若用户在 agent 工作期间手动调 `proxy ignore --name TRAE SOLO CN.exe` 重复添加，`end` 也会按备份记录的进程名匹配移除（可能误删用户手动加的同名项，建议 agent 工作期间不要重复添加同名进程）
 - **agent 进程改名/换 IDE**：若 agent 改用其他 IDE（如 VSCode），需更新 `cli.py` 中的 `AGENT_IGNORE_PROCESSES` 列表
+
+---
+
+### 3.24 `transparent-proxy` — 透明代理控制（WinDivert NETWORK 层重定向）❌ 仅 Windows
+
+> **平台支持**：**仅 Windows**。WinDivert 是 Windows 内核驱动，mac/linux 无等价物。`transparent-proxy status` 在 mac/linux 返回 `supported=false` + `hint`；`start/stop` 调用返回"透明代理仅 Windows 可用（依赖 WinDivert）"错误。mac/linux 如需抓无代理感知应用的流量，可在浏览器/系统层手动配代理，或用 `iptables`(Linux) / `pf`(macOS) 做端口重定向。
+
+把出站 HTTP(80)/HTTPS(443) 流量在网络层重定向到本地代理端口，**应用无需配置系统代理即可被抓包**。适合抓那些不走系统代理的 Electron 应用、命令行工具、原生 socket 客户端。仅 Windows + 管理员权限 + pydivert 可用；HTTPS 走 raw TCP 隧道（端到端 TLS，不解密），如需解密 HTTPS 仍需配合证书。
+
+与 `proxy on`（系统代理）互补：系统代理处理已配置的客户端，透明代理处理无代理感知的客户端，两者可并存。
+
+```bash
+# 查看状态（running/redirected_count/nat_table_size/last_error/supported）
+# ❌ mac/linux 返回 {"running": false, "supported": false, "hint": "透明代理仅 Windows 可用"}
+python -m telnix.cli transparent-proxy status
+
+# 启动（需 Windows + 管理员 + pydivert）❌ 仅 Windows
+python -m telnix.cli transparent-proxy start
+
+# 停止 ❌ 仅 Windows
+python -m telnix.cli transparent-proxy stop
+```
+
+**返回字段**：
+
+```json
+// status（Windows）
+{"running": false, "supported": true, "redirected_count": 0,
+ "nat_table_size": 0, "last_error": "", "local_port": 8888,
+ "redirect_ports": [80, 443],
+ "hint": "需要管理员权限。请运行: python -m telnix.cli system restart-as-admin"}
+
+// status（macOS / Linux）
+{"running": false, "supported": false, "hint": "透明代理仅 Windows 可用"}
+```
+
+**注意事项**：
+- `start` 失败时 `last_error` 会标明原因；若提示需要管理员权限，先调 `system restart-as-admin` 以管理员身份重启后端
+- 非 Windows 平台 `supported=false`，调 `start` 直接返回错误
+- 透明代理不修改系统注册表（不写 ProxyServer/ProxyEnable），对应用完全透明，难以被探测
+- 用完务必 `stop`，避免 NAT 表残留影响网络
+
+---
+
+### 3.25 `auto-reply` — 自动修改规则管理（list/get/create/enable/disable/delete）
+
+与 `intercept` 互补，专注 **Python 脚本规则**管理。`create` 支持通过 `--script-path` 从本地 .py 文件加载脚本内容（agent 友好，无需内联大段源码），脚本在独立 worker 子进程运行，定义 `on_request(ctx)` / `on_response(ctx)` 实现复杂改包逻辑（动态签名、条件分支、多字段联动）。
+
+```bash
+# 列出所有规则（NDJSON，含命中统计；--json-array 输出 JSON 数组）
+python -m telnix.cli auto-reply list
+python -m telnix.cli auto-reply list --json-array
+
+# 查看规则详情
+python -m telnix.cli auto-reply get <id>
+
+# 创建规则（action=script，从本地 .py 文件加载脚本）
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/v1/*' \
+  --action script \
+  --script-path my_rule.py \
+  --note '动态签名改包'
+
+# 创建规则（action=script，内联源码；与 --script-path 互斥）
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/v1/*' \
+  --action script \
+  --script 'def on_request(ctx): ctx["body"]["sig"]="xxx"; return ctx' \
+  --note '内联脚本'
+
+# 创建规则（非 script 动作，用 --action-spec 复用 intercept add 的语法）
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/login*' \
+  --action mock \
+  --action-spec 'mock 200 {"ok":true}' \
+  --note 'mock 登录响应'
+
+# 创建规则（带过滤条件，避免误命中）
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/v1/*' \
+  --action script \
+  --script-path sign.py \
+  --method-filter POST \
+  --status-filter 200 \
+  --process-filter chrome.exe \
+  --note '只改 chrome 的 POST 200'
+
+# 启用/禁用/删除规则
+python -m telnix.cli auto-reply enable <id>
+python -m telnix.cli auto-reply disable <id>
+python -m telnix.cli auto-reply delete <id>
+```
+
+**`create` 参数**：
+
+| 参数 | 说明 |
+|---|---|
+| `--pattern` | URL 匹配 pattern（必填，如 `*api.example.com/v1/*`） |
+| `--action` | 动作类型（必填）：`script`/`mock`/`modify_response`/`modify_request`/`mock_request` |
+| `--script-path` | `action=script` 时：从本地 .py 文件加载脚本内容（agent 友好，与 `--script` 互斥） |
+| `--script` | `action=script` 时：内联 Python 脚本源码（与 `--script-path` 互斥） |
+| `--action-spec` | 非 script 动作时：动作规范字符串（如 `'set-json key value'` / `'mock 200 {}'`），复用 `intercept add` 语法 |
+| `--match-mode` | 匹配模式 `wildcard`/`exact`/`regex`（默认 `wildcard`） |
+| `--note` | 规则备注 |
+| `--method-filter` | 方法过滤（逗号分隔，如 `POST,PUT`） |
+| `--status-filter` | 状态码过滤（逗号分隔，如 `200,201`） |
+| `--pid-filter` | PID 过滤 |
+| `--process-filter` | 进程名过滤 |
+| `--disabled` | 创建为禁用状态（默认启用） |
+
+**脚本接口约定**：`on_request(ctx)` / `on_response(ctx)` 接收 ctx 字典（含 headers/body/url/method/status 等），返回修改后的 ctx 或 `None`（不修改）。脚本出错时规则自动跳过，不影响代理转发。
+
+**返回字段**：
+
+```json
+// create
+{"created": true, "rule_id": 12, "pattern": "*api.example.com/v1/*", "action": "script"}
+
+// list（每条规则）
+{"id": 12, "rule_id": 12, "pattern": "*api.example.com/v1/*", "action": "script",
+ "enabled": true, "hit_count": 3, "last_hit_at": "...", "last_hit_flow_id": 42, ...}
+```
+
+**与 `intercept` 的区别**：
+- `intercept add` 通用，支持所有动作类型，参数化创建（`--match` 表达式 / `--action` 规范字符串）
+- `auto-reply create` 专注脚本规则，**`--script-path` 从文件加载**是核心差异，方便 agent 把复杂逻辑写到 .py 文件再引用
 
 ---
 
@@ -1872,15 +2114,17 @@ Base URL：`http://127.0.0.1:18901/api`
 
 ### 证书/系统
 
+> **平台支持**：`/cert/*` 全平台（mac 用 `security`，Linux 需手动）；`/system/enable-proxy` / `/system/clear-proxy` **仅 Windows**（写注册表，mac/linux 无操作）；`/system/restart` / `/system/quit` 全平台。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/cert/status` | `{installed: bool}` |
-| POST | `/cert/install` | 装根证书 |
-| POST | `/cert/remove` | 卸载 |
-| POST | `/system/enable-proxy` | 开系统代理 |
-| POST | `/system/clear-proxy` | 关系统代理 |
-| POST | `/system/restart` | 重启后端（os.execv） |
-| POST | `/system/quit` | 退出 Telnix |
+| GET | `/cert/status` | `{installed: bool}` ✅ 全平台 |
+| POST | `/cert/install` | 装根证书（mac 用 `security`，Linux 需手动 `update-ca-certificates`）✅ Win/mac ⚠️ Linux |
+| POST | `/cert/remove` | 卸载 ✅ Win/mac ⚠️ Linux |
+| POST | `/system/enable-proxy` | 开系统代理（写 Windows 注册表）❌ 仅 Windows |
+| POST | `/system/clear-proxy` | 关系统代理（写 Windows 注册表）❌ 仅 Windows |
+| POST | `/system/restart` | 重启后端（Windows 用 ShellExecuteW，mac/linux 用 subprocess）✅ 全平台 |
+| POST | `/system/quit` | 退出 Telnix ✅ 全平台 |
 
 ### 专注模式
 
@@ -1892,17 +2136,31 @@ Base URL：`http://127.0.0.1:18901/api`
 - `process_names` 传入后后端自动用 **psutil** 解析 PID（含子进程，Win11 24H2+ 兼容，不依赖 wmic），返回 `{pids: [...]}`。
 - `hosts`：按 host 通配符专注（`*`→`.*` `?`→`.`，大小写不敏感）。跨类 OR 匹配：pid 和 host 满足任一即记录/拦截，都不满足则放行不记录。见 §3.11。
 
-### TCP/UDP 原始抓包
+### TCP/UDP 原始抓包 ❌ 仅 Windows
+
+> **平台支持**：**仅 Windows**。mac/linux 上 `/raw/status` 返回 `is_admin=false`、`pydivert_installed=false`；`/raw/install-pydivert` / `/raw/start` / `/raw/stop` 调用返回"仅 Windows 支持"错误。mac/linux 抓非 HTTP 协议请用 Wireshark。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/raw/status` | `{running, is_admin, pydivert_installed, filter?, msg?}` |
-| POST | `/raw/install-pydivert` | 用 pip 安装 pydivert（驱动 WinDivert64.sys 随包附带） |
-| POST | `/raw/start` | body: `{pid_filter?, port_filter?, filter_str?}` |
-| POST | `/raw/stop` | 停止 TCP/UDP 抓包 |
+| POST | `/raw/install-pydivert` | 用 pip 安装 pydivert（驱动 WinDivert64.sys 随包附带）❌ 仅 Windows |
+| POST | `/raw/start` | body: `{pid_filter?, port_filter?, filter_str?}` ❌ 仅 Windows |
+| POST | `/raw/stop` | 停止 TCP/UDP 抓包 ❌ 仅 Windows |
 
 - `/raw/status` 字段：`is_admin`（是否管理员）、`pydivert_installed`（pydivert 是否已装）、`running`（是否在抓）。CLI `raw install` 调 `/raw/install-pydivert` 一键安装。
 - SNIFF 模式（`WINDIVERT_FLAG_SNIFF`）：只嗅探不拦截，包正常流转，不断网。
+
+### DNS 劫持 ❌ 仅 Windows（仅 HTTP API，无 CLI 命令）
+
+> **平台支持**：**仅 Windows**。WinDivert 拦截 UDP 53 端口的 DNS 响应包，修改 A 记录指向本地。mac/linux 无等价物，调用返回"当前平台不支持 DNS 劫持（WinDivert 仅 Windows 可用）"错误。mac/linux 替代：修改 `/etc/hosts`（sudo）或用 dnsmasq。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/dns-hijack/status` | `{enabled, running, rules, default_ip, stats, is_admin, is_windows}` |
+| POST | `/dns-hijack/start` | 启动 DNS 劫持（需 Windows + 管理员 + pydivert）❌ 仅 Windows |
+| POST | `/dns-hijack/stop` | 停止 DNS 劫持 ❌ 仅 Windows |
+| PUT | `/dns-hijack/rules` | 更新劫持规则（body: `{rules, default_ip}`） |
+| POST | `/dns-hijack/clear-log` | 清空劫持日志 |
 
 ### 搜索/统计/Hex
 
@@ -1966,23 +2224,26 @@ Base URL：`http://127.0.0.1:18901/api`
 
 ### 系统控制（含管理员重启 GUI 确认流程）
 
+> **平台支持**：`/system/restart` / `/system/quit` 全平台；`/system/clear-proxy` / `/system/enable-proxy` **仅 Windows**（写注册表，mac/linux 无操作）；`/system/restart-as-admin` 及 admin-request 系列流程 **仅 Windows**（UAC 提权），mac/linux 调用返回"仅 Windows 支持"错误。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/system/restart` | 重启后端（os.execv，保留启动参数） |
-| POST | `/system/quit` | 退出 Telnix（清代理+关服务） |
-| POST | `/system/clear-proxy` | 关闭系统代理 |
-| POST | `/system/enable-proxy` | 开启系统代理 |
-| POST | `/system/restart-as-admin` | 兼容旧接口：直接弹 UAC 提权（不经 GUI 确认） |
-| POST | `/system/request-admin-restart` | 创建 pending 管理员重启请求，返回 `{request_id}` |
-| GET | `/system/admin-request/{id}/wait` | 长轮询等待 GUI 用户响应（60s 超时返回 pending） |
-| POST | `/system/admin-request/{id}/respond` | GUI 用户响应，body: `{response: "accept"\|"reject"}` |
-| GET | `/system/pending-admin-actions` | 列出待确认请求（前端轮询用，返回 `{items: [...]}`） |
+| POST | `/system/restart` | 重启后端（Windows 用 ShellExecuteW，mac/linux 用 subprocess，保留启动参数）✅ 全平台 |
+| POST | `/system/quit` | 退出 Telnix（清代理+关服务，mac/linux 仅关服务）✅ 全平台 |
+| POST | `/system/clear-proxy` | 关闭系统代理（写 Windows 注册表）❌ 仅 Windows |
+| POST | `/system/enable-proxy` | 开启系统代理（写 Windows 注册表）❌ 仅 Windows |
+| POST | `/system/restart-as-admin` | 兼容旧接口：直接弹 UAC 提权（不经 GUI 确认）❌ 仅 Windows |
+| POST | `/system/request-admin-restart` | 创建 pending 管理员重启请求，返回 `{request_id}` ❌ 仅 Windows |
+| GET | `/system/admin-request/{id}/wait` | 长轮询等待 GUI 用户响应（60s 超时返回 pending）❌ 仅 Windows |
+| POST | `/system/admin-request/{id}/respond` | GUI 用户响应，body: `{response: "accept"\|"reject"}` ❌ 仅 Windows |
+| GET | `/system/pending-admin-actions` | 列出待确认请求（前端轮询用，返回 `{items: [...]}`）❌ 仅 Windows |
 
 **管理员重启 GUI 确认流程**（[§3.21](#321-system--系统控制重启--退出--管理员重启)）：
 - `POST /system/request-admin-restart` 创建 pending 后，后端立即在桌面弹**原生 Windows 置顶 Yes/No 弹窗**（`MB_TOPMOST | MB_SYSTEMMODAL | MB_SETFOREGROUND`，任务栏闪烁，默认聚焦「否」按钮防误按）
 - 用户点「是」→ 后端调 ShellExecuteW runas 提权 → `GET /admin-request/{id}/wait` 返回 `{status: "accepted"}`
 - 用户点「否」→ `GET /admin-request/{id}/wait` 返回 `{status: "rejected"}`
 - 提权时透传原启动参数（`--no-browser` 等）
+- **mac/linux 行为**：`_show_native_message_box` 在非 Windows 退化返回 'yes'，但 `_do_shell_elevate` 仍返回"仅 Windows 支持"错误，最终 admin-request 流程在 mac/linux 上无法完成提权
 
 ### 设置文件
 
@@ -2060,8 +2321,9 @@ Base URL：`http://127.0.0.1:18901/api`
 52. **agent 启动后端必用 `--no-browser`**：`python -m Telnix --no-browser` 不自动开浏览器，避免干扰用户。等价环境变量 `Telnix_NO_BROWSER=1`。`system restart` 和 `system restart-as-admin` 会透传此参数，重启后行为一致。见顶部「启动参数」。
 53. **`send` 从零发包**：`send --url ... --method ...` 构造任意 HTTP 请求发送，不走代理、不写入 flows 表，适合测试接口/调试 API。支持 `--header`/`--body`/`--body-file`/`--timeout`/`--headers-only`/`--body-only`/`--emit-curl`。见 §3.22。
 54. **管理员重启走 GUI 确认**：`system restart-as-admin` 会在桌面弹**原生 Windows 置顶 Yes/No 弹窗**（任务栏闪烁，默认聚焦「否」按钮防误按），用户同意才 UAC 提权。用户拒绝时 CLI 返回 `{"rejected_by_user": true, ...}` + 退出码 1，agent 可据此区分"用户拒绝"和"超时/错误"。见 §3.21。
-55. **用户设置存 settings.json**：GUI 偏好（列顺序/导航顺序/主题/缓存阈值等）存 `<data_dir>/settings.json`（原子写入 + 线程锁），不再用 SQLite。首次启动自动从 SQLite 迁移。用户可在设置页点「打开设置文件」用记事本直接编辑。
-56. **`agent start/end` 工作模式**：agent 接管会话前调 `agent start`，临时禁用所有自动回复规则 + 关 focus + 关断点 + **把 agent 进程（`TRAE SOLO CN.exe`）加入忽略列表防止抓自己的包**（备份原状到临时文件），做事，收工调 `agent end` 恢复原状 + 移除 agent 添加的忽略进程（保留用户原本的）。**`agent end` 不关代理、不退出 Telnix**（用户可能依赖自动修改规则继续工作）。agent 应在 `end` 后询问用户是否关闭 Telnix，用户同意才调 `system quit`（后端退出时 atexit 自动清代理）。见 §3.23。
+55. **WinDivert 首次启用风险提示**：`raw start` / `transparent-proxy start` / `dns-hijack start` 首次调用时（Windows + 未确认 `windivert_warning_acknowledged`），后端返回 `403 + need_ack=true`，CLI/MCP 自动弹原生置顶 Yes/No 弹窗（同管理员重启弹窗风格），用户选「是」立即 ack=1 持久化 + 自动重试原请求；选「否」CLI 返回 `{"rejected_by_user": true, ...}` + 退出码 1。3 分钟无响应也按拒绝处理。已确认后所有 WinDivert 端点直接放行不再弹窗。**agent 不应直接调 `system windivert-warning-ack` 跳过用户确认**——应让用户在弹窗里选择。见 §3.21.3。
+56. **用户设置存 settings.json**：GUI 偏好（列顺序/导航顺序/主题/缓存阈值等）存 `<data_dir>/settings.json`（原子写入 + 线程锁），不再用 SQLite。首次启动自动从 SQLite 迁移。用户可在设置页点「打开设置文件」用记事本直接编辑。
+57. **`agent start/end` 工作模式**：agent 接管会话前调 `agent start`，临时禁用所有自动回复规则 + 关 focus + 关断点 + **把 agent 进程（`TRAE SOLO CN.exe`）加入忽略列表防止抓自己的包**（备份原状到临时文件），做事，收工调 `agent end` 恢复原状 + 移除 agent 添加的忽略进程（保留用户原本的）。**`agent end` 不关代理、不退出 Telnix**（用户可能依赖自动修改规则继续工作）。agent 应在 `end` 后询问用户是否关闭 Telnix，用户同意才调 `system quit`（后端退出时 atexit 自动清代理）。见 §3.23。
 
 ---
 
@@ -2293,18 +2555,41 @@ python -m telnix.cli export --format curl -o replay.sh
 python -m telnix.cli export --format csv                    # 不指定 -o 按格式推导文件名 Telnix_export.csv
 
 # 系统
-python -m telnix.cli proxy on
-python -m telnix.cli proxy off
-python -m telnix.cli cert status                            # 证书状态
-python -m telnix.cli cert install                           # 装根证书
-python -m telnix.cli cert remove                            # 卸载根证书
+python -m telnix.cli proxy on                               # ❌ 仅 Windows（mac/linux 手动配置浏览器/系统代理）
+python -m telnix.cli proxy off                              # ❌ 仅 Windows
+python -m telnix.cli cert status                            # 证书状态 ✅ 全平台
+python -m telnix.cli cert install                           # 装根证书 ✅ Win/mac ⚠️ Linux 需手动
+python -m telnix.cli cert remove                            # 卸载根证书 ✅ Win/mac ⚠️ Linux 需手动
 python -m telnix.cli log tail --category proxy --level ERROR
 python -m telnix.cli log clear                              # 清空所有日志
 python -m telnix.cli log export -o logs.jsonl               # 导出日志为 JSONL
 python -m telnix.cli log export -o err.jsonl --level ERROR --category proxy  # 带过滤导出
-python -m telnix.cli system restart                         # 重启前后端（保留 --no-browser 等启动参数）
-python -m telnix.cli system quit                            # 退出 Telnix（关代理+关服务）
-python -m telnix.cli system restart-as-admin                # 以管理员身份重启（GUI 用户确认 + UAC，TCP/UDP 抓包用）
+python -m telnix.cli system restart                         # 重启前后端（保留 --no-browser 等启动参数）✅ 全平台
+python -m telnix.cli system quit                            # 退出 Telnix（关代理+关服务）✅ 全平台
+python -m telnix.cli system restart-as-admin                # 以管理员身份重启（GUI 用户确认 + UAC，TCP/UDP 抓包用）❌ 仅 Windows
+
+# 透明代理（WinDivert NETWORK 层重定向，需管理员权限，应用无需配置代理即可被抓包）❌ 仅 Windows
+python -m telnix.cli transparent-proxy status               # 查看状态（mac/linux 返回 supported=false）
+python -m telnix.cli transparent-proxy start                # 启动（需 Windows + 管理员 + pydivert，失败给明确提示）❌ 仅 Windows
+python -m telnix.cli transparent-proxy stop                 # 停止 ❌ 仅 Windows
+
+# 自动修改规则（list/get/create/enable/disable/delete，create 支持 --script-path 从 .py 加载）
+python -m telnix.cli auto-reply list                       # 列出所有规则（NDJSON，含命中统计）
+python -m telnix.cli auto-reply list --json-array          # 输出 JSON 数组
+python -m telnix.cli auto-reply get <id>                   # 查看规则详情
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/v1/*' --action script \
+  --script-path my_rule.py --note '动态签名改包'              # 从本地 .py 文件加载脚本创建规则（agent 友好）
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/login*' --action mock \
+  --action-spec 'mock 200 {"ok":true}'                     # 非 script 动作，复用 intercept add 语法
+python -m telnix.cli auto-reply create \
+  --pattern '*api.example.com/v1/*' --action script \
+  --script-path sign.py --method-filter POST --status-filter 200 \
+  --process-filter chrome.exe                               # 带过滤条件，避免误命中
+python -m telnix.cli auto-reply enable <id>                # 启用规则
+python -m telnix.cli auto-reply disable <id>               # 禁用规则
+python -m telnix.cli auto-reply delete <id>                # 删除规则
 
 # 发包（Composer，不走代理不写入 flows）
 python -m telnix.cli send --url https://api.example.com                          # GET
@@ -2450,7 +2735,7 @@ set TELNIX_API=http://127.0.0.1:18901
 
 **Cursor / VS Code**：参考各客户端的 MCP 配置文档，command 填 `python`，args 填 `["-m", "Telnix.mcp_server"]`。
 
-### C.3 工具清单（73 个，100% 覆盖 CLI）
+### C.3 工具清单（88 个，100% 覆盖 CLI）
 
 | 分类 | 工具 | 说明 |
 |---|---|---|
@@ -2487,12 +2772,18 @@ set TELNIX_API=http://127.0.0.1:18901
 | | `focus_status` / `focus_on` / `focus_off` | 专注模式 |
 | | `raw_capture_status` / `raw_capture_start` / `raw_capture_stop` / `raw_capture_install` | TCP/UDP 抓包 |
 | | `system_restart` / `system_quit` / `system_restart_as_admin` | 系统控制 |
+| | `system_install_dep` / `system_install_dep_status` | 可选依赖安装（如 mitmproxy） |
+| **设置管理** | `settings_get` / `settings_set` / `settings_proxy_engine` | 设置读写 + 代理引擎切换 |
 | **进程管理** | `processes_list` | 进程列表（含连接快照/进程树） |
 | | `processes_ignore` / `processes_unignore` / `processes_ignored_list` | 忽略进程 |
 | | `processes_ignore_host` / `processes_unignore_host` / `processes_ignored_hosts_list` | 忽略 host |
 | **会话** | `sessions_list` / `sessions_show` / `sessions_switch` / `sessions_delete` / `sessions_create` | 会话管理 |
 | **Agent 工作区** | `agent_start` / `agent_end` / `agent_status` | 工作区管理（保存/恢复状态） |
 | **日志** | `log_tail` / `log_clear` / `log_export` | 日志管理 |
+| **透明代理** | `transparent_proxy_status` / `transparent_proxy_start` / `transparent_proxy_stop` | WinDivert NETWORK 层重定向 80/443（需管理员） |
+| **自动修改规则** | `auto_reply_list` / `auto_reply_get` | 规则列表/详情 |
+| | `auto_reply_create` | 创建规则（`script_path` 从本地 .py 加载脚本，agent 友好） |
+| | `auto_reply_enable` / `auto_reply_disable` / `auto_reply_delete` | 启用/禁用/删除规则 |
 
 > `packets watch`（CLI 阻塞 tail）在 MCP 中用 `packets_list` + `since_id` 非阻塞轮询替代。
 

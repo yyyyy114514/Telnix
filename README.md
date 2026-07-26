@@ -1,7 +1,7 @@
 # Telnix
 
 > 完全由 [GLM-5.2](https://chatglm.cn) 构建的 Fiddler 式 HTTP/HTTPS 抓包代理工具。
-> FastAPI 后端 + Vue 3 前端 + SQLite 存储，原生 Windows 支持，单命令启动。
+> FastAPI 后端 + Vue 3 前端 + SQLite 存储，原生 Windows 支持，macOS / Linux 优雅降级，单命令启动。
 
 ---
 
@@ -12,15 +12,17 @@
     - [Agent CLI调用](#agent-cli调用)
     - [一键安装](#一键安装)
     - [一键运行](#一键运行)
+    - [macOS / Linux 安装与运行](#macos--linux-安装与运行)
     - [TCP/UDP 抓包（需要管理员）](#tcpudp-抓包需要管理员)
     - [可选：安装 mitmproxy 引擎](#可选安装-mitmproxy-引擎)
+  - [平台支持矩阵](#平台支持矩阵)
   - [项目特色](#项目特色)
     - [1. 完全由 GLM-5.2 构建](#1-完全由-glm-52-构建)
     - [2. 强大的自动修改（拦截改包）](#2-强大的自动修改拦截改包)
     - [3. 解决痛点的 Clash 集成](#3-解决痛点的-clash-集成)
     - [4. AI 分析](#4-ai-分析)
     - [5. MCP + Agent CLI 赋能](#5-mcp--agent-cli-赋能)
-      - [MCP Server（73 个工具）](#mcp-server73-个工具)
+      - [MCP Server（88 个工具）](#mcp-server88-个工具)
       - [Agent CLI](#agent-cli)
     - [6. 使用简单](#6-使用简单)
   - [项目结构](#项目结构)
@@ -35,10 +37,10 @@
 
 | 项         | 要求                                                                  |
 | ---------- | --------------------------------------------------------------------- |
-| 操作系统   | Windows 10 / 11（完整支持）；macOS / Linux（HTTP/HTTPS 抓包可用，TCP/UDP 抓包依赖 WinDivert 暂不支持） |
+| 操作系统   | Windows 10 / 11（完整支持）；macOS / Linux（HTTP/HTTPS 抓包 + AI 分析 + 自动修改 + 规则 + MCP/CLI 均可用，TCP/UDP 抓包/透明代理/DNS 劫持/系统代理自动配置 仅 Windows） |
 | Python     | 3.10+                                                                 |
 | Node.js    | 18+（仅构建前端需要，运行已构建产物不需要）                           |
-| 管理员权限 | TCP/UDP 原始抓包需要；HTTP/HTTPS 抓包不需要                           |
+| 管理员权限 | Windows TCP/UDP 抓包需要（UAC 提权）；macOS/Linux 用 `sudo` 启动；HTTP/HTTPS 抓包不需要 |
 
 ### MCP配置&使用
 
@@ -100,6 +102,78 @@ python -m telnix
 
 启动后访问 http://127.0.0.1:18901 即可使用。
 
+### macOS / Linux 安装与运行
+
+macOS / Linux 用户使用项目根目录的 bash 脚本，等价于 Windows 的 `install.ps1` / `build.ps1` / `run.ps1`。
+
+#### 一、安装依赖
+
+```bash
+# 方式 A：一键脚本（推荐）
+./scripts/install-deps-linux.sh   # Linux
+./scripts/install-deps-mac.sh     # macOS
+
+# 方式 B：手动安装
+cd src/host
+pip install -e .                  # 后端依赖（pydivert 等 Windows 专属包会自动跳过）
+# 前端依赖（可选，仅修改前端时需要）
+cd ../ui
+npm install
+```
+
+> 说明：`pydivert` 是 Windows 专属包，pip 在非 Windows 上会自动跳过安装。这不影响 HTTP/HTTPS 抓包等核心功能，仅 TCP/UDP 抓包、透明代理、DNS 劫持不可用。
+
+#### 二、构建前端
+
+```bash
+# 构建前端到 src/ui/dist（首次运行或前端改动后需要）
+./build.sh
+```
+
+`build.sh` 与 `build.ps1` 行为等价：检测 python3/npm → 关闭占用 18901/8888 端口的残留进程 → 清理 dist + Vite 缓存 → 运行 `npm run build`。macOS / Linux 无需设置 `UV_THREADPOOL_SIZE=1` / `GOMAXPROCS=1`（这是 Windows 上 esbuild Go runtime 死锁的 workaround）。
+
+#### 三、启动 Telnix
+
+```bash
+# 默认（自动开浏览器）
+./start.sh
+
+# 不开浏览器（agent / 自动化场景）
+./start.sh --no-browser
+
+# 自定义端口
+./start.sh --port 18902
+
+# 或手动启动
+cd src/host
+python3 -m telnix
+```
+
+启动后访问 http://127.0.0.1:18901。
+
+#### 四、手动配置系统代理（macOS / Linux 必读）
+
+**重要**：macOS / Linux 上 Telnix **不会自动设置系统代理**（Windows 通过 winreg 写注册表实现自动配置，macOS / Linux 没有等价的零依赖方案）。请手动将浏览器/系统代理配置为 `127.0.0.1:8888`：
+
+- **macOS**：系统偏好设置 → 网络 → 高级 → 代理 → 网页代理(HTTP) / 安全网页代理(HTTPS) → 填入 `127.0.0.1:8888`
+- **Linux (GNOME)**：设置 → 网络 → 网络代理 → 手动 → HTTP/HTTPS 代理填 `127.0.0.1` 端口 `8888`
+- **Linux (KDE)**：系统设置 → 网络 → 代理 → 手动配置
+- **命令行**：`export http_proxy=http://127.0.0.1:8888 https_proxy=http://127.0.0.1:8888`
+- **浏览器单独配置**：Firefox 偏好设置 → 网络设置 → 手动代理；Chrome 默认跟随系统代理
+
+#### 五、安装根证书（解密 HTTPS 必备）
+
+- **macOS**：Telnix 启动后用 `security add-trusted-cert` 安装根证书到系统钥匙串，安装时会弹窗要求输入密码授权（首次启用 HTTPS 抓包时自动触发，也可在 GUI 设置页点「安装根证书」按钮）
+- **Linux**：手动安装（不同发行版命令不同）：
+  ```bash
+  # Debian / Ubuntu
+  sudo cp <data_dir>/certs/telnix_root.crt /usr/local/share/ca-certificates/telnix_root.crt
+  sudo update-ca-certificates
+  # RHEL / CentOS
+  sudo trust anchor <data_dir>/certs/telnix_root.crt
+  ```
+  `<data_dir>` 默认是 `~/.telnix`，可用 `python3 -c "from telnix.config import get_cert_dir; print(get_cert_dir())"` 查询
+
 ### TCP/UDP 抓包（需要管理员）
 
 TCP/UDP 原始抓包依赖 WinDivert，需要管理员权限。在 CLI 里执行：
@@ -110,7 +184,71 @@ python -m telnix.cli system restart-as-admin
 
 会弹 UAC 提权窗口，同意后后端以管理员身份重启。
 
-> 注：macOS / Linux 平台无 WinDivert，TCP/UDP 原始抓包功能不可用（HTTP/HTTPS 抓包不受影响）。
+> **平台说明**：
+> - **Windows**：完整支持，`system restart-as-admin` 通过 UAC 提权
+> - **macOS / Linux**：**不支持**。WinDivert 是 Windows 内核驱动，无跨平台等价物。`system restart-as-admin` / `raw capture start` / `transparent-proxy start` / `dns-hijack start` 等命令会返回"仅 Windows 支持"错误。如需抓取非 HTTP 协议（Steam P2P、protobuf 等），请使用 Wireshark（macOS / Linux 原生支持）。HTTP/HTTPS 抓包完全不受影响。
+
+### WinDivert 风险提示（首次启用时弹窗）
+
+WinDivert 是 Windows 内核驱动，Telnix 用它做 TCP/UDP 抓包、透明代理、DNS 劫持。**该驱动常被漏洞利用工具使用**，部分杀毒软件（360 / 火绒 / Windows Defender 等）可能将其作为"漏洞驱动"拦截或报警，导致功能无法启动。
+
+> Telnix 仅将该驱动用于抓包 / 透明代理 / DNS 劫持，**不会对您的设备带来任何安全隐患**。若驱动加载被拦截，请将 Telnix 目录与 `WinDivert64.sys` 加入杀软白名单后重试。
+
+**首次启用相关功能时（GUI / CLI / MCP 都会触发）**：
+
+- **GUI**：弹 Vue 对话框，用户点「了解，不再显示此提示」后会调 `POST /api/system/windivert-warning/ack` 持久化（写入 `settings.json` 的 `windivert_warning_acknowledged=1`），后续不再提示；点「取消」则不开功能。
+- **CLI / MCP**：在桌面弹**原生 Windows 置顶 Yes/No 弹窗**（`MB_TOPMOST | MB_SYSTEMMODAL`，任务栏图标闪烁），用户选「是」后立即标记 ack=1 并自动重试原请求；选「否」则拒绝原请求（CLI 输出 `rejected_by_user: true` + 退出码 1）。
+- **已确认（ack=1）后**：所有 WinDivert 相关端点直接放行，不再弹窗。可通过 `settings set -k windivert_warning_acknowledged -v 0` 重置为未确认状态。
+
+**相关 API 端点**（详见 [README_AI.md](README_AI.md)）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/system/windivert-warning` | 查询是否需要提示 + 风险说明文本 + 当前 ack 状态 |
+| POST | `/api/system/windivert-warning/ack` | 标记为已确认（永久不再提示，GUI 用） |
+| POST | `/api/system/request-windivert-ack` | 创建 pending ack 请求 + 弹原生 MessageBox（CLI/MCP 用） |
+| GET | `/api/system/windivert-ack-request/{rid}/wait` | 长轮询等待用户响应（CLI/MCP 用，60s 超时返回 pending） |
+
+**CLI 子命令**：
+```powershell
+python -m telnix.cli system windivert-warning-status   # 查询状态
+python -m telnix.cli system windivert-warning-ack       # 永久确认（不再提示）
+```
+
+---
+
+## 平台支持矩阵
+
+| 功能 | Windows | macOS | Linux | 备注 |
+| --- | :---: | :---: | :---: | --- |
+| **HTTP/HTTPS 抓包** | ✅ | ✅ | ✅ | 核心功能，全平台可用 |
+| **SSL bump 解密 HTTPS** | ✅ | ✅ | ✅ | macOS 用 `security`，Linux 需手动 `update-ca-certificates` |
+| **自动修改（拦截改包）** | ✅ | ✅ | ✅ | modify_request/response、mock、script 全平台可用 |
+| **断点 / 重放 / 发包** | ✅ | ✅ | ✅ | |
+| **AI 分析（DeepSeek）** | ✅ | ✅ | ✅ | |
+| **规则 / 模板 / 命中统计** | ✅ | ✅ | ✅ | |
+| **专注模式 / 忽略进程** | ✅ | ✅ | ✅ | PID 反查用 psutil 替代 GetExtendedTcpTable |
+| **MCP Server（88 工具）** | ✅ | ✅ | ✅ | 部分工具在 mac/linux 调用会返回"不支持"错误，详见 [README_MCP.md](README_MCP.md) |
+| **Agent CLI** | ✅ | ✅ | ✅ | 部分命令在 mac/linux 调用会返回"不支持"错误，详见 [README_AI.md](README_AI.md) |
+| **Clash / Mihomo 上游代理集成** | ✅ | ✅ | ✅ | |
+| **会话管理 / 导出 HAR/curl** | ✅ | ✅ | ✅ | |
+| **WebSocket 抓包** | ✅ | ✅ | ✅ | |
+| **HTTP/2 转发（ALPN h2）** | ✅ | ✅ | ✅ | |
+| **进程伪装名** | ✅ | ⚠️ | ⚠️ | macOS/Linux 无注册表，固定用默认名 `SystemMetrics.exe` |
+| **根证书自动安装** | ✅ | ✅ | ⚠️ | Linux 需手动 `update-ca-certificates` |
+| **系统代理自动配置** | ✅ | ❌ | ❌ | winreg 是 Windows 专属，mac/linux 需手动配置 127.0.0.1:8888 |
+| **系统代理状态监控** | ✅ | ❌ | ❌ | 依赖注册表，mac/linux 不监控（用户手动管理） |
+| **TCP/UDP 原始抓包（WinDivert）** | ✅ | ❌ | ❌ | WinDivert 是 Windows 内核驱动 |
+| **透明代理（WinDivert NAT）** | ✅ | ❌ | ❌ | 同上 |
+| **DNS 劫持（WinDivert）** | ✅ | ❌ | ❌ | 同上 |
+| **`system restart-as-admin`（UAC）** | ✅ | ❌ | ❌ | mac/linux 用 `sudo ./start.sh` 替代 |
+| **`system firewall-allow`（netsh）** | ✅ | ❌ | ❌ | mac/linux 用 `ufw` / `firewall-cmd` / 系统偏好设置 |
+| **PyInstaller 打包 exe** | ✅ | ⚠️ | ⚠️ | 可打包但未做 mac/linux 安装包（无 Inno Setup 等价物） |
+| **Inno Setup 安装包** | ✅ | ❌ | ❌ | 仅 Windows |
+
+> **总结**：macOS / Linux 上 **核心抓包功能（HTTP/HTTPS + AI + 规则 + MCP/CLI）全部可用**，仅 WinDivert 相关的网络层功能（TCP/UDP 抓包、透明代理、DNS 劫持）和 Windows 注册表相关功能（系统代理自动配置、UAC 提权、netsh 防火墙）不可用。
+
+---
 
 ### 可选：安装 mitmproxy 引擎
 
@@ -188,7 +326,7 @@ delay 2000                            # 延迟 2 秒响应
 
 Telnix 不只是 GUI 工具，还为 AI Agent 提供了完整的编程接口：
 
-#### MCP Server（78 个工具）
+#### MCP Server（88 个工具）
 
 把抓包、拦截、改包、重放能力暴露为 MCP (Model Context Protocol) 工具，让 Claude Desktop / Cursor / VS Code Continue 等 MCP 客户端直接调用。AI 可以：
 
@@ -247,7 +385,7 @@ telnix/
 │   │   │   ├── clash/         # Clash 集成
 │   │   │   ├── ai/            # DeepSeek AI 分析
 │   │   │   ├── cli.py         # Agent CLI
-│   │   │   ├── mcp_server.py  # MCP Server（78 个工具）
+│   │   │   ├── mcp_server.py  # MCP Server（88 个工具）
 │   │   │   ├── db.py          # SQLite 存储
 │   │   │   └── __main__.py    # 入口
 │   │   ├── pyproject.toml
@@ -275,7 +413,7 @@ telnix/
 - [CLASH_SET.md](CLASH_SET.md) — Clash / Mihomo 集成设置教程
 - [MOBILE_CAPTURE.md](MOBILE_CAPTURE.md) — 安卓手机抓包教程
 - [README_AI.md](README_AI.md) — Agent CLI 完整用法（AI 友好的 NDJSON / 非交互模式）
-- [README_MCP.md](README_MCP.md) — MCP Server 78 个工具清单与客户端接入配置
+- [README_MCP.md](README_MCP.md) — MCP Server 88 个工具清单与客户端接入配置
 
 ---
 

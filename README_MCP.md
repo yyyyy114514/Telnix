@@ -6,7 +6,7 @@
 
 传统工作流中，AI 助手想帮你分析抓包数据，需要你手动复制粘贴流量内容。接入 MCP Server 后，AI 可以直接调用 `packets_list` 拉流量、调用 `intercept_add` 创建改包规则、调用 `packets_diff` 对比两次请求差异 —— 全程不需要你切换窗口。
 
-73 个工具覆盖 Telnix CLI 的全部功能，从基础的抓包控制到高级的签名字段检测、依赖链追踪都能用。新增 5 个工具（settings × 3 + system_install_dep × 2），总计 **78 个**。
+73 个工具覆盖 Telnix CLI 的全部功能，从基础的抓包控制到高级的签名字段检测、依赖链追踪都能用。新增 5 个工具（settings × 3 + system_install_dep × 2）、10 个工具（透明代理 × 3 + 自动修改 × 7，含 `auto_reply_test_script` 脚本预测试），总计 **89 个**。
 
 ## 架构
 
@@ -32,22 +32,76 @@ MCP Server 是一个独立的 Python 进程，通过 stdio 与 MCP 客户端通�
 | Python | 3.10+ |
 | MCP SDK | `mcp>=1.2`（`pip install "mcp[cli]"`） |
 | Telnix 后端 | 运行中，默认监听 `127.0.0.1:18901` |
-| 操作系统 | Windows（完整支持）；macOS / Linux（HTTP/HTTPS 抓包可用，TCP/UDP 抓包依赖 WinDivert 暂不支持） |
+| 操作系统 | Windows（完整支持）；macOS / Linux（核心抓包 + AI + 规则 + MCP 全部可用，WinDivert/UAC/注册表相关工具调用会返回"不支持"错误） |
 
 确认后端在跑：
 
 ```powershell
+# Windows
 netstat -ano | findstr ":18901.*LISTENING"
+```
+
+```bash
+# macOS / Linux
+lsof -iTCP:18901 -sTCP:LISTEN
 ```
 
 如果没有输出，启动后端：
 
 ```powershell
+# Windows
 cd .\src\host
 python -m telnix --no-browser
 ```
 
+```bash
+# macOS / Linux
+cd ./src/host
+python3 -m telnix --no-browser
+```
+
 `--no-browser` 避免自动打开浏览器干扰你的工作。
+
+## 平台支持
+
+MCP Server 本身（Python 进程 + stdio 通信）跨平台，但部分工具调用的后端能力依赖 Windows 专属模块（WinDivert / winreg / UAC），在 macOS / Linux 上调用会返回 `{"ok": false, "error": "...", "hint": "..."}` 结构化错误，**不会崩溃**。Agent 可正常编排工作流，遇到平台不支持的工具按 `hint` 字段提示用户手动操作或换用替代方案。
+
+### 工具平台支持矩阵
+
+| 工具分类 | 工具 | Windows | macOS | Linux | 备注 |
+|---|---| :---: | :---: | :---: | --- |
+| 抓包控制 | `capture_start` / `capture_stop` / `capture_clear` / `capture_pause` / `capture_resume` | ✅ | ✅ | ✅ | HTTP/HTTPS 核心功能 |
+| 流量查询 | `packets_list` / `packets_get` / `packets_search` / `packets_stats` / `packets_delete` / `packets_clear` / `packets_list_all` | ✅ | ✅ | ✅ | |
+| 流量分析 | `packets_export` / `packets_tag` / `packets_diff` / `packets_endpoints` / `packets_timeline` / `packets_trace` / `packets_analyze` / `packets_overview` | ✅ | ✅ | ✅ | |
+| 拦截规则 | `intercept_add` / `intercept_list` / `intercept_del` / `intercept_hits` / `intercept_toggle` / `intercept_update` / `intercept_export` / `intercept_import` / `intercept_template_list` / `intercept_template_apply` | ✅ | ✅ | ✅ | |
+| 重放/发包 | `replay` / `send_request` / `replay_batch` / `session_export` | ✅ | ✅ | ✅ | |
+| 断点 | `breakpoint_status` / `breakpoint_on` / `breakpoint_off` / `breakpoint_release` / `breakpoint_timeout` | ✅ | ✅ | ✅ | |
+| 专注模式 | `focus_status` / `focus_on` / `focus_off` | ✅ | ✅ | ✅ | PID 反查用 psutil |
+| 进程管理 | `processes_list` / `processes_ignore` / `processes_unignore` / `processes_ignored_list` / `processes_ignore_host` / `processes_unignore_host` / `processes_ignored_hosts_list` | ✅ | ✅ | ✅ | |
+| 会话管理 | `sessions_list` / `sessions_show` / `sessions_switch` / `sessions_delete` / `sessions_create` | ✅ | ✅ | ✅ | |
+| Agent 工作区 | `agent_start` / `agent_end` / `agent_status` | ✅ | ✅ | ✅ | |
+| 日志 | `log_tail` / `log_clear` / `log_export` | ✅ | ✅ | ✅ | |
+| 设置管理 | `settings_get` / `settings_set` / `settings_proxy_engine` | ✅ | ✅ | ✅ | |
+| 系统控制-通用 | `get_status` / `system_restart` / `system_quit` / `system_install_dep` / `system_install_dep_status` | ✅ | ✅ | ✅ | `system_restart` 在 mac/linux 用 subprocess 重启（无 UAC） |
+| **证书管理** | `cert_status` | ✅ | ✅ | ✅ | |
+| **证书管理** | `cert_install` / `cert_remove` | ✅ | ✅ | ⚠️ | macOS 用 `security add-trusted-cert`；Linux 需手动 `update-ca-certificates`（工具返回提示） |
+| **系统代理** | `proxy_status` | ✅ | ⚠️ | ⚠️ | mac/linux 无注册表，恒返回 `system_proxy_on=false`（用户手动配置） |
+| **系统代理** | `proxy_on` / `proxy_off` | ✅ | ❌ | ❌ | winreg 是 Windows 专属，mac/linux 需手动配置浏览器/系统代理为 `127.0.0.1:8888` |
+| **TCP/UDP 抓包** | `raw_capture_status` / `raw_capture_start` / `raw_capture_stop` / `raw_capture_install` | ✅ | ❌ | ❌ | WinDivert 是 Windows 内核驱动；mac/linux 用 Wireshark 抓非 HTTP 协议 |
+| **透明代理** | `transparent_proxy_status` / `transparent_proxy_start` / `transparent_proxy_stop` | ✅ | ❌ | ❌ | WinDivert NETWORK 层重定向，仅 Windows + 管理员 |
+| **管理员重启** | `system_restart_as_admin` | ✅ | ❌ | ❌ | UAC 是 Windows 专属；mac/linux 用 `sudo ./start.sh` 替代 |
+
+> **总结**：88 个工具中 **76 个全平台可用**，**3 个部分可用**（cert/proxy_status），**9 个仅 Windows 可用**（raw_capture × 4 + transparent_proxy × 3 + proxy_on/off × 2 + system_restart_as_admin × 1，但 `proxy_status` 在 mac/linux 不算崩溃只是返回 false）。Agent 编排时若调用 Windows 专属工具，会收到带 `hint` 字段的错误，按提示引导用户手动操作即可。
+
+### macOS / Linux 上的替代方案
+
+| 想做的事 | Windows 工具（不可用） | mac/linux 替代 |
+|---|---|---|
+| 开启系统代理 | `proxy_on` | 手动配置浏览器/系统代理为 `127.0.0.1:8888`（见 [README.md 平台支持矩阵](README.md)） |
+| 以管理员身份运行 | `system_restart_as_admin` | `sudo ./start.sh`（先 `pip install -e .` 装好依赖） |
+| 抓 TCP/UDP/非 HTTP 协议 | `raw_capture_start` | Wireshark（mac/linux 原生支持） |
+| 抓无代理感知应用的流量 | `transparent_proxy_start` | 在浏览器/系统层手动配代理，或用 `iptables`/`pf` 做端口重定向 |
+| 安装 HTTPS 根证书 | `cert_install` | macOS：`security add-trusted-cert`；Linux：`sudo trust anchor` 或 `update-ca-certificates` |
 
 ## 快速开始
 
@@ -87,7 +141,7 @@ python -m telnix.mcp_server
 }
 ```
 
-重启 Claude Desktop，在对话里说"列出 Telnix 的所有工具"，它会调用 `tools/list` 返回 78 个工具。
+重启 Claude Desktop，在对话里说"列出 Telnix 的所有工具"，它会调用 `tools/list` 返回 88 个工具。
 
 ## 启动参数
 
@@ -222,7 +276,7 @@ python -m telnix.mcp_server
 
 ## 工具清单
 
-78 个工具，按功能分 12 类。
+88 个工具，按功能分 14 类。
 
 ### 状态与抓包控制（6 个）
 
@@ -295,14 +349,19 @@ python -m telnix.mcp_server
 
 ### 系统控制（12 个）
 
-| 工具 | 说明 |
-|---|---|
-| `proxy_status` / `proxy_on` / `proxy_off` | 系统代理控制 |
-| `cert_status` / `cert_install` / `cert_remove` | HTTPS 证书管理 |
-| `focus_status` / `focus_on` / `focus_off` | 专注模式（只抓指定进程/host） |
-| `raw_capture_status` / `raw_capture_start` / `raw_capture_stop` / `raw_capture_install` | TCP/UDP 原始抓包 |
-| `system_restart` / `system_quit` / `system_restart_as_admin` | 系统控制（重启/退出/管理员提权） |
-| `system_install_dep` / `system_install_dep_status` | 可选依赖安装（如 mitmproxy） |
+> 平台标记：✅ 全平台 / ⚠️ 部分平台 / ❌ 仅 Windows（mac/linux 调用返回"不支持"错误，详见 [平台支持矩阵](#工具平台支持矩阵)）
+
+| 工具 | 说明 | 平台 |
+|---|---|---|
+| `proxy_status` | 系统代理状态（mac/linux 恒返回 false） | ✅ / ⚠️ / ⚠️ |
+| `proxy_on` / `proxy_off` | 系统代理开关（写 Windows 注册表） | ❌ 仅 Windows |
+| `cert_status` | 证书状态 | ✅ |
+| `cert_install` / `cert_remove` | HTTPS 证书管理（mac 用 `security`，Linux 需手动） | ✅ / ✅ / ⚠️ |
+| `focus_status` / `focus_on` / `focus_off` | 专注模式（只抓指定进程/host） | ✅ |
+| `raw_capture_status` / `raw_capture_start` / `raw_capture_stop` / `raw_capture_install` | TCP/UDP 原始抓包（WinDivert） | ❌ 仅 Windows |
+| `system_restart` / `system_quit` | 系统重启/退出（mac/linux 用 subprocess 重启，无 UAC） | ✅ |
+| `system_restart_as_admin` | 管理员提权重启（UAC） | ❌ 仅 Windows |
+| `system_install_dep` / `system_install_dep_status` | 可选依赖安装（如 mitmproxy） | ✅ |
 
 ### 设置管理（3 个）
 
@@ -345,6 +404,57 @@ python -m telnix.mcp_server
 | `log_tail` | 查看最近日志 |
 | `log_clear` | 清空日志 |
 | `log_export` | 导出日志为 JSONL |
+
+### 透明代理（3 个）❌ 仅 Windows
+
+WinDivert NETWORK 层重定向出站 HTTP(80)/HTTPS(443) 流量到本地代理，应用无需配置代理即可被抓包。**仅 Windows + 管理员权限可用**，mac/linux 调用 `transparent_proxy_status` 会返回 `supported=false`，`start` 直接返回错误。启动失败时返回 `hint` 提示调用 `system_restart_as_admin`。
+
+| 工具 | 说明 | 平台 |
+|---|---|---|
+| `transparent_proxy_status` | 查看状态（running/redirected_count/nat_table_size/last_error/supported） | ✅ / ❌ / ❌（mac/linux 返回 supported=false） |
+| `transparent_proxy_start` | 启动透明代理（需 Windows + 管理员 + pydivert，失败给明确错误） | ❌ 仅 Windows |
+| `transparent_proxy_stop` | 停止透明代理 | ❌ 仅 Windows |
+
+### 自动修改规则（6 个）
+
+与 `intercept_*` 互补，专注 Python 脚本规则管理。`auto_reply_create` 支持通过 `script_path` 从本地 .py 文件加载脚本内容（agent 友好），脚本需定义 `on_request(ctx)` / `on_response(ctx)` 实现复杂改包，独立 worker 子进程运行。
+
+| 工具 | 说明 |
+|---|---|
+| `auto_reply_list` | 列出所有规则（含命中统计，字段同 intercept_list） |
+| `auto_reply_get` | 查看规则详情（参数 `rule_id`） |
+| `auto_reply_create` | 创建规则（`action=script` 时用 `script_path` 从本地 .py 加载，或 `script` 传内联源码；其他 action 用 `action_spec` 复用 intercept 语法） |
+| `auto_reply_enable` | 启用规则（参数 `rule_id`） |
+| `auto_reply_disable` | 禁用规则（参数 `rule_id`） |
+| `auto_reply_delete` | 删除规则（参数 `rule_id`） |
+| `auto_reply_test_script` | 测试 Python 脚本执行（不创建规则，用 mock 数据走 worker 子进程；agent 创建规则前可先用本工具验证脚本逻辑） |
+
+### `auto_reply_test_script` 用法
+
+```python
+# 调用示例：测试脚本 on_request 钩子
+auto_reply_test_script(
+    script="def on_request(ctx):\n    ctx.set_request_header('X-Test','yes')\n    return None",
+    mock_host="api.example.com",
+    mock_path="/v1/user",
+    mock_method="GET",
+    mock_headers={"User-Agent": "test"},
+)
+
+# 同时测试 on_response 钩子
+auto_reply_test_script(
+    script_path="/path/to/my_hook.py",
+    mock_host="api.example.com",
+    mock_path="/v1/user",
+    mock_method="POST",
+    mock_body='{"key":"value"}',
+    mock_resp_status=200,
+    mock_resp_headers={"Content-Type": "application/json"},
+    mock_resp_body='{"code":0}',
+)
+```
+
+返回结构：`{ok, duration_ms, error, traceback, request_phase, response_phase}`，其中 `*_phase` 包含 `action`（continue/drop/mock）、`modified`（是否修改）、`headers`、`body`、`error` 等字段，方便 agent 判断脚本逻辑是否按预期工作。
 
 ## 返回格式
 
@@ -569,6 +679,40 @@ AI 工作流：
 
 如果 `agent_start` 后程序异常退出没调 `agent_end`，下次 `agent_start` 会报错提示先恢复。调 `agent_status` 可以查看当前是否有未恢复的工作区。
 
+### 场景七：透明代理抓无代理感知的应用
+
+应用不走系统代理（如某些 Electron 应用、命令行工具），普通抓包抓不到。用透明代理把出站 80/443 流量重定向到本地代理：
+
+```
+AI 工作流：
+1. transparent_proxy_status → 检查平台是否支持、是否已运行
+2. 若 last_error 提示需要管理员权限 → system_restart_as_admin → 等待后端以管理员重启
+3. transparent_proxy_start → 启动 WinDivert 重定向
+4. （用户操作目标应用触发请求）
+5. packets_list → 抓到原本无代理感知的流量
+6. transparent_proxy_stop → 用完停止
+```
+
+注意：透明代理只重定向出站 80/443，HTTPS 流量走 raw TCP 隧道（不解密），如需解密 HTTPS 仍需配合证书。
+
+### 场景八：Python 脚本自定义改包
+
+简单的 `set-json` / `mock` 不够用时，用 Python 脚本实现复杂改包逻辑（如动态签名、条件分支、多字段联动）：
+
+```
+AI 工作流：
+1. 写脚本到本地 my_rule.py（定义 on_request(ctx) / on_response(ctx)）
+2. auto_reply_create --pattern '*api.example.com/v1/*' --action script \
+     --script_path my_rule.py --note '动态签名改包'
+   → 后端在独立 worker 子进程运行脚本，命中时回调
+3. auto_reply_list → 确认规则已创建并启用
+4. （用户触发请求，规则命中）
+5. intercept_hits --rule_id N → 查看命中详情
+6. 不需要时 auto_reply_disable 或 auto_reply_delete
+```
+
+脚本接口约定：`on_request(ctx)` / `on_response(ctx)` 接收 ctx 字典（含 headers/body/url/method/status 等），返回修改后的 ctx 或 None（不修改）。脚本出错时规则自动跳过，不影响代理转发。
+
 ## 与 CLI 的对比
 
 | 维度 | CLI | MCP |
@@ -600,6 +744,16 @@ AI 工作流：
 | `telnix cert install` | `cert_install` |
 | `telnix system restart` | `system_restart` |
 | `telnix agent start` | `agent_start` |
+| `telnix transparent-proxy status` | `transparent_proxy_status` |
+| `telnix transparent-proxy start` | `transparent_proxy_start` |
+| `telnix transparent-proxy stop` | `transparent_proxy_stop` |
+| `telnix auto-reply list` | `auto_reply_list` |
+| `telnix auto-reply get N` | `auto_reply_get(rule_id=N)` |
+| `telnix auto-reply create` | `auto_reply_create` |
+| `telnix auto-reply enable N` | `auto_reply_enable(rule_id=N)` |
+| `telnix auto-reply disable N` | `auto_reply_disable(rule_id=N)` |
+| `telnix auto-reply delete N` | `auto_reply_delete(rule_id=N)` |
+| `telnix auto-reply test-script` | `auto_reply_test_script` |
 
 ## 故障排查
 
