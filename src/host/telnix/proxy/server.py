@@ -1089,16 +1089,42 @@ class ProxyServer:
                               scheme="http")
 
     @staticmethod
-    def _parse_sni_from_tls(client_sock: socket.socket) -> "str | None":
+    def _parse_sni_from_tls(client_sock: socket.socket, timeout: float = 0.3) -> "str | None":
         """从 TLS ClientHello 中解析 SNI hostname（不消耗 socket 数据，用 MSG_PEEK）。
 
         F20: NAT 反查失败时的 HTTPS 兜底——从 ClientHello 的 SNI 扩展提取目标域名。
         """
+        import time
+        import select
         try:
-            data = client_sock.recv(4096, socket.MSG_PEEK)
+            deadline = time.monotonic() + timeout
+            data = b""
+            while True:
+                try:
+                    chunk = client_sock.recv(65536, socket.MSG_PEEK)
+                except OSError:
+                    return None
+                if not chunk:
+                    return None
+                data = chunk
+                if data[0] != 0x16:  # 非 TLS Handshake
+                    return None
+                if len(data) < 5:
+                    if time.monotonic() >= deadline:
+                        return None
+                    select.select([client_sock], [], [], 0.05)
+                    continue
+                # TLS record 头 data[3:5] = record 长度（record 头之后的握手数据长度）
+                rec_len = int.from_bytes(data[3:5], 'big')
+                needed = 5 + rec_len
+                if len(data) >= needed:
+                    break
+                if time.monotonic() >= deadline:
+                    break  # 超时仍残缺：用已有数据尽力解析
+                select.select([client_sock], [], [], 0.05)
+            if len(data) < 5 or data[0] != 0x16:
+                return None
         except OSError:
-            return None
-        if len(data) < 5 or data[0] != 0x16:  # 0x16 = TLS Handshake
             return None
         pos = 5  # 跳过 TLS record header (5 bytes)
         if len(data) < pos + 4 or data[pos] != 0x01:  # 0x01 = ClientHello
