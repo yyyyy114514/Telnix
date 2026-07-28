@@ -1238,9 +1238,20 @@ class ProxyServer:
         if self.capturing and self.session_id:
             try:
                 host_for_record = orig_dst_ip
-                # 如果是 SNI fallback，target[0] 可能是 hostname
+                # 如果是 SNI fallback，target[0] 已是 hostname
                 if isinstance(orig_dst_ip, str) and not orig_dst_ip[0].isdigit():
                     host_for_record = orig_dst_ip
+                else:
+                    # F35: 透明无系统代理时 NAT 反查几乎都命中（返回纯 IP），导致
+                    # host/url 全是 IP。主动 PEEK 解析 ClientHello 的 SNI，用真实域名
+                    # 覆盖 IP（SNI 优先、IP 兜底），使抓包页 host/url 显示真实域名。
+                    # 仅 PEEK，不消耗数据，后续 _connect_target 仍可正常读取。
+                    try:
+                        sni_host = self._parse_sni_from_tls(client_sock)
+                        if sni_host and isinstance(sni_host, str) and not sni_host[0].isdigit():
+                            host_for_record = sni_host
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._record_flow(
                     0, "", "CONNECT", f"https://{host_for_record}:{orig_dst_port}/",
                     "https", host_for_record, "/",
