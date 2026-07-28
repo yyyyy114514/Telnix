@@ -247,6 +247,12 @@ class TransparentProxy:
         self._diag_out_count = 0
         # 上次清理时间
         self._last_cleanup = time.monotonic()
+        # QUIC(UDP/443) 拦截句柄（F39）：丢弃出站 UDP/443（及 80）包，强制浏览器
+        # 从 HTTP/3(QUIC) 回退到 TCP/HTTPS。否则现代浏览器默认走 QUIC(UDP)，
+        # 而本代理仅拦截 TCP(dst 80/443)，UDP 流量完全绕过 → 浏览器流量抓不到
+        # （系统软件多用 TCP/TLS 故仍可被捕获，形成"系统软件能抓、浏览器抓不到"的 asymmetry）。
+        self._quic_divert: Optional["pydivert.WinDivert"] = None  # type: ignore
+        self._quic_thread: Optional[threading.Thread] = None
 
     @property
     def running(self) -> bool:
@@ -435,6 +441,32 @@ class TransparentProxy:
                 target=self._loop, daemon=True, name="transparent-proxy"
             )
             self._thread.start()
+            # F39: 启用 QUIC(UDP/443) 拦截，强制浏览器回退 TCP/HTTPS 以便透明捕获。
+            # 另开一个 WinDivert 句柄，filter 命中出站 UDP/443(及80) 包后直接丢弃（不重注入），
+            # 浏览器 QUIC 握手失败即回退到 TCP 443，被主句柄拦截重定向到代理。
+            try:
+                quic_filter = "outbound and (udp.DstPort == 443 or udp.DstPort == 80)"
+                self._quic_divert = pydivert.WinDivert(quic_filter)
+                self._quic_divert.open()
+                self._quic_thread = threading.Thread(
+                    target=self._quic_drop_loop, daemon=True, name="transparent-quic-block"
+                )
+                self._quic_thread.start()
+                logger.info(
+                    "transparent", "QUIC(UDP/443) 拦截已启用",
+                    "已强制浏览器回退 TCP/HTTPS，透明代理可捕获浏览器流量"
+                )
+            except Exception as e:  # noqa: BLE001
+                # QUIC 拦截失败不影响 TCP 透明代理（仅浏览器 QUIC 流量可能绕过）
+                logger.warning(
+                    "transparent", "QUIC 拦截启动失败（不影响 TCP 透明代理）", str(e)
+                )
+                if self._quic_divert is not None:
+                    try:
+                        self._quic_divert.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._quic_divert = None
             logger.info(
                 "transparent", "透明代理已启动",
                 f"redirect ports={list(_REDIRECT_DST_PORTS)} -> {_REDIRECT_LOOPBACK_ADDR}:{self.local_port} "
@@ -484,6 +516,14 @@ class TransparentProxy:
             except Exception:  # noqa: BLE001
                 pass
             self._divert = None
+        # F39: 关闭 QUIC(UDP/443) 拦截句柄（close 会让 _quic_drop_loop 的 recv 抛异常并退出）
+        if self._quic_divert is not None:
+            try:
+                self._quic_divert.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._quic_divert = None
+        self._quic_thread = None
         with self._nat_lock:
             self._nat_table.clear()
             self._nat_reverse.clear()
@@ -722,6 +762,28 @@ class TransparentProxy:
                 if self._running:
                     logger.warning("transparent", "抓包循环异常", str(e))
                     time.sleep(0.01)
+
+    def _quic_drop_loop(self):
+        """F39: QUIC(UDP/443) 丢弃循环。
+
+        从专用 WinDivert 句柄 recv 出站 UDP/443(80) 包后**不重注入**即视为丢弃，
+        使浏览器 QUIC 握手失败，回退到 TCP/HTTPS（被主句柄拦截重定向到代理）。
+        仅丢弃、不改写，故不触碰任何 NAT 表或校验和。
+        """
+        while self._running and self._quic_divert is not None:
+            try:
+                pkt = self._quic_divert.recv()
+            except Exception:  # noqa: BLE001
+                # 句柄被 close() 后 recv 抛异常 → 根据 _running 退出
+                if self._running:
+                    time.sleep(0.01)
+                else:
+                    break
+                continue
+            if pkt is None:
+                continue
+            # 直接丢弃：不调用 send()，包不会被注入网络栈
+            # （WinDivert 默认不重注入已 recv 的包，故无需额外操作）
 
     def _recalc_checksums(self, packet):
         """重算包校验和，兼容不同 pydivert 版本。
