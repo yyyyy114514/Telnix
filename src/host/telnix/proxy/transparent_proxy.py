@@ -243,6 +243,8 @@ class TransparentProxy:
         self._send_fail_count = 0
         # 反向 NAT 未命中计数（F25 诊断埋点）
         self._nat_miss_count = 0
+        # 出站重定向注册计数（F38 诊断埋点，低速率日志用）
+        self._diag_out_count = 0
         # 上次清理时间
         self._last_cleanup = time.monotonic()
 
@@ -332,7 +334,9 @@ class TransparentProxy:
             # 原实现用真实 client_ip 作 key，导致 SNI fallback 注册的 NAT 条目在反向
             # 改写时永远命不中（key 是 (real_ip,port) 而非 (127.0.0.2,port)）→ 回包被丢弃。
             # nat_table / forward_key 内部仍保留真实 client_ip，供改写响应 dst 使用。
+            # F38: 双键注册（与出站分支一致），覆盖 F34 src 改写是否生效两种情况
             self._client_port_index[(_REDIRECT_LOOPBACK_ADDR, client_port)] = forward_key
+            self._client_port_index[(client_ip, client_port)] = forward_key
 
     def _is_admin(self) -> bool:
         """检查管理员权限。
@@ -558,10 +562,25 @@ class TransparentProxy:
                         )
                         self._nat_reverse[reverse_key] = forward_key
                         # 维护 O(1) (client_ip, client_src_port) → forward_key 索引（F2 修复）
-                        # F34:索引用改写后的 loopback 地址（127.0.0.2），因为代理收到的
-                        # client_addr 是改写后的 src（127.0.0.2:src_port），lookup_reverse
-                        # 和 register_nat_entry 都以此 key 查找。
+                        # F38: 双键注册 —— 同时以「真实客户端 IP(src_ip)」与「改写后的
+                        # loopback 地址(127.0.0.2)」为索引键。原因：反向回包（代理→客户端）
+                        # 的 dst 取决于 F34 的 src 改写是否生效：
+                        #   - 生效：代理回包 dst=127.0.0.2:port（精确键 (127.0.0.2,port) 命中）
+                        #   - 未生效：代理回包 dst=真实客户端IP:port（精确键 (src_ip,port) 命中）
+                        # 两种 key 都注册，无论哪种情况反向查找都能命中，彻底消除
+                        # "反向NAT未命中丢弃包" 中因 dst_ip 与索引键不一致导致的 miss。
                         self._client_port_index[(_REDIRECT_LOOPBACK_ADDR, src_port)] = forward_key
+                        self._client_port_index[(src_ip, src_port)] = forward_key
+                        # F38 诊断：低速率确认出站重定向与 NAT 注册确实发生
+                        # （若此日志长期不出现却仍有反向NAT未命中，说明出站分支根本未被命中，
+                        #  问题在 filter/重定向而非 NAT 表）。
+                        self._diag_out_count += 1
+                        if self._diag_out_count % 200 == 1:
+                            logger.info(
+                                "transparent", "出站重定向已注册NAT",
+                                f"src={src_ip}:{src_port} dst={dst_ip}:{dst_port} "
+                                f"nat_size={len(self._nat_table)}"
+                            )
                     # F34: 同时改写 src 和 dst 为 127.0.0.2，使包走 127.0.0.0/8 loopback
                     # adapter（WinDivert 可拦截）。原方案仅改 dst 为本机真实 IP，导致
                     # src==dst==本机IP 走 TCP fast path 绕过 WinDivert，反向 NAT 失效。
@@ -587,6 +606,20 @@ class TransparentProxy:
                     with self._nat_lock:
                         forward_key = self._client_port_index.get((dst_ip, dst_port))
                         entry = self._nat_table.get(forward_key) if forward_key else None
+                        # F38: 精确键 (dst_ip, dst_port) 未命中时，按端口扫描索引，
+                        # 优先选取 orig_src_ip == dst_ip（真实客户端 IP 与反向回包 dst 一致）
+                        # 的条目。覆盖 F34 src 改写未生效、回包 dst 为真实客户端 IP 而索引
+                        # 仅以 127.0.0.2 注册时精确键 miss 的场景。
+                        if entry is None:
+                            for (idx_ip, idx_port), fk in self._client_port_index.items():
+                                if idx_port != dst_port:
+                                    continue
+                                e = self._nat_table.get(fk)
+                                if e is None:
+                                    continue
+                                if e[0] == dst_ip:
+                                    forward_key, entry = fk, e
+                                    break
                     if entry:
                         orig_src_ip, orig_src_port, orig_dst_ip, orig_dst_port, _, stored_reverse_key = entry
                         # 改写 src -> 原服务器（让客户端以为回包来自原目标服务器）
@@ -615,17 +648,15 @@ class TransparentProxy:
                         else:
                             is_rst = bool(getattr(tcp_hdr, 'rst', False))
                         with self._nat_lock:
-                            if is_rst:
-                                self._nat_table.pop(forward_key, None)
-                                # O(1) 反向索引清理（替代原 O(n) 扫描 _nat_reverse）
-                                self._nat_reverse.pop(stored_reverse_key, None)
-                                self._client_port_index.pop((dst_ip, dst_port), None)
-                            else:
-                                # 更新 last_seen（FIN/RST 之外均视作活动，保持条目不过期）
-                                self._nat_table[forward_key] = (
-                                    orig_src_ip, orig_src_port,
-                                    orig_dst_ip, orig_dst_port, now, stored_reverse_key,
-                                )
+                            # F38: FIN 与 RST 均只刷新 last_seen，不删除条目、不清理索引。
+                            # 原实现在 RST 时删除条目并清理索引，但代理可能在 RST 后仍有
+                            # 服务端数据段要回传给客户端，删除后这些回包反向 NAT 未命中
+                            # 被丢弃 → 连接假死/重传（典型症状："浏览器都不行"）。
+                            # 保留条目与索引，最终由 _cleanup_nat(TTL=300s) 或 stop() 统一清理。
+                            self._nat_table[forward_key] = (
+                                orig_src_ip, orig_src_port,
+                                orig_dst_ip, orig_dst_port, now, stored_reverse_key,
+                            )
                     else:
                         # 反向 NAT 未命中：丢弃包（不 send），避免客户端收到 src=本机IP:8888
                         # 的包导致内核 RST。原实现"原样放行"会让客户端收到 src 不匹配的包 → RST。
@@ -765,7 +796,9 @@ class TransparentProxy:
                 if entry is None:
                     continue
                 # fk = (src_ip, src_port, dst_ip, dst_port) — 用 (ip, port) 二元组键
+                # F38: 双键弹出（真实客户端 IP 与 127.0.0.2 两种索引键都要清理）
                 self._client_port_index.pop((fk[0], fk[1]), None)
+                self._client_port_index.pop((_REDIRECT_LOOPBACK_ADDR, fk[1]), None)
                 # O(1) 反向索引清理：entry[5] 是创建时存储的 reverse_key
                 if len(entry) >= 6:
                     self._nat_reverse.pop(entry[5], None)
