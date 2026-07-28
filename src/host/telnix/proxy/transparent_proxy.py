@@ -602,21 +602,26 @@ class TransparentProxy:
                         self._redirected_count += 1
                         # 反向包命中时刷新 last_seen，避免长连接 60s 后被清理导致隧道断裂
                         now = time.monotonic()
-                        # TCP FIN/RST 时清理 NAT 条目
+                        # F37: NAT 条目清理改为"仅 RST 才删，FIN 只刷新 last_seen"。
+                        # 原实现在收到代理→客户端的 FIN 时立即删除条目，但 HTTP 等协议常出现
+                        # "客户端发完请求先 FIN、服务器响应稍后到达"的时序：响应回包到达时
+                        # 条目已被删 → 反向 NAT 未命中 → 回包被丢弃 → 连接异常/重传。
+                        # 改为 FIN 不删（视作活动、刷新 last_seen），仅 RST（连接确已中断）才删，
+                        # 条目最终由 TTL(300s) 或 RST 清理，避免误删导致的反向丢包。
                         # 兼容不同 pydivert 版本：有些版本无 flags 属性，用 fin/rst 布尔属性
                         if hasattr(tcp_hdr, 'flags'):
                             flags = tcp_hdr.flags
-                            is_close = bool((flags & 0x01) or (flags & 0x04))
+                            is_rst = bool(flags & 0x04)
                         else:
-                            is_close = bool(getattr(tcp_hdr, 'fin', False) or getattr(tcp_hdr, 'rst', False))
+                            is_rst = bool(getattr(tcp_hdr, 'rst', False))
                         with self._nat_lock:
-                            if is_close:
+                            if is_rst:
                                 self._nat_table.pop(forward_key, None)
                                 # O(1) 反向索引清理（替代原 O(n) 扫描 _nat_reverse）
                                 self._nat_reverse.pop(stored_reverse_key, None)
                                 self._client_port_index.pop((dst_ip, dst_port), None)
                             else:
-                                # 更新 last_seen（保持长连接 NAT 条目不过期）
+                                # 更新 last_seen（FIN/RST 之外均视作活动，保持条目不过期）
                                 self._nat_table[forward_key] = (
                                     orig_src_ip, orig_src_port,
                                     orig_dst_ip, orig_dst_port, now, stored_reverse_key,
