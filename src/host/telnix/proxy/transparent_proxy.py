@@ -327,7 +327,12 @@ class TransparentProxy:
                 client_ip, client_port, orig_dst_ip, orig_dst_port, now, reverse_key
             )
             self._nat_reverse[reverse_key] = forward_key
-            self._client_port_index[(client_ip, client_port)] = forward_key
+            # F35: 索引 key 必须用改写后的 loopback 地址（127.0.0.2），与出站分支
+            # （transparent_proxy.py:559）及反向查找（:577，dst_ip=127.0.0.2）保持一致。
+            # 原实现用真实 client_ip 作 key，导致 SNI fallback 注册的 NAT 条目在反向
+            # 改写时永远命不中（key 是 (real_ip,port) 而非 (127.0.0.2,port)）→ 回包被丢弃。
+            # nat_table / forward_key 内部仍保留真实 client_ip，供改写响应 dst 使用。
+            self._client_port_index[(_REDIRECT_LOOPBACK_ADDR, client_port)] = forward_key
 
     def _is_admin(self) -> bool:
         """检查管理员权限。
@@ -560,10 +565,16 @@ class TransparentProxy:
                     # F34: 同时改写 src 和 dst 为 127.0.0.2，使包走 127.0.0.0/8 loopback
                     # adapter（WinDivert 可拦截）。原方案仅改 dst 为本机真实 IP，导致
                     # src==dst==本机IP 走 TCP fast path 绕过 WinDivert，反向 NAT 失效。
-                    ip_hdr.src_addr = _REDIRECT_LOOPBACK_ADDR
+                        ip_hdr.src_addr = _REDIRECT_LOOPBACK_ADDR
                     ip_hdr.dst_addr = _REDIRECT_LOOPBACK_ADDR
                     tcp_hdr.dst_port = self.local_port
-                    self._recalc_checksums(packet)
+                    # F36: 不再在用户态调用 packet.recalculate_checksums()。
+                    # 该调用会访问包的缓冲区，而 WinDivert 在 send 前可能已在内核侧
+                    # 回收该缓冲区，导致 PermissionError(13,'段已解除锁定',158)，
+                    # 且随后的 self._divert.send 因同一失效缓冲区重试 5 次均失败 →
+                    # 改写后的 SYN 包永久丢失 → 浏览器连接超时（"浏览器都不行"）。
+                    # 改由 send(recalculate_checksum=True) 在内核态重算校验和，
+                    # 不触碰用户态缓冲区，避免该错误。
                     self._redirected_count += 1
                 # 反向：src port = local_port（代理回包专用端口，唯一标识代理→客户端的回包）
                 # 不再限定 src ip 必须为 127.0.0.1：代理监听 0.0.0.0 时回包 src 是本机真实 IP；
@@ -587,7 +598,7 @@ class TransparentProxy:
                         # 否则客户端收到的包 dst 不匹配其 socket → 静默丢弃。
                         ip_hdr.dst_addr = orig_src_ip
                         tcp_hdr.dst_port = orig_src_port
-                        self._recalc_checksums(packet)
+                        # F36: 同出站分支，校验和交由 send(recalculate_checksum=True) 内核态重算
                         self._redirected_count += 1
                         # 反向包命中时刷新 last_seen，避免长连接 60s 后被清理导致隧道断裂
                         now = time.monotonic()
