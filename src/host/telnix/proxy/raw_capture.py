@@ -301,7 +301,10 @@ class RawCapture:
                 protocol = getattr(ip_hdr, "protocol", getattr(ip_hdr, "next_hdr", None))  # Platform: Windows; IPv4=protocol, IPv6=next_hdr
 
                 # 代码层排除 loopback（filter 层无法可靠排除 IPv6 loopback）
-                if src_ip in ("127.0.0.1", "::1") or dst_ip in ("127.0.0.1", "::1"):
+                # 透明代理会把重定向包改写为 127.0.0.2↔127.0.0.2（127.0.0.0/8 整个段），
+                # 这类纯本机 loopback 流量已由 server.py 处理，若在此被当作真实流量解析
+                # 会因方向误判而生成 tcp://127.0.0.2:8888 之类的怪异条目，故整段跳过。
+                if src_ip == "::1" or src_ip.startswith("127.") or dst_ip == "::1" or dst_ip.startswith("127."):
                     continue
 
                 if protocol == 6:  # TCP
@@ -828,7 +831,7 @@ class RawCapture:
 
     def _is_local_ip(self, ip: str) -> bool:
         """判断是否本机 IP。"""
-        if ip in ("127.0.0.1", "::1"):
+        if ip == "::1" or ip.startswith("127."):
             return True
         global _LOCAL_IP_CACHE, _LOCAL_IP_CACHE_TS
         now = time.time()
