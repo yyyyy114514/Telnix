@@ -1,6 +1,6 @@
-"""发包 API：从零构造 HTTP 请求发送（Composer 功能）。
+"""Send packet API: construct HTTP request from scratch and send (Composer feature).
 
-支持 method/url/headers/body/timeout，独立于抓包流程，不写入 flows 表。
+Supports method/url/headers/body/timeout, independent of capture flow, does not write to flows table.
 """
 
 import asyncio
@@ -16,57 +16,62 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..proxy.server import Headers, SocketReader, read_body
+from .. import logger
 from . import err, ok
 
 router = APIRouter()
 
 
 class SendRequest(BaseModel):
-    """发包请求参数。"""
+    """Send packet request parameters."""
     method: str = "GET"
     url: str
-    headers: dict | None = None      # 自定义请求头
-    body: str | None = None          # 请求体（字符串）
-    timeout: float = 30.0            # 超时秒数
+    headers: dict | None = None      # Custom request headers
+    body: str | None = None          # Request body (string)
+    timeout: float = 30.0            # Timeout seconds
 
 
 @router.post("/send")
 async def send_request(req: SendRequest):
-    """发送自定义 HTTP 请求并返回响应。
+    """Send custom HTTP request and return response.
 
-    不走代理，直接 socket 连接目标服务器。
-    不写入 flows 表（发包是独立功能，与抓包解耦）。
+    Does not go through proxy, direct socket connection to target server.
+    Does not write to flows table (send packet is independent feature, decoupled from capture).
     """
     method = (req.method or "GET").upper().strip()
     if method not in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}:
-        return err(f"不支持的 HTTP 方法: {method}")
+        return err(f"Unsupported HTTP method: {method}")
     url = (req.url or "").strip()
     if not url:
-        return err("URL 不能为空")
+        return err("URL cannot be empty")
     if not url.startswith(("http://", "https://")):
-        return err("URL 必须以 http:// 或 https:// 开头")
+        return err("URL must start with http:// or https://")
 
     try:
         result = await asyncio.to_thread(_do_send, req)
         return ok(result)
     except asyncio.TimeoutError:
-        return err(f"请求超时（{req.timeout}s）")
+        return err(f"Request timeout ({req.timeout}s)")
     except Exception as e:  # noqa: BLE001
-        return err(f"请求失败: {e}")
+        return err(f"Request failed: {e}")
 
 
 def _resolve_safe_target(host: str, port: int) -> str | None:
-    """SSRF 防护：解析 host 并校验每个候选 IP 均非内网/环回/链路本地/保留地址。
+    """SSRF protection: resolve host and verify each candidate IP is not internal/loopback/link-local/reserved address.
 
-    返回用于直连的 IP 字符串；若被禁止或无法解析则返回 None。
-    关键：只用解析得到的 IP 直接连接，避免二次解析被 DNS rebinding 绕过。
-    设置环境变量 TELNIX_DISABLE_SSRF_GUARD=1 可关闭（仅限本地调试，存在安全风险）。
+    Returns IP string for direct connection; returns None if forbidden or unresolvable.
+    Key: only use resolved IP for direct connection, to avoid secondary resolution being bypassed by DNS rebinding.
+    Set environment variable TELNIX_DISABLE_SSRF_GUARD=1 to disable (local debugging only, security risk).
     """
+    # S3 修复：移除 TELNIX_DISABLE_SSRF_GUARD 的"跳过校验直接连接"分支。
+    # 原实现一旦该全局 env 被设置，即对内网/元数据(169.254.169.254)发起 SSRF，
+    # 风险过高。现该 env 仅记录告警、不再具有绕过效果；本地调试内网请通过
+    # 受控转发方式，而非关闭全局守卫。
     if os.environ.get("TELNIX_DISABLE_SSRF_GUARD") == "1":
-        try:
-            return socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)[0][4][0]
-        except Exception:  # noqa: BLE001
-            return None
+        logger.warning(
+            "api", "TELNIX_DISABLE_SSRF_GUARD 已不再绕过 SSRF 校验",
+            "访问内网/元数据请通过其他受控方式，而非关闭全局守卫"
+        )
     if not host:
         return None
     try:
@@ -86,12 +91,12 @@ def _resolve_safe_target(host: str, port: int) -> str | None:
 
 
 def _do_send(req: SendRequest) -> dict:
-    """同步执行 HTTP 请求（在线程池中调用）。"""
+    """Synchronously execute HTTP request (called in thread pool)."""
     sp = urlsplit(req.url)
     scheme = sp.scheme or "http"
     host = sp.hostname
     if not host:
-        raise ValueError("无效的 URL：缺少 host")
+        raise ValueError("Invalid URL: missing host")
     port = sp.port or (443 if scheme == "https" else 80)
     path = (sp.path or "/") + (("?" + sp.query) if sp.query else "")
     method = (req.method or "GET").upper().strip()
@@ -117,7 +122,7 @@ def _do_send(req: SendRequest) -> dict:
     timeout = max(1.0, min(300.0, float(req.timeout or 30.0)))
     resolved_ip = _resolve_safe_target(host, port)
     if resolved_ip is None:
-        raise ValueError("目标地址被禁止或无法解析（内网/环回/链路本地/保留地址，存在 SSRF 风险）")
+        raise ValueError("Target address is forbidden or unresolvable (private/loopback/link-local/reserved address, SSRF risk)")
     t0 = time.time()
     target = socket.create_connection((resolved_ip, port), timeout=timeout)
     try:

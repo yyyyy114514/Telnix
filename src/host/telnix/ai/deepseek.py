@@ -1,10 +1,10 @@
-"""DeepSeek API 调用：分析抓包流量 + 多轮对话 + Agent 工具调用。
+"""DeepSeek API calls: traffic analysis + multi-turn conversation + Agent tool calls.
 
-支持：
-- 流量分析（首次分析创建聊天记录）
-- 多轮对话（带流量上下文）
-- Agent 能力：AI 可调用工具创建自动修改规则（修改请求/响应）
-- 无流量直接对话
+Supports:
+- Traffic analysis (first analysis creates a chat record)
+- Multi-turn conversation (with traffic context)
+- Agent capability: AI can call tools to create auto-modify rules (modify request/response)
+- Direct conversation without traffic
 """
 
 import json
@@ -22,7 +22,7 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 def _get_model() -> str:
-    """从设置读取用户选择的模型，默认 deepseek-v4-flash。"""
+    """Read the user-selected model from settings, default deepseek-v4-flash."""
     m = db.get_setting("deepseek_model", DEFAULT_MODEL)
     if m not in SUPPORTED_MODELS:
         m = DEFAULT_MODEL
@@ -36,36 +36,36 @@ TOOLS = [
         "function": {
             "name": "create_auto_reply_rule",
             "description": (
-                "创建一条自动修改规则，用于修改匹配 URL 的 HTTP 请求或响应体中的 JSON 字段。"
-                "当用户要求修改某个接口的请求或响应字段值时调用此工具。"
-                "默认修改响应（modify_target='response'）；当用户说「改请求」「篡改请求」「伪造请求参数」时传 modify_target='request'。"
+                "Create an auto-modify rule to modify a JSON field in the HTTP request or response body matching a URL. "
+                "Call this tool when the user asks to modify a request or response field value of an interface. "
+                "By default modifies the response (modify_target='response'); when the user says 'change request' / 'tamper request' / 'forge request parameters', pass modify_target='request'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url_pattern": {
                         "type": "string",
-                        "description": "URL 匹配模式，支持通配符 *。例如 *steamstart.top*",
+                        "description": "URL match pattern, supports wildcard *. Example: *steamstart.top*",
                     },
                     "field_key": {
                         "type": "string",
                         "description": (
-                            "要修改的 JSON 字段名。可直接填字段名（如 remainingUses），"
-                            "会全局搜索替换；也可填完整路径（如 data.status.remainingUses）精确定位。"
+                            "The JSON field name to modify. You can fill in the field name directly (e.g. remainingUses), "
+                            "which will be globally searched and replaced; or fill in the full path (e.g. data.status.remainingUses) for precise targeting."
                         ),
                     },
                     "field_value": {
                         "type": "string",
-                        "description": "替换后的值。数字填 99999，字符串填不含引号的文本。",
+                        "description": "The replacement value. Numbers like 99999, strings as plain text without quotes.",
                     },
                     "modify_target": {
                         "type": "string",
                         "enum": ["response", "request"],
-                        "description": "修改目标：'response'（默认）=修改响应体字段；'request'=修改请求体字段（转发前篡改，用于伪造请求参数测试服务端校验）。用户没明确说改请求还是响应时默认 'response'。",
+                        "description": "Modify target: 'response' (default) = modify response body field; 'request' = modify request body field (tamper before forwarding, used to forge request parameters to test server-side validation). When the user does not explicitly say request or response, default to 'response'.",
                     },
                     "note": {
                         "type": "string",
-                        "description": "（必填）规则的备注说明，简要描述这条规则是干什么的，方便用户日后识别。例如「修改登录返回的剩余次数为 99999」。",
+                        "description": "(Required) The note/comment for the rule, briefly describing what this rule does, for future identification. Example: 'Modify the remaining count returned by login to 99999'.",
                     },
                 },
                 "required": ["url_pattern", "field_key", "field_value", "note"],
@@ -76,7 +76,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_auto_reply_rules",
-            "description": "列出当前所有自动修改规则，包括启用状态和匹配模式。",
+            "description": "List all current auto-modify rules, including enabled status and match patterns.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -84,13 +84,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_auto_reply_rule",
-            "description": "删除指定 ID 的自动修改规则。可传单个 ID 或多个 ID（用逗号分隔）。",
+            "description": "Delete auto-modify rules by specified ID. Supports a single ID or multiple IDs (comma-separated).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "rule_id": {
                         "type": "string",
-                        "description": "要删除的规则 ID。多个 ID 用逗号分隔，如 'abc123,def456'。",
+                        "description": "The rule ID(s) to delete. Multiple IDs comma-separated, e.g. 'abc123,def456'.",
                     },
                 },
                 "required": ["rule_id"],
@@ -101,7 +101,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_all_auto_reply_rules",
-            "description": "删除所有自动修改规则（一键清空）。当用户说「删除所有规则」「清空规则」时调用此工具，不要逐个调用 delete_auto_reply_rule。",
+            "description": "Delete all auto-modify rules (clear all at once). Call this tool when the user says 'delete all rules' / 'clear rules', do not call delete_auto_reply_rule one by one.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -109,16 +109,16 @@ TOOLS = [
 
 
 def _parse_dsml_tool_calls(text: str) -> list[dict]:
-    """从 DeepSeek 文本输出中解析 DSML 格式的工具调用。
+    """Parse DSML-format tool calls from DeepSeek text output.
 
-    格式示例：
+    Format example:
       <｜｜DSML｜｜tool_calls>
       <｜｜DSML｜｜invoke name="delete_auto_reply_rule">
       <｜｜DSML｜｜parameter name="rule_id" string="true">53354dfe</｜｜DSML｜｜parameter>
       </｜｜DSML｜｜invoke>
       </｜｜DSML｜｜tool_calls>
 
-    返回 [{"name": "...", "arguments": {...}}] 列表。
+    Returns a list of [{"name": "...", "arguments": {...}}].
     """
     import re
     results: list[dict] = []
@@ -144,7 +144,7 @@ def _parse_dsml_tool_calls(text: str) -> list[dict]:
 
 
 def _strip_dsml(text: str) -> str:
-    """移除文本中的 DSML 标签块，保留其他文字。"""
+    """Remove DSML tag blocks from text, keeping other text."""
     import re
     # 移除整个 tool_calls 块
     cleaned = re.sub(
@@ -164,7 +164,7 @@ def _strip_dsml(text: str) -> str:
 
 
 def _execute_tool(name: str, arguments: dict) -> str:
-    """执行工具调用，返回结果文本。"""
+    """Execute a tool call, returning the result text."""
     if name == "create_auto_reply_rule":
         url_pattern = arguments.get("url_pattern", "")
         field_key = arguments.get("field_key", "")
@@ -201,11 +201,11 @@ def _execute_tool(name: str, arguments: dict) -> str:
             invalidate_cache()
         except Exception:  # noqa: BLE001
             pass
-        target_label = "请求体" if is_request else "响应体"
-        logger.info("ai", f"AI 创建自动修改规则({action}): {url_pattern} -> {field_key}={field_value}",
+        target_label = "request body" if is_request else "response body"
+        logger.info("ai", f"AI created auto-modify rule ({action}): {url_pattern} -> {field_key}={field_value}",
                      f"rule_id={rule_id}, note={note}")
-        return (f"已创建自动修改规则（ID: {rule_id}，动作: {action}）：URL 模式 '{url_pattern}'，"
-                f"将{target_label}字段 '{field_key}' 替换为 '{field_value}'，备注：{note}")
+        return (f"Created auto-modify rule (ID: {rule_id}, action: {action}): URL pattern '{url_pattern}', "
+                f"replace {target_label} field '{field_key}' with '{field_value}', note: {note}")
 
     elif name == "list_auto_reply_rules":
         rules = db.get_rules()
@@ -229,22 +229,22 @@ def _execute_tool(name: str, arguments: dict) -> str:
         # 支持逗号分隔的多个 ID
         ids = [s.strip() for s in str(rule_id_raw).split(",") if s.strip()]
         if not ids:
-            return "未提供要删除的规则 ID"
+            return "No rule ID provided for deletion"
         results = []
         for rule_id in ids:
             existing = db.get_rule(rule_id)
             if not existing:
                 rules = db.get_rules()
                 all_ids = [r["id"] for r in rules]
-                results.append({"rule_id": rule_id, "ok": False, "error": "规则不存在", "current_ids": all_ids})
+                results.append({"rule_id": rule_id, "ok": False, "error": "Rule does not exist", "current_ids": all_ids})
                 continue
             db.delete_rule(rule_id)
             still = db.get_rule(rule_id)
             if still:
-                results.append({"rule_id": rule_id, "ok": False, "error": "删除后仍存在"})
+                results.append({"rule_id": rule_id, "ok": False, "error": "Still exists after deletion"})
             else:
                 results.append({"rule_id": rule_id, "ok": True, "pattern": existing.get("pattern", "")})
-                logger.info("ai", f"AI 删除规则 {rule_id}", f"pattern={existing.get('pattern')}")
+                logger.info("ai", f"AI deleted rule {rule_id}", f"pattern={existing.get('pattern')}")
         try:
             from ..auto_reply.rules import invalidate_cache
             invalidate_cache()
@@ -255,7 +255,7 @@ def _execute_tool(name: str, arguments: dict) -> str:
     elif name == "delete_all_auto_reply_rules":
         rules = db.get_rules()
         if not rules:
-            return json.dumps({"deleted": 0, "msg": "当前没有任何规则"}, ensure_ascii=False)
+            return json.dumps({"deleted": 0, "msg": "No rules currently exist"}, ensure_ascii=False)
         count = 0
         for r in rules:
             try:
@@ -268,75 +268,75 @@ def _execute_tool(name: str, arguments: dict) -> str:
             invalidate_cache()
         except Exception:  # noqa: BLE001
             pass
-        logger.info("ai", f"AI 一键删除所有规则，共 {count} 条")
+        logger.info("ai", f"AI deleted all rules, total {count}")
         # 验证
         remaining = db.get_rules()
         return json.dumps({
             "deleted": count,
             "remaining": len(remaining),
-            "msg": f"已删除 {count} 条规则" + (f"，剩余 {len(remaining)} 条未删除" if remaining else ""),
+            "msg": f"Deleted {count} rule(s)" + (f", {len(remaining)} rule(s) not deleted" if remaining else ""),
         }, ensure_ascii=False)
 
-    return f"未知工具: {name}"
+    return f"Unknown tool: {name}"
 
 
 # ---------- 消息构建 ----------
 
 SYSTEM_PROMPT = (
-    "你是网络流量分析助手。用户会提供 HTTP/HTTPS 抓包流量数据，"
-    "你需要用中文分析流量的目的、异常、关键参数和鉴权信息。"
-    "后续用户可能就这些流量追问细节，请基于提供的流量上下文回答。\n\n"
-    "你还具有 Agent 能力，可以帮用户管理自动修改规则（修改请求或响应）：\n"
-    "- 当用户说「帮我设置自动修改把 xxx 字段改成 yyy」「改响应里的 xxx」时，调用 create_auto_reply_rule 工具（modify_target='response' 或不传）\n"
-    "- 当用户说「改请求里的 xxx」「篡改请求参数」「伪造请求字段」时，调用 create_auto_reply_rule 工具并传 modify_target='request'\n"
-    "- 当用户问「有哪些自动修改规则」「列出规则」时，**必须先调用 list_auto_reply_rules 工具**查看实际规则，不能凭印象回答\n"
-    "- 当用户说「删除规则 xxx」时，调用 delete_auto_reply_rule 工具（支持逗号分隔多个 ID）\n"
-    "- 当用户说「删除所有规则」「清空规则」时，**直接调用 delete_all_auto_reply_rules 工具**，不要先 list 再逐个删除\n\n"
-    "**重要准则**：\n"
-    "1. 创建规则时必须填写 note 字段（备注），简要描述这条规则是干什么的\n"
-    "2. 任何涉及规则查询/删除的操作，必须先调用 list_auto_reply_rules 工具获取真实规则列表，严禁凭历史印象回答「没有规则」\n"
-    "3. 删除规则时用 list 返回的真实 rule_id，不要用记忆中的旧 id\n"
-    "4. 删除所有规则时用 delete_all_auto_reply_rules，不要循环调用 delete_auto_reply_rule\n"
-    "5. list_auto_reply_rules 返回 JSON，其中 rules 数组每项的 rule_id 字段是真实 ID\n"
-    "6. 用户说「改请求」时务必传 modify_target='request'；没明确说改请求还是响应时默认改响应（不传或传 'response'）\n\n"
-    "调用工具后，用中文告诉用户操作结果。用 Markdown 输出。"
+    "You are a network traffic analysis assistant. The user will provide HTTP/HTTPS captured traffic data. "
+    "You need to analyze the purpose, anomalies, key parameters, and authentication information of the traffic in Chinese. "
+    "The user may follow up with details about this traffic; please answer based on the provided traffic context.\n\n"
+    "You also have Agent capabilities to help the user manage auto-modify rules (modify request or response):\n"
+    "- When the user says 'help me set up auto-modify to change xxx field to yyy' / 'change xxx in the response', call the create_auto_reply_rule tool (modify_target='response' or omit)\n"
+    "- When the user says 'change xxx in the request' / 'tamper request parameters' / 'forge request fields', call the create_auto_reply_rule tool with modify_target='request'\n"
+    "- When the user asks 'what auto-modify rules are there' / 'list rules', **you must call the list_auto_reply_rules tool first** to check actual rules; do not answer from memory\n"
+    "- When the user says 'delete rule xxx', call the delete_auto_reply_rule tool (supports comma-separated multiple IDs)\n"
+    "- When the user says 'delete all rules' / 'clear rules', **directly call the delete_all_auto_reply_rules tool**; do not list then delete one by one\n\n"
+    "**Important guidelines**:\n"
+    "1. When creating a rule, you must fill in the note field (comment), briefly describing what this rule does\n"
+    "2. For any rule query/delete operation, you must call the list_auto_reply_rules tool first to get the real rule list; never answer 'no rules' based on historical memory\n"
+    "3. When deleting a rule, use the real rule_id returned by list; do not use old IDs from memory\n"
+    "4. When deleting all rules, use delete_all_auto_reply_rules; do not loop calling delete_auto_reply_rule\n"
+    "5. list_auto_reply_rules returns JSON; the rule_id field of each item in the rules array is the real ID\n"
+    "6. When the user says 'change request', be sure to pass modify_target='request'; when not explicitly stated, default to changing the response (omit or pass 'response')\n\n"
+    "After calling a tool, tell the user the operation result in Chinese. Output in Markdown."
 )
 
 
 def _build_flow_context(flows: list[dict]) -> str:
-    """构建流量上下文文本。"""
+    """Build traffic context text."""
     if not flows:
-        return "（本次对话无关联流量数据）"
+        return "(No associated traffic data for this conversation)"
     snippets = []
     for i, f in enumerate(flows, 1):
         req_headers = _safe_json(f.get("request_headers"))
         resp_headers = _safe_json(f.get("response_headers"))
         snippets.append(
-            f"### 流量 {i}\n"
-            f"- 请求：{f.get('method', '')} {f.get('url', '')}\n"
-            f"- 进程：{f.get('process_name', '')} (PID {f.get('pid', '')})\n"
-            f"- 请求头：{json.dumps(req_headers, ensure_ascii=False)}\n"
-            f"- 请求体：{(f.get('request_body') or '')[:2000]}\n"
-            f"- 状态码：{f.get('status_code', '')}\n"
-            f"- 响应头：{json.dumps(resp_headers, ensure_ascii=False)}\n"
-            f"- 响应体：{(f.get('response_body') or '')[:4000]}\n"
+            f"### Flow {i}\n"
+            f"- Request: {f.get('method', '')} {f.get('url', '')}\n"
+            f"- Process: {f.get('process_name', '')} (PID {f.get('pid', '')})\n"
+            f"- Request headers: {json.dumps(req_headers, ensure_ascii=False)}\n"
+            f"- Request body: {(f.get('request_body') or '')[:2000]}\n"
+            f"- Status code: {f.get('status_code', '')}\n"
+            f"- Response headers: {json.dumps(resp_headers, ensure_ascii=False)}\n"
+            f"- Response body: {(f.get('response_body') or '')[:4000]}\n"
         )
     return "\n".join(snippets)
 
 
 def _build_analyze_messages(flows: list[dict]) -> list[dict]:
-    """构建首次分析的消息列表。"""
+    """Build the message list for the first analysis."""
     flow_ctx = _build_flow_context(flows)
     if flows:
         content = (
-            f"请分析以下抓包流量：\n\n{flow_ctx}\n\n"
-            "请分析：\n1. 每个流量的目的与含义\n"
-            "2. 是否存在异常或可疑请求\n"
-            "3. 关键参数、Token、鉴权信息\n"
-            "4. 总结整体行为"
+            f"Please analyze the following captured traffic:\n\n{flow_ctx}\n\n"
+            "Please analyze:\n1. The purpose and meaning of each flow\n"
+            "2. Whether there are anomalous or suspicious requests\n"
+            "3. Key parameters, Tokens, authentication information\n"
+            "4. Summarize the overall behavior"
         )
     else:
-        content = "用户发起了自由对话，没有关联流量。请打招呼并询问用户需要什么帮助。"
+        content = "The user started a free conversation with no associated traffic. Please greet them and ask what help they need."
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": content},
@@ -345,10 +345,10 @@ def _build_analyze_messages(flows: list[dict]) -> list[dict]:
 
 def _build_chat_messages(history: list[dict], flow_context: str,
                          user_message: str) -> list[dict]:
-    """构建多轮对话消息列表（含流量上下文 + 历史记录）。"""
+    """Build the multi-turn conversation message list (with traffic context + history)."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"以下是分析的流量上下文，后续问答都基于此：\n\n{flow_context}"},
+        {"role": "system", "content": f"The following is the analyzed traffic context; subsequent Q&A is based on it:\n\n{flow_context}"},
     ]
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})
@@ -367,13 +367,42 @@ def _safe_json(s):
 
 # ---------- API 调用 ----------
 
-def _create_client() -> httpx.Client:
-    """创建调用 DeepSeek 官方 API 的 httpx 客户端。
+# S6 修复：日志脱敏——AI 工具调用的 args 可能包含授权头/Token/Cookie 等敏感信息，
+# 直接记录会经 /api/logs 与 /api/logs/export 泄露。对敏感键与字符串中的凭据片段做脱敏。
+_SENSITIVE_KEYS = (
+    "authorization", "cookie", "set-cookie", "token", "api_key",
+    "apikey", "secret", "password", "x-api-key",
+)
 
-    安全：DeepSeek 为公网 HTTPS 服务，默认启用证书校验，防止中间人攻击截获
-    并窃取请求头中的 Bearer API Key。仅在显式设置环境变量
-    TELNIX_DEEPSEEK_INSECURE=1（自签 CA / 调试代理环境）时才临时关闭校验，
-    生产环境不推荐。
+
+def _redact_sensitive(obj, depth: int = 0):
+    """递归屏蔽敏感键值与字符串中的凭据片段，用于日志脱敏。"""
+    if depth > 6:
+        return obj
+    if isinstance(obj, dict):
+        return {
+            k: ("***" if k.lower() in _SENSITIVE_KEYS else _redact_sensitive(v, depth + 1))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redact_sensitive(v, depth + 1) for v in obj]
+    if isinstance(obj, str):
+        import re
+        return re.sub(
+            r'(?i)(authorization|cookie|token|api[_-]?key)\s*[:=]\s*\S+',
+            r'\1: ***', obj,
+        )
+    return obj
+
+
+def _create_client() -> httpx.Client:
+    """Create an httpx client to call the DeepSeek official API.
+
+    Security: DeepSeek is a public HTTPS service; certificate verification is enabled by
+    default to prevent man-in-the-middle attacks from intercepting and stealing the Bearer
+    API Key in request headers. Only when the environment variable
+    TELNIX_DEEPSEEK_INSECURE=1 is explicitly set (self-signed CA / debug proxy environment)
+    is verification temporarily disabled; not recommended for production.
     """
     if os.environ.get("TELNIX_DEEPSEEK_INSECURE") == "1":
         ctx = ssl.create_default_context()
@@ -384,12 +413,12 @@ def _create_client() -> httpx.Client:
 
 
 def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
-    """调用 DeepSeek API，返回 {ok, result/error, tool_results?}。"""
+    """Call the DeepSeek API, returns {ok, result/error, tool_results?}."""
     api_key = db.get_setting("deepseek_api_key", "")
     if not api_key:
-        return {"ok": False, "error": "未配置 DeepSeek API key"}
+        return {"ok": False, "error": "DeepSeek API key not configured"}
     try:
-        logger.info("ai", f"调用 DeepSeek API, messages={len(messages)} 条, tools={use_tools}")
+        logger.info("ai", f"Calling DeepSeek API, messages={len(messages)}, tools={use_tools}")
         model = _get_model()
         with _create_client() as client:
             payload = {
@@ -419,7 +448,7 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
             if not tool_calls and "<｜｜DSML｜｜" in content_text:
                 parsed = _parse_dsml_tool_calls(content_text)
                 if parsed:
-                    logger.info("ai", f"从 DSML 文本解析到 {len(parsed)} 个工具调用")
+                    logger.info("ai", f"Parsed {len(parsed)} tool calls from DSML text")
                     # 构造标准 tool_calls 结构
                     for i, p in enumerate(parsed):
                         tool_calls.append({
@@ -442,7 +471,7 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
                         args = json.loads(fn.get("arguments", "{}"))
                     except Exception:  # noqa: BLE001
                         args = {}
-                    logger.info("ai", f"AI 调用工具: {name}", f"参数: {args}")
+                    logger.info("ai", f"AI calling tool: {name}", f"args: {_redact_sensitive(args)}")
                     result = _execute_tool(name, args)
                     results.append({"name": name, "result": result})
                     messages.append({
@@ -451,7 +480,7 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
                         "content": result,
                     })
                 # 再次调用 API，让它根据工具结果生成回复
-                logger.info("ai", "工具调用完成，再次请求 API 生成回复")
+                logger.info("ai", "Tool calls completed, requesting API again to generate reply")
                 resp2 = client.post(
                     API_URL,
                     headers={
@@ -471,7 +500,7 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
                     .get("message", {})
                     .get("content", "")
                 )
-                logger.info("ai", "API 调用成功（含工具调用）")
+                logger.info("ai", "API call succeeded (with tool calls)")
                 # 第二次 API 返回的 content 也可能含 DSML 标签，需清理
                 result_text = _strip_dsml(result_text)
                 return {
@@ -483,20 +512,20 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
             result = message.get("content", "") or ""
             # 无 tool_calls 时的回复也可能含 DSML 标签，统一清理
             result = _strip_dsml(result)
-            logger.info("ai", f"API 调用成功, 回复长度={len(result)}")
+            logger.info("ai", f"API call succeeded, reply length={len(result)}")
             return {"ok": True, "result": result}
     except httpx.HTTPStatusError as e:
-        logger.error("ai", f"DeepSeek API 返回错误: {e.response.status_code}",
+        logger.error("ai", f"DeepSeek API returned error: {e.response.status_code}",
                      e.response.text[:500])
-        return {"ok": False, "error": f"DeepSeek 返回 {e.response.status_code}: "
+        return {"ok": False, "error": f"DeepSeek returned {e.response.status_code}: "
                                       f"{e.response.text[:200]}"}
     except Exception as e:  # noqa: BLE001
-        logger.error("ai", f"DeepSeek API 请求失败: {e}", str(e))
-        return {"ok": False, "error": f"请求失败: {e}"}
+        logger.error("ai", f"DeepSeek API request failed: {e}", str(e))
+        return {"ok": False, "error": f"Request failed: {e}"}
 
 
 def analyze_flows(flow_ids: list[int]) -> dict:
-    """分析指定流量列表，返回 {ok, result/error}。支持空列表（自由对话）。"""
+    """Analyze the specified flow list, returns {ok, result/error}. Supports empty list (free conversation)."""
     flows = [db.get_flow(fid) for fid in flow_ids] if flow_ids else []
     flows = [f for f in flows if f]
     messages = _build_analyze_messages(flows)
@@ -504,6 +533,6 @@ def analyze_flows(flow_ids: list[int]) -> dict:
 
 
 def chat(history: list[dict], flow_context: str, user_message: str) -> dict:
-    """多轮对话：基于历史记录和流量上下文回答用户问题。"""
+    """Multi-turn conversation: answer user questions based on history and traffic context."""
     messages = _build_chat_messages(history, flow_context, user_message)
     return _call_api(messages, use_tools=True)

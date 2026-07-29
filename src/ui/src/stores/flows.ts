@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef, computed, triggerRef } from 'vue'
+import { ElMessage } from 'element-plus'
 import { api, type Flow } from '../api/client'
 
 // SSE 推送：替代 500ms 轮询，新 flow 入库后立即推送，UI 延迟 <50ms
@@ -88,6 +89,19 @@ export const useFlowsStore = defineStore('flows', () => {
   function rebuildIndex() {
     flowIndex.clear()
     for (const f of flows.value) flowIndex.set(f.id, f)
+  }
+
+  // P1-2 修复：前端 flows 数组硬上限，避免长跑会话下无界增长导致
+  // displayFlows 计算(O(n))/updateMaxFlowId(O(n))/saveToCache 序列化成本线性上升。
+  // 列表按 id 降序，尾部为最旧流量，裁剪尾部不影响 since_id 增量基线（maxFlowId 在顶部）。
+  const MAX_FLOWS = 5000
+  function enforceMaxFlows() {
+    const arr = flows.value
+    if (arr.length <= MAX_FLOWS) return
+    const removed = arr.slice(MAX_FLOWS)
+    flows.value = arr.slice(0, MAX_FLOWS)
+    for (const f of removed) flowIndex.delete(f.id)
+    total.value = flows.value.length
   }
 
   const selectedFlow = computed<Flow | null>(() => {
@@ -296,6 +310,7 @@ export const useFlowsStore = defineStore('flows', () => {
       // 性能优化：unshift 原地修改 + triggerRef，避免新建大数组
       flows.value.unshift(...deduped)
       for (const f of deduped) flowIndex.set(f.id, f)
+      enforceMaxFlows()
       triggerRef(flows)
       // deduped 已按 id DESC，第一条就是最大 id
       const newMax = deduped[0].id
@@ -328,11 +343,14 @@ export const useFlowsStore = defineStore('flows', () => {
       const f = flowIndex.get(id)
       if (f && f.request_headers === undefined) {
         // lite flow，异步拉取完整数据并原地更新
-        api.getFlow(id).then((full: Flow) => {
+          api.getFlow(id).then((full: Flow) => {
           // 原地 mutate flow 对象（shallowRef 模式下需 triggerRef）
           Object.assign(f, full)
           triggerRef(flows)
-        }).catch(() => { /* 静默 */ })
+        }).catch(() => {
+          // UX3 修复：选中详情拉取失败时给出轻提示，避免 Inspector 静默空白
+          ElMessage.error('加载流量详情失败')
+        })
       }
     }
   }
@@ -351,6 +369,7 @@ export const useFlowsStore = defineStore('flows', () => {
       total.value = flows.value.length
       // 注入的 flow id 更大时同步 maxFlowId，避免后续增量轮询漏掉中间的包
       if (flow.id > maxFlowId.value) maxFlowId.value = flow.id
+      enforceMaxFlows()
     }
   }
 
@@ -440,6 +459,7 @@ export const useFlowsStore = defineStore('flows', () => {
     deduped.sort((a, b) => b.id - a.id)
     flows.value.unshift(...deduped)
     for (const f of deduped) flowIndex.set(f.id, f)
+    enforceMaxFlows()
     triggerRef(flows)
     const newMax = deduped[0].id
     if (newMax > maxFlowId.value) maxFlowId.value = newMax

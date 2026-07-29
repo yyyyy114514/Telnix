@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type RawStatus, type Flow } from '../api/client'
 import { useCaptureStore } from '../stores/capture'
@@ -8,6 +9,7 @@ import { useFlowsStore } from '../stores/flows'
 import HexView from '../components/HexView.vue'
 import ProtocolView from '../components/ProtocolView.vue'
 
+const { t } = useI18n()
 const capture = useCaptureStore()
 const flowsStore = useFlowsStore()
 const router = useRouter()
@@ -141,7 +143,7 @@ function onFocusByName() {
   // 进程名只在前端做匹配（不调用后端）
   const name = focusProcessName.value.trim()
   if (!name) return
-  ElMessage.success(`专注进程名：${name}（前端匹配）`)
+  ElMessage.success(t('raw.focusProcessNameSuccess', { name }))
 }
 
 function resetFocus() {
@@ -222,7 +224,7 @@ async function confirmDeleteFlows() {
   if (!ids.length) { showDeleteConfirm.value = false; return }
   try {
     await api.batchDeleteFlows(ids)
-    ElMessage.success(`已删除 ${ids.length} 条`)
+    ElMessage.success(t('raw.deletedCount', { count: ids.length }))
     flows.value = flows.value.filter(x => !ids.includes(x.id))
     if (selectedId.value !== null && ids.includes(selectedId.value)) {
       selectedId.value = null
@@ -232,7 +234,7 @@ async function confirmDeleteFlows() {
     multiSelectMode.value = false
     showDeleteConfirm.value = false
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('raw.deleteFailed') + (e?.message || e))
     showDeleteConfirm.value = false
   }
 }
@@ -250,7 +252,7 @@ async function batchIgnorePid() {
     if (ids.includes(f.id) && f.pid && f.pid > 0) pidSet.add(f.pid)
   }
   if (!pidSet.size) {
-    ElMessage.warning('选中流量无 PID 信息')
+    ElMessage.warning(t('raw.noPidInSelection'))
     return
   }
   try {
@@ -260,11 +262,11 @@ async function batchIgnorePid() {
       api.ignoreProcess({ pid, name: `PID ${pid}` })
     )
     await Promise.all(tasks)
-    ElMessage.success(`已忽略 ${pidSet.size} 个 PID`)
+    ElMessage.success(t('raw.ignoredPidCount', { count: pidSet.size }))
     selectedFlowIds.value.clear()
     multiSelectMode.value = false
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
   }
 }
 
@@ -277,7 +279,7 @@ async function batchIgnoreProcess() {
     if (ids.includes(f.id) && f.process_name) nameSet.add(f.process_name)
   }
   if (!nameSet.size) {
-    ElMessage.warning('选中流量无进程名')
+    ElMessage.warning(t('raw.noProcessInSelection'))
     return
   }
   try {
@@ -285,11 +287,11 @@ async function batchIgnoreProcess() {
       api.ignoreProcess({ pid: null, name })
     )
     await Promise.all(tasks)
-    ElMessage.success(`已忽略 ${nameSet.size} 个进程`)
+    ElMessage.success(t('raw.ignoredProcessCount', { count: nameSet.size }))
     selectedFlowIds.value.clear()
     multiSelectMode.value = false
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
   }
 }
 
@@ -416,13 +418,13 @@ const ctxMenuRef = ref<HTMLElement | null>(null)
 
 // 复制项（TCP/UDP 适用：端口、进程、协议、ID）
 const COPY_FIELDS = [
-  { key: 'id', label: 'ID', field: 'id' },
-  { key: 'protocol', label: '协议', field: 'protocol' },
-  { key: 'ports', label: '端口', field: 'ports' },
-  { key: 'process', label: '进程', field: 'process_name' },
-  { key: 'pid', label: 'PID', field: 'pid' },
-  { key: 'size', label: '大小', field: 'size' },
-  { key: 'time', label: '时间', field: 'timestamp' },
+  { key: 'id', label: 'raw.fieldId', field: 'id' },
+  { key: 'protocol', label: 'raw.protocol', field: 'protocol' },
+  { key: 'ports', label: 'raw.port', field: 'ports' },
+  { key: 'process', label: 'raw.process', field: 'process_name' },
+  { key: 'pid', label: 'raw.pid', field: 'pid' },
+  { key: 'size', label: 'raw.size', field: 'size' },
+  { key: 'time', label: 'raw.time', field: 'timestamp' },
 ]
 
 function onContextMenu(e: MouseEvent, flow: Flow) {
@@ -458,7 +460,7 @@ function copyField(field: string) {
   if (!f) return
   const text = getFieldValue(f, field)
   navigator.clipboard.writeText(text).catch(() => {})
-  ElMessage.success(`已复制：${text.length > 40 ? text.slice(0, 40) + '...' : text}`)
+  ElMessage.success(t('raw.copiedText', { text: text.length > 40 ? text.slice(0, 40) + '...' : text }))
   closeCtxMenu()
 }
 
@@ -472,15 +474,15 @@ function onFlowDblClick(f: Flow) {
 async function ctxIgnorePid() {
   const f = ctxMenu.value.flow
   if (!f || !f.pid) {
-    ElMessage.warning('该流量无 PID 信息')
+    ElMessage.warning(t('raw.noPidInfo'))
     closeCtxMenu()
     return
   }
   try {
     await api.ignoreProcess({ pid: f.pid, name: f.process_name || `PID ${f.pid}` })
-    ElMessage.success(`已忽略 PID ${f.pid}`)
+    ElMessage.success(t('raw.ignoredPid', { pid: f.pid }))
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
   }
   closeCtxMenu()
 }
@@ -488,15 +490,15 @@ async function ctxIgnorePid() {
 async function ctxIgnoreProcess() {
   const f = ctxMenu.value.flow
   if (!f || !f.process_name) {
-    ElMessage.warning('该流量无进程名')
+    ElMessage.warning(t('raw.noProcessName'))
     closeCtxMenu()
     return
   }
   try {
     await api.ignoreProcess({ pid: null, name: f.process_name })
-    ElMessage.success(`已忽略进程 ${f.process_name}`)
+    ElMessage.success(t('raw.ignoredProcess', { name: f.process_name }))
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
   }
   closeCtxMenu()
 }
@@ -506,8 +508,8 @@ async function ctxDelete() {
   const f = ctxMenu.value.flow
   if (!f) return
   try {
-    await ElMessageBox.confirm(`确定删除该数据包 #${f.id}？`, '删除', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('raw.deleteConfirmMsg', { id: f.id }), t('raw.delete'), {
+      confirmButtonText: t('raw.delete'), cancelButtonText: t('raw.cancel'), type: 'warning',
     })
   } catch {
     closeCtxMenu()
@@ -520,9 +522,9 @@ async function ctxDelete() {
       selectedId.value = null
       selectedHex.value = ''
     }
-    ElMessage.success('已删除')
+    ElMessage.success(t('raw.deleted'))
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('raw.deleteFailed') + (e?.message || e))
   }
   closeCtxMenu()
 }
@@ -539,6 +541,10 @@ function onFlowsCleared() {
   maxFlowId.value = 0
 }
 
+// UX5 修复：初始加载流量时显示 loading 态，避免空白列表让用户无法区分
+// "加载中"与"确实无包"
+const loading = ref(false)
+
 async function loadStatus() {
   try {
     rawStatus.value = await api.rawStatus()
@@ -546,19 +552,20 @@ async function loadStatus() {
 }
 
 async function loadFlows() {
-  // 优先用当前 session_id；无则尝试拉最近会话的流量（raw 抓包可能独立创建会话）
-  let sid = capture.status.session_id
-  if (!sid) {
-    try {
-      const sessions: any = await api.getSessions()
-      const list = sessions?.sessions || sessions || []
-      if (Array.isArray(list) && list.length) {
-        sid = list[0].id
-      }
-    } catch { /* ignore */ }
-  }
-  if (!sid) return
+  loading.value = true
   try {
+    // 优先用当前 session_id；无则尝试拉最近会话的流量（raw 抓包可能独立创建会话）
+    let sid = capture.status.session_id
+    if (!sid) {
+      try {
+        const sessions: any = await api.getSessions()
+        const list = sessions?.sessions || sessions || []
+        if (Array.isArray(list) && list.length) {
+          sid = list[0].id
+        }
+      } catch { /* ignore */ }
+    }
+    if (!sid) return
     const res = await api.getFlows(sid, { limit: 200, protocol: 'tcp' })
     const res2 = await api.getFlows(sid, { limit: 200, protocol: 'udp' })
     // 合并 tcp+udp，按 id 倒序（DNS 协议选项已移除，后端解析代码保留）
@@ -568,6 +575,9 @@ async function loadFlows() {
     // 列表已降序，第一条就是最大 id
     maxFlowId.value = flows.value[0]?.id || 0
   } catch { /* ignore */ }
+  finally {
+    loading.value = false
+  }
 }
 
 // 增量轮询：用 since_id 分别拉取 tcp/udp 新流量，合并去重后插入顶部
@@ -615,10 +625,10 @@ async function onToggle() {
   try {
     if (rawStatus.value.running) {
       await api.rawStop()
-      ElMessage.success('TCP/UDP 抓包已停止')
+      ElMessage.success(t('raw.captureStopped'))
     } else {
       if (!rawStatus.value.is_admin) {
-        ElMessage.warning('需要管理员权限，请点击「管理员重启」')
+        ElMessage.warning(t('raw.needAdminRestart'))
         return
       }
       const body: any = { filter_str: filterStr.value }
@@ -629,14 +639,14 @@ async function onToggle() {
         body.port_filter = portFilter.value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
       }
       await api.rawStart(body)
-      ElMessage.success('TCP/UDP 抓包已启动')
+      ElMessage.success(t('raw.captureStarted'))
       // 启动后立即拉一次状态（更新 capture.status.session_id）再拉流量
       await capture.fetchStatus()
       await loadFlows()
     }
     await loadStatus()
   } catch (e: any) {
-    ElMessage.error('操作失败：' + (e?.message || e))
+    ElMessage.error(t('raw.operationFailed') + (e?.message || e))
   }
 }
 
@@ -645,9 +655,9 @@ async function restartAsAdmin() {
   restartingAsAdmin.value = true
   try {
     await api.restartAsAdmin()
-    ElMessage.success('正在以管理员身份重启，请稍候...')
+    ElMessage.success(t('raw.restartingAsAdmin'))
   } catch (e: any) {
-    ElMessage.error('重启失败：' + (e?.message || e))
+    ElMessage.error(t('raw.restartFailed') + (e?.message || e))
     restartingAsAdmin.value = false
   }
 }
@@ -656,28 +666,28 @@ async function restartAsAdmin() {
 async function ignorePid() {
   const f = selectedFlow.value
   if (!f || !f.pid) {
-    ElMessage.warning('该流量无 PID 信息')
+    ElMessage.warning(t('raw.noPidInfo'))
     return
   }
   try {
     await api.ignoreProcess({ pid: f.pid, name: f.process_name || `PID ${f.pid}` })
-    ElMessage.success(`已忽略 PID ${f.pid}`)
+    ElMessage.success(t('raw.ignoredPid', { pid: f.pid }))
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
   }
 }
 
 async function ignoreProcess() {
   const f = selectedFlow.value
   if (!f || !f.process_name) {
-    ElMessage.warning('该流量无进程名')
+    ElMessage.warning(t('raw.noProcessName'))
     return
   }
   try {
     await api.ignoreProcess({ pid: null, name: f.process_name })
-    ElMessage.success(`已忽略进程 ${f.process_name}`)
+    ElMessage.success(t('raw.ignoredProcess', { name: f.process_name }))
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
   }
 }
 
@@ -748,16 +758,16 @@ onUnmounted(() => {
         @click="onToggle"
       >
         <el-icon><component :is="rawStatus.running ? 'VideoPause' : 'VideoPlay'" /></el-icon>
-        &nbsp;{{ rawStatus.running ? '停止抓包' : '开始抓包' }}
+        &nbsp;{{ rawStatus.running ? t('raw.stopCapture') : t('raw.startCapture') }}
       </el-button>
       <div class="raw-status-tags">
         <el-tag size="small" :type="rawStatus.is_admin ? 'success' : 'danger'">
-          {{ rawStatus.is_admin ? (rawStatus.backend === 'windivert' ? '管理员' : 'root') : (rawStatus.backend === 'windivert' ? '非管理员' : '非 root') }}
+          {{ rawStatus.is_admin ? (rawStatus.backend === 'windivert' ? t('raw.admin') : 'root') : (rawStatus.backend === 'windivert' ? t('raw.nonAdmin') : t('raw.nonRoot')) }}
         </el-tag>
         <el-tag v-if="rawStatus.backend && rawStatus.backend !== 'none'" size="small" type="info">
           {{ backendDisplayName }}
         </el-tag>
-        <el-tag v-if="rawStatus.running" size="small" type="success">抓包中</el-tag>
+        <el-tag v-if="rawStatus.running" size="small" type="success">{{ t('raw.capturing') }}</el-tag>
         <!-- 非管理员/root：提供提权重启按钮 -->
         <el-button
           v-if="!rawStatus.is_admin"
@@ -766,55 +776,58 @@ onUnmounted(() => {
           :loading="restartingAsAdmin"
           @click="restartAsAdmin"
         >
-          <el-icon><Key /></el-icon>&nbsp;{{ rawStatus.backend === 'windivert' ? '管理员重启' : '提权重启' }}
+          <el-icon><Key /></el-icon>&nbsp;{{ rawStatus.backend === 'windivert' ? t('raw.adminRestart') : t('raw.elevateRestart') }}
         </el-button>
       </div>
       <div class="flex-1"></div>
       <span class="text-dim mono" style="font-size: 11px">
-        {{ backendDisplayName }} 网络层抓包 · 需{{ rawStatus.backend === 'windivert' ? '管理员' : 'root' }}权限
+        {{ t('raw.networkCaptureHint', { backend: backendDisplayName, perm: rawStatus.backend === 'windivert' ? t('raw.admin') : 'root' }) }}
       </span>
     </div>
 
     <!-- 非管理员/root 警告条 -->
     <div v-if="!rawStatus.is_admin" class="raw-warn-bar">
       <el-icon><WarningFilled /></el-icon>
-      <span>TCP/UDP 抓包需要{{ rawStatus.backend === 'windivert' ? '管理员' : 'root' }}权限。当前非{{ rawStatus.backend === 'windivert' ? '管理员' : 'root' }}运行，点击右侧「{{ rawStatus.backend === 'windivert' ? '管理员重启' : '提权重启' }}」以{{ rawStatus.backend === 'windivert' ? '管理员' : 'root' }}身份重启 Telnix。</span>
+      <span>{{ t('raw.warnBarText', {
+        perm: rawStatus.backend === 'windivert' ? t('raw.admin') : 'root',
+        restart: rawStatus.backend === 'windivert' ? t('raw.adminRestart') : t('raw.elevateRestart')
+      }) }}</span>
     </div>
 
     <!-- 过滤栏（图标按钮风格，参照 FlowList） -->
     <div class="filter-bar">
       <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
-        <el-icon><Filter /></el-icon>&nbsp;筛选
+        <el-icon><Filter /></el-icon>&nbsp;{{ t('raw.filter') }}
         <span v-if="hasActiveFilters" class="filter-badge"></span>
       </el-button>
       <el-dropdown size="small" :disabled="!selectedFlow" @command="(c: string) => { c === 'pid' && ignorePid(); c === 'process' && ignoreProcess() }">
         <el-button size="small" :disabled="!selectedFlow">
-          <el-icon><RemoveFilled /></el-icon>&nbsp;忽略<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ignore') }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="pid" :disabled="!(selectedFlow?.pid && selectedFlow.pid > 0)">按 PID</el-dropdown-item>
-            <el-dropdown-item command="process" :disabled="!selectedFlow?.process_name">按进程名</el-dropdown-item>
+            <el-dropdown-item command="pid" :disabled="!(selectedFlow?.pid && selectedFlow.pid > 0)">{{ t('raw.ignoreByPid') }}</el-dropdown-item>
+            <el-dropdown-item command="process" :disabled="!selectedFlow?.process_name">{{ t('raw.ignoreByProcess') }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
       <!-- 专注模式：点击打开悬浮窗 -->
-      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="bottom">
+      <el-tooltip :content="focusEnabled ? t('raw.focusActive') : t('raw.focusMode')" placement="bottom">
         <el-button
           size="small"
           :type="focusEnabled ? 'success' : 'default'"
           @click="togglePopup('focus')"
         >
-          <el-icon><Aim /></el-icon>&nbsp;专注
+          <el-icon><Aim /></el-icon>&nbsp;{{ t('raw.focus') }}
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? `自动滚动：暂停中（${flowsStore.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="bottom">
+      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? t('raw.autoScrollPaused', { delay: flowsStore.autoScrollDelay }) : t('raw.autoScrollOn')) : t('raw.autoScrollOff')" placement="bottom">
         <el-button size="small" :type="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="flowsStore.autoScroll = !flowsStore.autoScroll">
           <el-icon><Bottom /></el-icon>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
+      <el-tooltip :content="multiSelectMode ? t('raw.exitMultiSelect') : t('raw.multiSelectMode')" placement="bottom">
         <el-button
           size="small"
           :type="multiSelectMode ? 'warning' : 'default'"
@@ -835,7 +848,7 @@ onUnmounted(() => {
         @click.stop
       >
         <div class="popup-header" @mousedown="onPopupHeaderDown">
-          <span class="popup-title">{{ activePopup === 'filter' ? '筛选' : '专注' }}</span>
+          <span class="popup-title">{{ activePopup === 'filter' ? t('raw.popupFilter') : t('raw.popupFocus') }}</span>
           <el-icon class="popup-close" @click="closePopup"><Close /></el-icon>
         </div>
         <div class="popup-body">
@@ -843,38 +856,38 @@ onUnmounted(() => {
           <template v-if="activePopup === 'filter'">
             <div class="fp-row">
               <label class="fp-label">BPF</label>
-              <el-input v-model="filterStr" size="small" style="width: 360px" placeholder="WinDivert 过滤表达式（如 tcp or udp）" />
+              <el-input v-model="filterStr" size="small" style="width: 360px" :placeholder="t('raw.bpfPlaceholder')" />
             </div>
             <!-- BPF 预设按钮：一键填入常用过滤表达式 -->
             <div class="fp-row fp-presets">
-              <label class="fp-label">预设</label>
-              <el-button size="small" @click="filterStr = 'tcp or udp'">全部</el-button>
-              <el-button size="small" @click="filterStr = 'tcp'">仅 TCP</el-button>
-              <el-button size="small" @click="filterStr = 'udp'">仅 UDP</el-button>
+              <label class="fp-label">{{ t('raw.presets') }}</label>
+              <el-button size="small" @click="filterStr = 'tcp or udp'">{{ t('raw.presetAll') }}</el-button>
+              <el-button size="small" @click="filterStr = 'tcp'">{{ t('raw.presetTcpOnly') }}</el-button>
+              <el-button size="small" @click="filterStr = 'udp'">{{ t('raw.presetUdpOnly') }}</el-button>
               <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 80 or tcp.SrcPort == 80)'">HTTP 80</el-button>
               <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443)'">HTTPS 443</el-button>
               <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 53 or udp.SrcPort == 53)'">DNS 53</el-button>
               <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 123 or udp.SrcPort == 123)'">NTP 123</el-button>
-              <el-tooltip content="WinDivert 语法：tcp/udp/icmp; tcp.DstPort/SrcPort; ip.SrcAddress/DstAddress; not/and/or" placement="bottom">
+              <el-tooltip :content="t('raw.bpfSyntaxHelp')" placement="bottom">
                 <el-icon class="bpf-help"><QuestionFilled /></el-icon>
               </el-tooltip>
             </div>
             <div class="fp-row">
               <label class="fp-label">PID</label>
-              <el-input v-model="pidFilter" size="small" style="width: 360px" placeholder="PID 过滤（逗号分隔）" />
+              <el-input v-model="pidFilter" size="small" style="width: 360px" :placeholder="t('raw.pidFilterPlaceholder')" />
             </div>
             <div class="fp-row">
-              <label class="fp-label">端口</label>
-              <el-input v-model="portFilter" size="small" style="width: 360px" placeholder="端口过滤（逗号分隔）" />
+              <label class="fp-label">{{ t('raw.port') }}</label>
+              <el-input v-model="portFilter" size="small" style="width: 360px" :placeholder="t('raw.portFilterPlaceholder')" />
             </div>
             <div class="fp-row">
-              <label class="fp-label">协议</label>
+              <label class="fp-label">{{ t('raw.protocol') }}</label>
               <el-select
                 v-model="protoFilter"
                 multiple
                 filterable
                 :reserve-keyword="false"
-                placeholder="选择协议（可多选）"
+                :placeholder="t('raw.protoFilterPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -883,10 +896,10 @@ onUnmounted(() => {
                 <el-option label="UDP" value="udp" />
               </el-select>
             </div>
-            <div class="fp-tip text-dim">BPF / PID / 端口 在「启动抓包」后生效；协议为前端过滤。</div>
+            <div class="fp-tip text-dim">{{ t('raw.filterTip') }}</div>
             <div class="fp-actions">
-              <el-button size="small" @click="resetFilters">重置</el-button>
-              <el-button size="small" type="primary" @click="closePopup">完成</el-button>
+              <el-button size="small" @click="resetFilters">{{ t('raw.reset') }}</el-button>
+              <el-button size="small" type="primary" @click="closePopup">{{ t('raw.done') }}</el-button>
             </div>
           </template>
           <!-- 专注 -->
@@ -898,7 +911,7 @@ onUnmounted(() => {
                 multiple
                 filterable
                 :reserve-keyword="false"
-                placeholder="按 PID 选择进程（多选）"
+                :placeholder="t('raw.focusPidPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -908,19 +921,19 @@ onUnmounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">进程名</label>
-              <el-input v-model="focusProcessName" placeholder="如 chrome.exe（前端模糊匹配）" size="small" clearable style="width: 240px"
+              <label class="fp-label">{{ t('raw.processName') }}</label>
+              <el-input v-model="focusProcessName" :placeholder="t('raw.focusProcessNamePlaceholder')" size="small" clearable style="width: 240px"
                 @keyup.enter="onFocusByName" />
-              <el-button size="small" @click="onFocusByName">应用</el-button>
+              <el-button size="small" @click="onFocusByName">{{ t('raw.apply') }}</el-button>
             </div>
             <div class="fp-row">
-              <label class="fp-label">端口</label>
+              <label class="fp-label">{{ t('raw.port') }}</label>
               <el-select
                 v-model="focusPorts"
                 multiple
                 filterable
                 :reserve-keyword="false"
-                placeholder="选择端口（多选，OR 匹配）"
+                :placeholder="t('raw.focusPortPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -929,13 +942,13 @@ onUnmounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">协议</label>
+              <label class="fp-label">{{ t('raw.protocol') }}</label>
               <el-select
                 v-model="focusProtocols"
                 multiple
                 filterable
                 :reserve-keyword="false"
-                placeholder="选择协议（多选，OR 匹配）"
+                :placeholder="t('raw.focusProtoPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -944,10 +957,10 @@ onUnmounted(() => {
                 <el-option label="UDP" value="udp" />
               </el-select>
             </div>
-            <div class="fp-tip text-dim">专注采用 OR 语义：满足任一条件即显示。仅前端有效。</div>
+            <div class="fp-tip text-dim">{{ t('raw.focusTip') }}</div>
             <div class="fp-actions">
-              <el-button size="small" @click="resetFocus">重置</el-button>
-              <el-button size="small" type="primary" @click="closePopup">完成</el-button>
+              <el-button size="small" @click="resetFocus">{{ t('raw.reset') }}</el-button>
+              <el-button size="small" type="primary" @click="closePopup">{{ t('raw.done') }}</el-button>
             </div>
           </template>
         </div>
@@ -956,15 +969,15 @@ onUnmounted(() => {
 
     <!-- 主体：左列表 + 右详情 -->
     <div class="raw-body flex-1 flex overflow-hidden">
-      <div class="raw-list-pane">
+      <div class="raw-list-pane" v-loading="loading">
         <div class="rl-head mono" :style="{ gridTemplateColumns: gridCols }">
           <div v-if="multiSelectMode" class="rl-check"></div>
           <div class="rl-id">#</div>
-          <div class="rl-proto">协议</div>
-          <div class="rl-ports">端口</div>
-          <div class="rl-pid">进程</div>
-          <div class="rl-size">大小</div>
-          <div class="rl-time">时间</div>
+          <div class="rl-proto">{{ t('raw.protocol') }}</div>
+          <div class="rl-ports">{{ t('raw.port') }}</div>
+          <div class="rl-pid">{{ t('raw.process') }}</div>
+          <div class="rl-size">{{ t('raw.size') }}</div>
+          <div class="rl-time">{{ t('raw.time') }}</div>
         </div>
         <div ref="bodyRef" class="rl-body flex-1 overflow-auto" @scroll="onBodyScroll">
           <div
@@ -990,7 +1003,7 @@ onUnmounted(() => {
             <div class="rl-size text-muted">{{ formatSize(f.size) }}</div>
             <div class="rl-time text-muted">{{ formatTime(f.timestamp) }}</div>
           </div>
-          <div v-if="!displayFlows.length" class="empty-text text-dim">暂无 TCP/UDP 数据包</div>
+          <div v-if="!displayFlows.length" class="empty-text text-dim">{{ t('raw.noPackets') }}</div>
         </div>
 
         <!-- 多选模式悬浮工具栏 -->
@@ -1000,16 +1013,16 @@ onUnmounted(() => {
             class="multi-float-bar"
             @mouseenter="showFloatBarNow"
           >
-            <span class="mfb-count">已选 {{ selectedCount }}</span>
-            <el-button size="small" @click="selectAllFlows">全选</el-button>
-            <el-button size="small" @click="clearSelection" :disabled="!selectedCount">清空</el-button>
+            <span class="mfb-count">{{ t('raw.selectedCount', { count: selectedCount }) }}</span>
+            <el-button size="small" @click="selectAllFlows">{{ t('raw.selectAll') }}</el-button>
+            <el-button size="small" @click="clearSelection" :disabled="!selectedCount">{{ t('raw.clearSelection') }}</el-button>
             <el-button
               size="small"
               type="warning"
               :disabled="!selectedCount"
               @click="batchIgnorePid"
             >
-              <el-icon><RemoveFilled /></el-icon>&nbsp;忽略 PID
+              <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ignorePid') }}
             </el-button>
             <el-button
               size="small"
@@ -1017,7 +1030,7 @@ onUnmounted(() => {
               :disabled="!selectedCount"
               @click="batchIgnoreProcess"
             >
-              <el-icon><RemoveFilled /></el-icon>&nbsp;忽略进程
+              <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ignoreProcess') }}
             </el-button>
             <el-button
               size="small"
@@ -1025,7 +1038,7 @@ onUnmounted(() => {
               :disabled="!selectedCount"
               @click="batchDeleteFlows"
             >
-              <el-icon><Delete /></el-icon>&nbsp;删除
+              <el-icon><Delete /></el-icon>&nbsp;{{ t('raw.delete') }}
             </el-button>
             <!-- 子悬浮窗：删除确认 -->
             <transition name="popup-fade">
@@ -1035,10 +1048,10 @@ onUnmounted(() => {
                 @click.stop
                 @mouseenter="showFloatBarNow"
               >
-                <div class="dc-text">确定删除选中的 {{ selectedCount }} 条流量？</div>
+                <div class="dc-text">{{ t('raw.confirmDeleteSelected', { count: selectedCount }) }}</div>
                 <div class="dc-actions">
-                  <el-button size="small" @click="cancelDeleteFlows">取消</el-button>
-                  <el-button size="small" type="danger" @click="confirmDeleteFlows">删除</el-button>
+                  <el-button size="small" @click="cancelDeleteFlows">{{ t('raw.cancel') }}</el-button>
+                  <el-button size="small" type="danger" @click="confirmDeleteFlows">{{ t('raw.delete') }}</el-button>
                 </div>
               </div>
             </transition>
@@ -1048,7 +1061,7 @@ onUnmounted(() => {
       <div class="raw-detail-pane">
         <div v-if="!selectedFlow" class="empty-detail text-dim">
           <el-icon :size="36"><Document /></el-icon>
-          <div style="margin-top: 10px">选择左侧数据包查看 Hex</div>
+          <div style="margin-top: 10px">{{ t('raw.selectToViewHex') }}</div>
         </div>
         <template v-else>
           <div class="detail-head">
@@ -1058,12 +1071,12 @@ onUnmounted(() => {
             <div class="flex-1"></div>
             <el-radio-group v-model="detailTab" size="small" class="detail-tab">
               <el-radio-button label="hex">Hex</el-radio-button>
-              <el-radio-button label="protocol">协议解析</el-radio-button>
+              <el-radio-button label="protocol">{{ t('raw.protocolAnalysis') }}</el-radio-button>
             </el-radio-group>
             <el-select v-model="hexField" size="small" style="width: 140px" @change="refreshHex">
-              <el-option label="原始数据" value="raw_data" />
-              <el-option label="请求体" value="request_body" />
-              <el-option label="响应体" value="response_body" />
+              <el-option :label="t('raw.rawData')" value="raw_data" />
+              <el-option :label="t('raw.requestBody')" value="request_body" />
+              <el-option :label="t('raw.responseBody')" value="response_body" />
             </el-select>
           </div>
           <div class="hex-container">
@@ -1083,21 +1096,21 @@ onUnmounted(() => {
         :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
         @click.stop
       >
-        <div class="ctx-item" @click="onFlowDblClick(ctxMenu.flow!)"><el-icon><Aim /></el-icon>&nbsp;在抓包页查看</div>
+        <div class="ctx-item" @click="onFlowDblClick(ctxMenu.flow!)"><el-icon><Aim /></el-icon>&nbsp;{{ t('raw.viewInCapturePage') }}</div>
         <!-- 忽略 -->
-        <div class="ctx-item" @click="ctxIgnorePid"><el-icon><RemoveFilled /></el-icon>&nbsp;按 PID 忽略</div>
-        <div class="ctx-item" @click="ctxIgnoreProcess"><el-icon><RemoveFilled /></el-icon>&nbsp;按进程名忽略</div>
+        <div class="ctx-item" @click="ctxIgnorePid"><el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByPid') }}</div>
+        <div class="ctx-item" @click="ctxIgnoreProcess"><el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByProcess') }}</div>
         <div class="ctx-sep"></div>
         <!-- 复制 -->
         <div class="ctx-item ctx-submenu">
-          <el-icon><CopyDocument /></el-icon>&nbsp;复制
+          <el-icon><CopyDocument /></el-icon>&nbsp;{{ t('raw.copy') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
         </div>
         <div class="ctx-submenu-panel">
-          <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">{{ item.label }}</div>
+          <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">{{ t(item.label) }}</div>
         </div>
         <div class="ctx-sep"></div>
-        <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;删除流量</div>
+        <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;{{ t('raw.deleteFlow') }}</div>
       </div>
     </teleport>
   </div>

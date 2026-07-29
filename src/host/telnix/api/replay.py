@@ -1,4 +1,4 @@
-"""请求重放 API（支持改参数重放）。"""
+"""Request replay API (supports replay with modified parameters)."""
 
 import asyncio
 import ipaddress
@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from .. import db
+from .. import db, logger
 from ..proxy.server import Headers, SocketReader, read_body, _reason  # noqa: F401
 from . import err, ok
 
@@ -19,27 +19,27 @@ router = APIRouter()
 
 
 class ReplayOverride(BaseModel):
-    """重放时的覆盖参数。"""
+    """Override parameters for replay."""
     method: str | None = None
     url: str | None = None
-    host: str | None = None       # 重定向到其他 host:port
+    host: str | None = None       # Redirect to other host:port
     port: int | None = None
     scheme: str | None = None     # http | https
-    headers: dict | None = None   # 覆盖/新增请求头
-    body: str | None = None       # 覆盖请求体
-    fuzz: str | None = None       # fuzz 表达式: key=start..end（暂支持 JSON body 数值字段）
+    headers: dict | None = None   # Override/add request headers
+    body: str | None = None       # Override request body
+    fuzz: str | None = None       # fuzz expression: key=start..end (currently supports JSON body numeric fields)
 
 
 @router.post("/flows/{flow_id}/replay")
 async def replay_flow(flow_id: int, body: ReplayOverride | None = None):
-    """重放指定流量的请求（支持改参数）。
+    """Replay specified flow's request (supports parameter modification).
 
-    不传 body = 原样重放；
-    传 body = 按覆盖参数重放。
+    No body = replay as-is;
+    With body = replay with override parameters.
     """
     flow = db.get_flow(flow_id)
     if not flow:
-        return err("流量不存在")
+        return err("Flow not found")
     try:
         # fuzz 模式：批量重放
         if body and body.fuzz:
@@ -51,21 +51,25 @@ async def replay_flow(flow_id: int, body: ReplayOverride | None = None):
         result = await asyncio.to_thread(_replay, flow, body)
         return ok(result)
     except Exception as e:  # noqa: BLE001
-        return err(f"重放失败: {e}")
+        return err(f"Replay failed: {e}")
 
 
 def _resolve_safe_target(host: str, port: int) -> str | None:
-    """SSRF 防护：解析 host 并校验每个候选 IP 均非内网/环回/链路本地/保留地址。
+    """SSRF protection: resolve host and verify each candidate IP is not internal/loopback/link-local/reserved address.
 
-    返回用于直连的 IP 字符串；若被禁止或无法解析则返回 None。
-    关键：只用解析得到的 IP 直接连接，避免二次解析被 DNS rebinding 绕过。
-    设置环境变量 TELNIX_DISABLE_SSRF_GUARD=1 可关闭（仅限本地调试，存在安全风险）。
+    Returns IP string for direct connection; returns None if forbidden or unresolvable.
+    Key: only use resolved IP for direct connection, to avoid secondary resolution being bypassed by DNS rebinding.
+    Set environment variable TELNIX_DISABLE_SSRF_GUARD=1 to disable (local debugging only, security risk).
     """
+    # S3 修复：移除 TELNIX_DISABLE_SSRF_GUARD 的"跳过校验直接连接"分支。
+    # 原实现一旦该全局 env 被设置，即对内网/元数据(169.254.169.254)发起 SSRF，
+    # 风险过高。现该 env 仅记录告警、不再具有绕过效果；本地调试内网请通过
+    # 受控转发方式，而非关闭全局守卫。
     if os.environ.get("TELNIX_DISABLE_SSRF_GUARD") == "1":
-        try:
-            return socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)[0][4][0]
-        except Exception:  # noqa: BLE001
-            return None
+        logger.warning(
+            "api", "TELNIX_DISABLE_SSRF_GUARD 已不再绕过 SSRF 校验",
+            "访问内网/元数据请通过其他受控方式，而非关闭全局守卫"
+        )
     if not host:
         return None
     try:
@@ -117,11 +121,11 @@ def _replay(flow: dict, override: ReplayOverride | None = None) -> dict:
             body_bytes = _to_bytes(override.body)
 
     if not host:
-        raise ValueError("无效的 URL")
+        raise ValueError("Invalid URL")
 
     resolved_ip = _resolve_safe_target(host, port)
     if resolved_ip is None:
-        raise ValueError("目标地址被禁止或无法解析（内网/环回/链路本地/保留地址，存在 SSRF 风险）")
+        raise ValueError("Target address is forbidden or unresolvable (private/loopback/link-local/reserved address, SSRF risk)")
 
     headers = Headers.from_dict(_safe_json(flow.get("request_headers")))
     headers.set("Host", host + (f":{port}" if port not in (80, 443) else ""))
@@ -163,14 +167,14 @@ def _replay(flow: dict, override: ReplayOverride | None = None) -> dict:
 
 
 def _replay_fuzz(flow: dict, override: ReplayOverride) -> list:
-    """批量 fuzz 重放：override.fuzz = 'user_id=1..100'。"""
+    """Batch fuzz replay: override.fuzz = 'user_id=1..100'."""
     import re
     m = re.match(r"^(\w+)=(\d+)\.\.(\d+)$", override.fuzz.strip())
     if not m:
-        raise ValueError("fuzz 表达式格式错误，应为 key=start..end")
+        raise ValueError("Invalid fuzz expression format, expected key=start..end")
     key, start, end = m.group(1), int(m.group(2)), int(m.group(3))
     if end - start > 500:
-        raise ValueError("fuzz 范围过大（>500），拒绝执行")
+        raise ValueError("Fuzz range too large (>500), refused to execute")
     results = []
     for val in range(start, end + 1):
         # 修改 JSON body 里的 key 字段

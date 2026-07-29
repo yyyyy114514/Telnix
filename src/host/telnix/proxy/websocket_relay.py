@@ -1,12 +1,14 @@
-"""WebSocket 帧解析与双向转发。
+"""WebSocket frame parsing and bidirectional relay.
 
-在 HTTP/1.1 Upgrade: websocket 握手成功（101 响应）后，连接转为 WebSocket 帧协议。
-本模块负责：
-- 解析 WebSocket 帧（RFC 6455）
-- 双向转发 client<->server 的帧（分片透传，不等 FIN 才转发）
-- 按 message（同 opcode 的连续帧聚合）记录到 flows 表（后台线程异步记录）
+After the HTTP/1.1 Upgrade: websocket handshake succeeds (101 response), the
+connection switches to the WebSocket frame protocol. This module is responsible for:
+- Parsing WebSocket frames (RFC 6455)
+- Bidirectionally relaying client<->server frames (transparent fragment forwarding,
+  not waiting for FIN before forwarding)
+- Recording per message (aggregating consecutive frames with the same opcode) to the
+  flows table (asynchronously recorded by a background thread)
 
-帧格式（RFC 6455）：
+Frame format (RFC 6455):
   0                   1                   2                   3
   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  +-+-+-+-+-------+-+-------------+-------------------------------+
@@ -43,9 +45,9 @@ from .. import db, logger
 
 # WebSocket opcode
 OP_CONT = 0x0   # continuation
-OP_TEXT = 0x1   # 文本帧
-OP_BIN = 0x2    # 二进制帧
-OP_CLOSE = 0x8  # 关闭
+OP_TEXT = 0x1   # text frame
+OP_BIN = 0x2    # binary frame
+OP_CLOSE = 0x8  # close
 OP_PING = 0x9   # ping
 OP_PONG = 0xA   # pong
 
@@ -65,10 +67,11 @@ _WS_RECORD_LOCK = threading.Lock()
 
 
 def _get_ws_record_executor():
-    """懒启动后台线程池用于 WS message 记录。
+    """Lazily start a background thread pool for WS message recording.
 
-    性能优化：workers 从 2 增到 4，避免高并发 WS 场景下 recorder 队列堆积
-    导致 message 记录延迟（透传不受影响，仅影响 DB 记录时机）。
+    Performance: workers increased from 2 to 4, avoiding recorder queue buildup in
+    high-concurrency WS scenarios that causes message recording delay (passthrough
+    is unaffected; only DB recording timing is affected).
     """
     global _WS_RECORD_EXECUTOR
     import concurrent.futures
@@ -82,15 +85,16 @@ def _get_ws_record_executor():
 
 
 class WSError(Exception):
-    """WebSocket 协议错误。"""
+    """WebSocket protocol error."""
 
 
 def read_frame(sock: socket.socket) -> Optional[tuple[int, bytes, bool, bool]]:
-    """从 socket 读取一个 WebSocket 帧。
+    """Read a WebSocket frame from the socket.
 
-    返回 (opcode, payload, fin, rsv1) 或 None（连接关闭）。
-    客户端→服务端的帧带 mask，本函数自动解 mask。
-    rsv1=True 表示 permessage-deflate 压缩（本实现不支持，调用方应处理）。
+    Returns (opcode, payload, fin, rsv1) or None (connection closed).
+    Client→server frames are masked; this function automatically unmasks.
+    rsv1=True indicates permessage-deflate compression (not supported by this
+    implementation; the caller should handle it).
     """
     # 读 2 字节头
     hdr = _recv_exact(sock, 2)
@@ -107,7 +111,7 @@ def read_frame(sock: socket.socket) -> Optional[tuple[int, bytes, bool, bool]]:
 
     # RSV2/RSV3 必须为 0（RFC 6455），RSV1 仅在 permessage-deflate 协商时允许
     if rsv2 or rsv3:
-        raise WSError(f"非法 RSV 位: rsv2={rsv2} rsv3={rsv3}")
+        raise WSError(f"Invalid RSV bits: rsv2={rsv2} rsv3={rsv3}")
 
     if payload_len == 126:
         ext = _recv_exact(sock, 2)
@@ -122,7 +126,7 @@ def read_frame(sock: socket.socket) -> Optional[tuple[int, bytes, bool, bool]]:
 
     # 限制单帧大小（防止恶意大帧 OOM）
     if payload_len > _MAX_FRAME_SIZE:
-        raise WSError(f"帧过大: {payload_len} bytes (max {_MAX_FRAME_SIZE})")
+        raise WSError(f"Frame too large: {payload_len} bytes (max {_MAX_FRAME_SIZE})")
 
     mask_key = b""
     if masked:
@@ -143,10 +147,10 @@ def read_frame(sock: socket.socket) -> Optional[tuple[int, bytes, bool, bool]]:
 
 def write_frame(sock: socket.socket, opcode: int, payload: bytes,
                 fin: bool = True, mask: bool = False, rsv1: bool = False):
-    """发送一个 WebSocket 帧。
+    """Send a WebSocket frame.
 
-    服务端→客户端的帧不 mask，客户端→服务端的帧必须 mask。
-    rsv1 用于透传 permessage-deflate 标记。
+    Server→client frames are not masked; client→server frames must be masked.
+    rsv1 is used to passthrough the permessage-deflate flag.
     """
     b0 = (0x80 if fin else 0) | (0x40 if rsv1 else 0) | (opcode & 0x0F)
     out = bytearray([b0])
@@ -174,7 +178,7 @@ def write_frame(sock: socket.socket, opcode: int, payload: bytes,
 
 
 def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
-    """精确读取 n 字节，连接关闭返回 None。"""
+    """Read exactly n bytes; returns None if the connection is closed."""
     # 预分配避免多次 realloc（大帧场景）
     buf = bytearray(n)
     view = memoryview(buf)
@@ -191,10 +195,11 @@ def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
 
 
 def _apply_mask(payload: bytes, mask_key: bytes) -> bytes:
-    """XOR 解 mask（向量化：int.from_bytes 批量 XOR，替代逐字节循环）。
+    """XOR unmask (vectorized: int.from_bytes batch XOR, replacing byte-by-byte loop).
 
-    性能：64KB 消息从 ~65536 次 Python 循环降为 1 次大整数 XOR，提升 ~50x。
-    优化：mask_key 固定 4 字节，特化为 4 字节步长循环，避免 mask_repeated 临时分配。
+    Performance: 64KB message goes from ~65536 Python loops to 1 big-integer XOR, ~50x faster.
+    Optimization: mask_key is fixed 4 bytes, specialized to 4-byte stride loop to avoid
+    temporary mask_repeated allocation.
     """
     if not mask_key or not payload:
         return payload
@@ -251,22 +256,25 @@ def relay_websocket(
     max_messages: int = 500,
     idle_timeout: int = 300,
 ):
-    """双向转发 WebSocket，按 message 聚合记录到 flows 表。
+    """Bidirectionally relay WebSocket, aggregating per message to record to the flows table.
 
-    - client_sock: 客户端侧 socket（已完成 TLS/HTTP 握手）
-    - server_sock: 目标服务器侧 socket（已收到 101 响应后的连接）
-    - max_messages: 单连接最多记录多少条 message（防止恶意长连接刷屏）
-    - idle_timeout: 空闲超时秒数（无任何帧则断开）
+    - client_sock: client-side socket (TLS/HTTP handshake already completed)
+    - server_sock: target server-side socket (connection after receiving the 101 response)
+    - max_messages: maximum number of messages recorded per connection (prevents malicious
+      long-connection flooding)
+    - idle_timeout: idle timeout in seconds (disconnect when no frames at all)
 
-    转发策略：分片透传（每个帧原样转发，保留 FIN/opcode/RSV1），
-    不再等 FIN 才转发，避免分片 message 的首字节延迟累积。
-    仅在 FIN=1 时聚合完整 message 记录到 DB（后台线程异步）。
+    Relay strategy: transparent fragment forwarding (each frame is forwarded as-is,
+    preserving FIN/opcode/RSV1), no longer waiting for FIN before forwarding, avoiding
+    first-byte latency accumulation for fragmented messages.
+    Only when FIN=1 is the complete message aggregated and recorded to the DB
+    (asynchronously by a background thread).
     """
     msg_count = 0
     stop_flag = threading.Event()
 
     def _direction(src: socket.socket, dst: socket.socket, direction: str):
-        """转发一个方向的帧，分片透传，FIN 时聚合记录。"""
+        """Relay frames in one direction with transparent fragment forwarding; aggregate on FIN."""
         nonlocal msg_count
         agg_opcode = None
         agg_payload = bytearray()
@@ -320,7 +328,7 @@ def relay_websocket(
 
                 # 检查 message 总大小（防止分片放大攻击）
                 if len(agg_payload) > _MAX_MESSAGE_SIZE:
-                    logger.warning("ws", f"WS message 过大 ({len(agg_payload)} bytes), 丢弃聚合")
+                    logger.warning("ws", f"WS message too large ({len(agg_payload)} bytes), discarding aggregation")
                     agg_payload = bytearray()
                     agg_opcode = None
                     continue
@@ -344,16 +352,17 @@ def relay_websocket(
                                 remote_ip, ip_region,
                             )
                         except Exception as e:  # noqa: BLE001
-                            logger.warning("ws", "WS record submit 失败", str(e))
+                            logger.warning("ws", "WS record submit failed", str(e))
 
         except Exception as e:  # noqa: BLE001
-            logger.info("ws", f"WebSocket {direction} 转发异常", str(e))
+            logger.info("ws", f"WebSocket {direction} forwarding exception", str(e))
         finally:
+            # B2 修复：仅置 stop_flag 通知对端方向线程结束读循环，
+            # 不再在此处对 dst 调用 shutdown(SHUT_WR)。原实现在一端（如 c2s）
+            # 读到 close 帧后立即 shutdown 其对端(server_sock) 写端，会导致 server
+            # 收到 FIN 提前断连，server→client 尚未转发的帧被丢弃（连接假死/丢数据）。
+            # 两端 socket 的统一关闭由主函数 join 后 close() 完成（close 隐含 shutdown）。
             stop_flag.set()
-            try:
-                dst.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
 
     t_c2s = threading.Thread(target=_direction,
                              args=(client_sock, server_sock, "c2s"),
@@ -381,11 +390,11 @@ def _record_ws_message(
     request_headers: dict, direction: str, opcode: int,
     payload: bytes, remote_ip: str, ip_region: str,
 ):
-    """记录一条 WebSocket message 到 flows 表（在后台线程执行）。
+    """Record a WebSocket message to the flows table (executed in a background thread).
 
-    - direction='c2s': 客户端→服务端（请求），method='WS-SEND'
-    - direction='s2c': 服务端→客户端（响应），method='WS-RECV'
-    payload 存到 request_body（c2s）或 response_body（s2c），raw_data 存原始字节
+    - direction='c2s': client→server (request), method='WS-SEND'
+    - direction='s2c': server→client (response), method='WS-RECV'
+    payload is stored in request_body (c2s) or response_body (s2c); raw_data stores the raw bytes
     """
     op_name = _OPCODE_NAMES.get(opcode, f"op{opcode}")
     is_outbound = direction == "c2s"
@@ -426,13 +435,13 @@ def _record_ws_message(
     try:
         db.insert_flow_async(flow)
     except Exception as e:  # noqa: BLE001
-        logger.warning("ws", "WebSocket message 记录失败", str(e))
+        logger.warning("ws", "WebSocket message record failed", str(e))
 
 
 def is_websocket_upgrade(headers) -> bool:
-    """判断 HTTP 请求是否为 WebSocket Upgrade 请求。
+    """Determine whether the HTTP request is a WebSocket Upgrade request.
 
-    检查 Upgrade: websocket 和 Connection: Upgrade 头。
+    Checks the Upgrade: websocket and Connection: Upgrade headers.
     """
     upgrade = (headers.get("Upgrade") or "").lower()
     connection = (headers.get("Connection") or "").lower()
@@ -440,9 +449,9 @@ def is_websocket_upgrade(headers) -> bool:
 
 
 def compute_accept_key(sec_websocket_key: str) -> str:
-    """计算 Sec-WebSocket-Accept 值（RFC 6455 §4.2.2）。
+    """Compute the Sec-WebSocket-Accept value (RFC 6455 §4.2.2).
 
-    SHA1(key + magic GUID) 再 base64 编码。
+    SHA1(key + magic GUID) then base64 encode.
     """
     import hashlib
     magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"

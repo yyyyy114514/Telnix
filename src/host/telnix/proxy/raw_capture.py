@@ -1,19 +1,22 @@
-"""TCP/UDP 原始抓包后端（跨平台）。
+"""TCP/UDP raw capture backend (cross-platform).
 
-独立于 HTTP 代理后端，通过网络层抓包，支持非 HTTP 协议（Steam P2P、protobuf 等）。
+Independent of the HTTP proxy backend; captures at the network layer, supporting
+non-HTTP protocols (Steam P2P, protobuf, etc.).
 
-平台支持：
-- Windows: WinDivert 内核驱动（需 pydivert + 管理员权限）
-  首次运行时检测 pydivert 是否安装，未安装则提示：pip install pydivert
-  并需要 WinDivert64.sys（pydivert 自带）
-- Linux: AF_PACKET raw socket（需 root / CAP_NET_RAW，纯 stdlib 无外部依赖）
-- macOS: BPF 设备（需 root，纯 stdlib 无外部依赖）
+Platform support:
+- Windows: WinDivert kernel driver (requires pydivert + admin privileges)
+  On first run, checks whether pydivert is installed; if not, prompts: pip install pydivert
+  Also requires WinDivert64.sys (bundled with pydivert)
+- Linux: AF_PACKET raw socket (requires root / CAP_NET_RAW; pure stdlib, no external deps)
+- macOS: BPF device (requires root; pure stdlib, no external deps)
 
-非 Windows 平台的实际抓包逻辑在 raw_capture_unix.py 的 UnixRawCapture 类中实现，
-本模块的 RawCapture 类仅 Windows 使用，但 start()/stop()/raw_capture_status()
-统一对外，跨平台路由在 start_raw_capture() 中完成。
+The actual capture logic for non-Windows platforms is implemented in the
+UnixRawCapture class in raw_capture_unix.py. The RawCapture class in this module
+is Windows-only, but start()/stop()/raw_capture_status() provide a unified
+external interface; cross-platform routing is handled in start_raw_capture().
 
-抓到的包以 protocol=tcp/udp 存入 flows 表，raw_data 字段存 base64 编码的原始字节。
+Captured packets are stored in the flows table with protocol=tcp/udp; the
+raw_data field stores base64-encoded raw bytes.
 """
 
 from __future__ import annotations
@@ -76,11 +79,11 @@ _DROPPED_PACKETS_LOCK = threading.Lock()
 
 
 def _extract_path(url: str, host: str | None, scheme: str | None) -> str:
-    """从完整 url 中稳健地提取 path（含 query/fragment）。
+    """Robustly extract the path (including query/fragment) from a full URL.
 
-    旧实现用 ``url.split(host, 1)[-1]``，当 host 字符串在 path 中再次出现时
-    会误截断（例如 host 为 'api'，path 含 '/api/v1/api'）。此处改为按
-    ``scheme://host`` 前缀精确裁剪。
+    The old implementation used ``url.split(host, 1)[-1]``, which would mis-truncate
+    when the host string reappears in the path (e.g. host is 'api' and path
+    contains '/api/v1/api'). Here we trim by the exact ``scheme://host`` prefix.
     """
     if not url:
         return ""
@@ -97,7 +100,7 @@ def _extract_path(url: str, host: str | None, scheme: str | None) -> str:
 
 
 class RawCapture:
-    """WinDivert 抓包后端。"""
+    """WinDivert capture backend."""
 
     def __init__(self, session_id: int):
         self.session_id = session_id
@@ -128,7 +131,7 @@ class RawCapture:
         self._port_filter = ports
 
     def set_filter(self, filter_str: str):
-        """设置 WinDivert filter 字符串。空字符串恢复默认 filter。"""
+        """Set the WinDivert filter string. Empty string restores the default filter."""
         if filter_str:
             self._filter = filter_str
         else:
@@ -136,22 +139,23 @@ class RawCapture:
             self._filter = "tcp or udp"
 
     def start(self) -> bool:
-        """启动抓包（Windows 专用）。返回 True 成功，False 失败（驱动未装等）。
+        """Start capture (Windows-only). Returns True on success, False on failure (driver not installed, etc.).
 
-        注意：非 Windows 平台不应调用此方法。start_raw_capture() 会自动路由到
-        UnixRawCapture（raw_capture_unix.py），无需调用方关心平台。
+        Note: non-Windows platforms should not call this method. start_raw_capture()
+        automatically routes to UnixRawCapture (raw_capture_unix.py); the caller
+        does not need to care about the platform.
         """
         if not IS_WINDOWS:
             # 防御性检查：非 Windows 平台不应走到这里（start_raw_capture 会路由到 UnixRawCapture）
-            logger.error("raw", "RawCapture.start() 在非 Windows 平台被调用",
-                         "应由 start_raw_capture() 路由到 UnixRawCapture，请检查调用方")
-            self._last_error = "内部错误：Windows 后端在非 Windows 平台被调用"
+            logger.error("raw", "RawCapture.start() called on non-Windows platform",
+                         "Should be routed to UnixRawCapture by start_raw_capture(), check the caller")
+            self._last_error = "Internal error: Windows backend called on a non-Windows platform"
             return False
         try:
             import pydivert  # type: ignore  # noqa: F401
         except ImportError:
-            logger.error("raw", "pydivert 未安装",
-                         "请运行: pip install pydivert")
+            logger.error("raw", "pydivert not installed",
+                         "Please run: pip install pydivert")
             return False
         if self._running:
             return True
@@ -159,8 +163,8 @@ class RawCapture:
             import pydivert  # type: ignore
             # 检查管理员权限
             if not self._is_admin():
-                logger.error("raw", "WinDivert 需要管理员权限",
-                             "请用管理员身份运行 Telnix")
+                logger.error("raw", "WinDivert requires admin privileges",
+                             "Please run Telnix as administrator")
                 return False
             # 使用 SNIFF 模式：只嗅探不拦截，包会正常流转不会断网
             # WINDIVERT_FLAG_SNIFF = 1
@@ -187,33 +191,34 @@ class RawCapture:
                 t = threading.Thread(target=self._enrich_loop, daemon=True, name=f"raw-enrich-{i}")
                 t.start()
                 self._enrich_threads.append(t)
-            logger.info("raw", "TCP/UDP 抓包已启动", f"filter={self._filter}, workers={self._enrich_worker_count}")
+            logger.info("raw", "TCP/UDP capture started", f"filter={self._filter}, workers={self._enrich_worker_count}")
             return True
         except Exception as e:  # noqa: BLE001
             err_msg = str(e)
-            logger.error("raw", "WinDivert 启动失败", err_msg)
+            logger.error("raw", "WinDivert start failed", err_msg)
             # 把异常详情存到实例上，让 start_raw_capture 能带回到前端
             self._last_error = err_msg
             # 检测常见失败原因，给前端更友好的提示
             low = err_msg.lower()
             if "找不到" in err_msg or "not found" in low or "找不到指定的模块" in err_msg:
-                logger.error("raw", "WinDivert 驱动文件缺失",
-                             "请确保 WinDivert64.sys 与 python.exe 同目录，或 pydivert 已正确安装")
+                logger.error("raw", "WinDivert driver file missing",
+                             "Ensure WinDivert64.sys is in the same directory as python.exe, or pydivert is properly installed")
             elif "access is denied" in low or "拒绝访问" in err_msg or "权限" in err_msg:
-                logger.error("raw", "权限不足",
-                             "请用管理员身份运行 Telnix")
+                logger.error("raw", "Insufficient permissions",
+                             "Please run Telnix as administrator")
             elif "签名" in err_msg or "sign" in low or "数字签名" in err_msg or "加载失败" in err_msg:
                 # 杀软拦截通常表现为驱动加载失败 / 签名问题
-                logger.error("raw", "WinDivert 驱动加载被拦截",
-                             "可能是杀毒软件（360/火绒/Windows Defender）拦截，请将 Telnix 目录和 WinDivert64.sys 加入杀软白名单后重试")
+                logger.error("raw", "WinDivert driver load blocked",
+                             "Antivirus (360/Huorong/Windows Defender) may be blocking. Add Telnix directory and WinDivert64.sys to antivirus whitelist and retry")
             self._divert = None
             return False
 
     def stop(self):
-        """停止抓包。
+        """Stop capture.
 
-        先 _running=False，再用 shutdown 解除 recv 阻塞，再 close。
-        避免直接 close 导致工作线程永久阻塞在 recv。
+        First sets _running=False, then uses shutdown to unblock recv, then closes.
+        Avoids directly closing which would leave worker threads blocked forever
+        in recv.
         Platform: Windows
         """
         global _DROPPED_PACKETS
@@ -232,8 +237,8 @@ class RawCapture:
             if self._thread:
                 self._thread.join(timeout=3)
                 if self._thread.is_alive():
-                    logger.warning("raw", "停止时工作线程仍在运行",
-                                   "可能存在阻塞 recv")
+                    logger.warning("raw", "Worker thread still running on stop",
+                                   "possible blocking recv")
                 self._thread = None
             # 最后关闭句柄（join 之后，避免 close-during-blocking-recv 未定义行为）
             try:
@@ -255,18 +260,18 @@ class RawCapture:
             total_dropped = _DROPPED_PACKETS
             _DROPPED_PACKETS = 0
         if total_dropped > 0:
-            logger.warning("raw", "抓包停止，最终丢包统计", f"累计丢包数: {total_dropped}")
-        logger.info("raw", "TCP/UDP 抓包已停止")
+            logger.warning("raw", "Capture stopped, final drop stats", f"total dropped: {total_dropped}")
+        logger.info("raw", "TCP/UDP capture stopped")
 
     @property
     def running(self) -> bool:
         return self._running
 
     def _is_admin(self) -> bool:
-        """检查是否管理员权限。
+        """Check for admin privileges.
 
-        Windows：用 ctypes.windll.shell32.IsUserAnAdmin()。
-        非 Windows：用 os.geteuid() == 0 判断 root（POSIX 系统统一接口）。
+        Windows: uses ctypes.windll.shell32.IsUserAnAdmin().
+        Non-Windows: uses os.geteuid() == 0 to check for root (unified POSIX interface).
         """
         if not IS_WINDOWS:
             # POSIX 平台：euid == 0 即 root
@@ -280,11 +285,14 @@ class RawCapture:
             return False
 
     def _capture_loop(self):
-        """抓包主循环（轻量：只解包+基本过滤+入队，不做 PID/进程名/IP属地等慢操作）。
+        """Capture main loop (lightweight: only unpack + basic filter + enqueue; no slow ops like PID/process name/IP region).
 
-        性能优化：抓包线程只做最小工作（解包+loopback/端口过滤+构造raw dict+入队），
-        PID 反查、进程名查询、IP 属地查询、DNS 解析等慢操作全部移到 _enrich_loop worker 线程。
-        这样抓包线程吞吐量提升 5-10x，避免 1000 pps 时因 PID 全表扫描阻塞丢包。
+        Performance optimization: the capture thread does minimal work (unpack +
+        loopback/port filter + build raw dict + enqueue). Slow operations like PID
+        reverse-lookup, process name query, IP region lookup, and DNS parsing are
+        all moved to _enrich_loop worker threads. This boosts capture-thread
+        throughput 5-10x, avoiding packet drops at 1000 pps due to full-table PID
+        scan blocking.
         """
         global _DROPPED_PACKETS
         while self._running:
@@ -345,12 +353,15 @@ class RawCapture:
                 local_port = src_port if is_outbound else dst_port
 
                 # F27 诊断：统计 80/443/8888 包数量
+                # P1-1 修复：降频至每 5000 包打印一次（原每 50 包在捕获热路径同步
+                # 构造大 f-string 阻塞 recv，高流量下造成丢包）。每 5000 包一次影响可忽略。
                 if dst_port in (80, 443, 8888) or src_port in (80, 443, 8888):
                     self._http_pkt_count = getattr(self, '_http_pkt_count', 0) + 1
-                    if self._http_pkt_count == 1 or self._http_pkt_count % 50 == 0:
+                    _cnt = self._http_pkt_count
+                    if _cnt == 1 or _cnt % 5000 == 0:
                         logger.info(
-                            "raw", "HTTP/HTTPS包统计",
-                            f"count={self._http_pkt_count} "
+                            "raw", "HTTP/HTTPS packet stats",
+                            f"count={_cnt} "
                             f"src={src_ip}:{src_port} dst={dst_ip}:{dst_port} "
                             f"outbound={is_outbound} payload_len={len(payload)}"
                         )
@@ -373,17 +384,17 @@ class RawCapture:
                     with _DROPPED_PACKETS_LOCK:
                         _DROPPED_PACKETS += 1
                         if _DROPPED_PACKETS % 100 == 0:
-                            logger.warning("raw", "抓包队列满丢包", f"累计丢包数: {_DROPPED_PACKETS}")
+                            logger.warning("raw", "Capture queue full, dropping packets", f"total dropped: {_DROPPED_PACKETS}")
 
                 # SNIFF 模式无需 send，包已正常流转
 
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.error("raw", "抓包循环异常", str(e))
+                    logger.error("raw", "Capture loop exception", str(e))
                     time.sleep(0.1)
 
     def _enrich_loop(self):
-        """enrich worker：从队列取 raw dict，补充 PID/进程名/IP属地/DNS，写库。"""
+        """enrich worker: dequeue raw dict, fill in PID/process name/IP region/DNS, write to DB."""
         from .process_lookup import _list_tcp_owner_rows, _list_udp_owner_rows
         while self._running:
             try:
@@ -396,10 +407,10 @@ class RawCapture:
                 self._enrich_one(raw, _list_tcp_owner_rows, _list_udp_owner_rows)
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.error("raw", "enrich 异常", str(e))
+                    logger.error("raw", "enrich exception", str(e))
 
     def _enrich_one(self, raw: dict, list_tcp_fn, list_udp_fn):
-        """处理单个 raw dict：PID 反查 → 进程名 → PID 过滤 → DNS 解析 → IP 属地 → 写库。"""
+        """Process a single raw dict: PID reverse-lookup -> process name -> PID filter -> DNS parse -> IP region -> write to DB."""
         proto_name = raw["proto_name"]
         src_ip, dst_ip = raw["src_ip"], raw["dst_ip"]
         src_port, dst_port = raw["src_port"], raw["dst_port"]
@@ -596,9 +607,9 @@ class RawCapture:
 
     @staticmethod
     def _parse_http_payload(payload: bytes, is_outbound: bool):
-        """解析 HTTP 请求/响应载荷。返回 (method, url, host, status_code, body_text) 或 None。
+        """Parse HTTP request/response payload. Returns (method, url, host, status_code, body_text) or None.
 
-        F21: 让 raw_capture 能识别 80 端口的 HTTP 流量，存为 protocol="http"。
+        F21: enables raw_capture to recognize HTTP traffic on port 80, stored as protocol="http".
         """
         if not payload:
             return None
@@ -645,9 +656,9 @@ class RawCapture:
 
     @staticmethod
     def _parse_ws_upgrade(payload: bytes):
-        """检测 WebSocket 升级请求。返回 (sec_websocket_key, sec_websocket_version) 或 None。
+        """Detect WebSocket upgrade request. Returns (sec_websocket_key, sec_websocket_version) or None.
 
-        F23: WebSocket 升级请求是 HTTP GET + Upgrade: websocket 头。
+        F23: a WebSocket upgrade request is an HTTP GET + Upgrade: websocket header.
         """
         try:
             text = payload.decode('latin-1', errors='replace')
@@ -667,9 +678,9 @@ class RawCapture:
 
     @staticmethod
     def _parse_tls_sni(payload: bytes):
-        """从 TLS ClientHello 提取 SNI hostname。返回 hostname 或 None。
+        """Extract SNI hostname from TLS ClientHello. Returns hostname or None.
 
-        F22: 让 443 端口流量能存为 protocol="https"，显示目标域名。
+        F22: enables port 443 traffic to be stored as protocol="https", showing the target domain.
         """
         if len(payload) < 5 or payload[0] != 0x16:  # 0x16 = TLS Handshake
             return None
@@ -721,12 +732,12 @@ class RawCapture:
         return None
 
     def _lookup_pid_cached(self, src_ip, src_port, dst_ip, dst_port, list_rows_fn, is_udp: bool = False) -> int | None:
-        """带 LRU 缓存的 PID 反查。
+        """PID reverse-lookup with LRU cache.
 
-        性能优化：
-        - TCP: 五元组 → pid，3 秒 TTL（同一连接的后续包命中缓存）
-        - UDP: (local_ip, local_port) → pid，3 秒 TTL
-        - lookup 锁防止全表扫描并发
+        Performance optimization:
+        - TCP: 5-tuple -> pid, 3-second TTL (subsequent packets of the same connection hit the cache)
+        - UDP: (local_ip, local_port) -> pid, 3-second TTL
+        - lookup lock prevents concurrent full-table scans
         """
         if is_udp:
             src_is_local = self._is_local_ip(src_ip)
@@ -776,7 +787,7 @@ class RawCapture:
         return pid
 
     def _proc_name_cached(self, pid: int) -> str:
-        """带 LRU 缓存的进程名查询，5 秒 TTL。"""
+        """Process name query with LRU cache, 5-second TTL."""
         now = time.time()
         with _PROC_NAME_LOCK:
             item = _PROC_NAME_CACHE.get(pid)
@@ -801,7 +812,7 @@ class RawCapture:
         return name
 
     def _ip_region_cached(self, ip: str) -> str:
-        """带 LRU 缓存的 IP 属地查询，10 分钟 TTL（属地不变）。"""
+        """IP region lookup with LRU cache, 10-minute TTL (region does not change)."""
         now = time.time()
         with _IP_REGION_LOCK:
             item = _IP_REGION_CACHE.get(ip)
@@ -822,15 +833,15 @@ class RawCapture:
         return region
 
     def _lookup_pid(self, src_ip, src_port, dst_ip, dst_port, list_rows_fn) -> int | None:
-        """在 TCP 表里按五元组查 PID（保留旧接口，内部走缓存版本）。"""
+        """Look up PID by 5-tuple in the TCP table (legacy interface; internally uses the cached version)."""
         return self._lookup_pid_cached(src_ip, src_port, dst_ip, dst_port, list_rows_fn, is_udp=False)
 
     def _lookup_udp_pid(self, src_ip, src_port, dst_ip, dst_port, list_rows_fn) -> int | None:
-        """在 UDP 表里按 local_ip+local_port 查 PID（保留旧接口，内部走缓存版本）。"""
+        """Look up PID in the UDP table by local_ip+local_port (legacy interface, internally uses the cached version)."""
         return self._lookup_pid_cached(src_ip, src_port, dst_ip, dst_port, list_rows_fn, is_udp=True)
 
     def _is_local_ip(self, ip: str) -> bool:
-        """判断是否本机 IP。"""
+        """Check whether the IP is a local IP."""
         if ip == "::1" or ip.startswith("127."):
             return True
         global _LOCAL_IP_CACHE, _LOCAL_IP_CACHE_TS
@@ -853,7 +864,7 @@ class RawCapture:
 
     @staticmethod
     def _dns_summary(dns_info: dict) -> str:
-        """把 DNS 解析结果格式化为可读文本（存到 request_body/response_body）。"""
+        """Format DNS parse results as readable text (stored in request_body/response_body)."""
         import json as _json
         return _json.dumps(dns_info, ensure_ascii=False, indent=2)
 
@@ -871,16 +882,16 @@ def get_raw_capture() -> RawCapture | None:
 def start_raw_capture(session_id: int, pid_filter: set[int] | None = None,
                       port_filter: set[int] | None = None,
                       filter_str: str = "") -> tuple[bool, str]:
-    """启动 TCP/UDP 抓包。返回 (成功, 消息)。
+    """Start TCP/UDP capture. Returns (success, message).
 
-    平台支持：
-    - Windows: WinDivert SNIFF 模式（需 pydivert + 管理员权限）
-    - Linux: AF_PACKET raw socket（需 root / CAP_NET_RAW）
-    - macOS: BPF 设备（需 root）
+    Platform support:
+    - Windows: WinDivert SNIFF mode (requires pydivert + admin privileges)
+    - Linux: AF_PACKET raw socket (requires root / CAP_NET_RAW)
+    - macOS: BPF device (requires root)
     """
     global _raw_capture
     if _raw_capture and _raw_capture.running:
-        return False, "已在运行中"
+        return False, "Already running"
 
     # F19: 撤销 F18 互斥。raw_capture 用 SNIFF 模式（flags=1，只读不拦截），
     # 不阻止 transparent_proxy 的包流。F17 的 send 重试机制足以应对瞬时段锁定。
@@ -893,8 +904,8 @@ def start_raw_capture(session_id: int, pid_filter: set[int] | None = None,
     try:
         import pydivert  # type: ignore  # noqa: F401
     except ImportError:
-        return False, ("pydivert 未安装。该依赖已在 requirements.txt 中声明，"
-                       "请执行 pip install -r requirements.txt 完整安装依赖。")
+        return False, ("pydivert is not installed. This dependency is declared in requirements.txt; "
+                       "please run pip install -r requirements.txt to install all dependencies.")
     _raw_capture = RawCapture(session_id)
     if pid_filter:
         _raw_capture.set_pid_filter(pid_filter)
@@ -907,41 +918,41 @@ def start_raw_capture(session_id: int, pid_filter: set[int] | None = None,
         # 根据异常详情生成更精准的提示，帮助用户定位是杀软拦截还是其他原因
         err_detail = (_raw_capture._last_error or "").lower()
         if "签名" in err_detail or "sign" in err_detail or "加载失败" in err_detail or "驱动" in err_detail:
-            msg = ("启动失败：WinDivert 驱动加载被拦截。"
-                   "常见原因是杀毒软件（360/火绒/Windows Defender）将其识别为漏洞驱动。"
-                   "请关闭杀毒软件或将 Telnix 目录 + WinDivert64.sys 加入白名单后重试。")
+            msg = ("Start failed: WinDivert driver load was blocked. "
+                   "Common cause: antivirus (360/Huorong/Windows Defender) flagged it as a vulnerable driver. "
+                   "Please disable antivirus or add the Telnix directory + WinDivert64.sys to the whitelist and retry.")
         elif "拒绝访问" in err_detail or "access is denied" in err_detail or "权限" in err_detail:
-            msg = ("启动失败：权限不足。请用管理员身份运行 Telnix "
-                   "（点击下方「管理员重启」按钮）。")
+            msg = ("Start failed: insufficient privileges. Please run Telnix as administrator "
+                   "(click the 'Restart as Admin' button below).")
         elif "找不到" in err_detail or "not found" in err_detail or "找不到指定的模块" in err_detail:
-            msg = ("启动失败：WinDivert 驱动文件缺失。"
-                   "请确保已运行 pip install pydivert，且 WinDivert64.sys 与 python.exe 同目录。")
+            msg = ("Start failed: WinDivert driver file missing. "
+                   "Ensure you have run pip install pydivert and that WinDivert64.sys is in the same directory as python.exe.")
         else:
-            msg = ("启动失败。可能原因：1) 未用管理员身份运行；"
-                   "2) WinDivert 驱动文件缺失；3) pydivert 未正确安装；"
-                   "4) 杀毒软件拦截驱动加载。"
-                   "请用管理员身份重启 Telnix，并确保已运行 pip install pydivert；"
-                   "若仍失败请尝试关闭杀毒软件。")
+            msg = ("Start failed. Possible causes: 1) not running as administrator; "
+                   "2) WinDivert driver file missing; 3) pydivert not properly installed; "
+                   "4) antivirus blocking driver load. "
+                   "Please restart Telnix as administrator and ensure pip install pydivert has been run; "
+                   "if it still fails, try disabling antivirus.")
         _raw_capture = None
         return False, msg
-    return True, "TCP/UDP 抓包已启动（WinDivert）"
+    return True, "TCP/UDP capture started (WinDivert)"
 
 
 def _start_unix_raw_capture(session_id: int, pid_filter: set[int] | None = None,
                             port_filter: set[int] | None = None,
                             filter_str: str = "") -> tuple[bool, str]:
-    """Unix 平台（Linux/macOS）启动 TCP/UDP 抓包。
+    """Start TCP/UDP capture on Unix platforms (Linux/macOS).
 
-    使用 AF_PACKET (Linux) 或 BPF (macOS) 替代 WinDivert。
-    需要 root 权限。
+    Uses AF_PACKET (Linux) or BPF (macOS) instead of WinDivert.
+    Requires root privileges.
     """
     global _raw_capture
     try:
         from .raw_capture_unix import UnixRawCapture, IS_UNIX
     except ImportError as e:
-        return False, f"加载 Unix 抓包后端失败: {e}"
+        return False, f"Failed to load Unix capture backend: {e}"
     if not IS_UNIX:
-        return False, "当前平台不支持 TCP/UDP 抓包"
+        return False, "TCP/UDP capture is not supported on this platform"
     _raw_capture = UnixRawCapture(session_id)
     if pid_filter:
         _raw_capture.set_pid_filter(pid_filter)
@@ -954,40 +965,40 @@ def _start_unix_raw_capture(session_id: int, pid_filter: set[int] | None = None,
     if not ok:
         err_detail = _raw_capture.last_error or ""
         if "权限" in err_detail or "root" in err_detail or "CAP_NET_RAW" in err_detail:
-            msg = ("启动失败：需要 root 权限。请用 sudo 启动 Telnix：\n"
+            msg = ("Start failed: root privileges required. Please start Telnix with sudo:\n"
                    "  sudo ./start.sh --no-browser\n"
-                   "或：sudo python3 -m telnix --no-browser")
+                   "or: sudo python3 -m telnix --no-browser")
         elif "BPF" in err_detail or "/dev/bpf" in err_detail:
-            msg = ("启动失败：找不到可用的 BPF 设备。请确认以 root 身份运行，"
-                   "并检查 /dev/bpfN 设备是否被其他抓包工具占用。")
+            msg = ("Start failed: no available BPF device. Please confirm you are running as root, "
+                   "and check whether /dev/bpfN devices are occupied by other capture tools.")
         elif "AF_PACKET" in err_detail:
-            msg = ("启动失败：AF_PACKET 创建失败。请确认以 root 身份运行，"
-                   "并检查内核是否支持 AF_PACKET（标准 Linux 内核均支持）。")
+            msg = ("Start failed: AF_PACKET creation failed. Please confirm you are running as root, "
+                   "and check whether the kernel supports AF_PACKET (standard Linux kernels all support it).")
         else:
-            msg = f"启动失败：{err_detail or '未知原因'}"
+            msg = f"Start failed: {err_detail or 'unknown reason'}"
         _raw_capture = None
         return False, msg
     backend = "AF_PACKET" if sys.platform.startswith("linux") else "BPF"
-    return True, f"TCP/UDP 抓包已启动（{backend}）"
+    return True, f"TCP/UDP capture started ({backend})"
 
 
 def stop_raw_capture() -> tuple[bool, str]:
-    """停止 TCP/UDP 抓包。"""
+    """Stop TCP/UDP capture."""
     global _raw_capture
     if not _raw_capture or not _raw_capture.running:
-        return False, "未在运行"
+        return False, "Not running"
     _raw_capture.stop()
     _raw_capture = None
-    return True, "已停止"
+    return True, "Stopped"
 
 
 def raw_capture_status() -> dict:
-    """返回 TCP/UDP 抓包状态。
+    """Return TCP/UDP capture status.
 
-    平台支持：
-    - Windows: 检查 pydivert + 管理员权限
-    - Linux: 检查 root（AF_PACKET 后端，无外部依赖）
-    - macOS: 检查 root（BPF 后端，无外部依赖）
+    Platform support:
+    - Windows: check pydivert + admin privileges
+    - Linux: check root (AF_PACKET backend, no external dependencies)
+    - macOS: check root (BPF backend, no external dependencies)
     """
     running = bool(_raw_capture and _raw_capture.running)
     # 非 Windows 平台：返回 Unix 后端状态
@@ -1000,11 +1011,11 @@ def raw_capture_status() -> dict:
             "bpf" if sys.platform == "darwin" else "none"
         )
         if running:
-            hint = "就绪（运行中）"
+            hint = "Ready (running)"
         elif not is_admin:
-            hint = "需要 root 权限。请用 sudo 启动 Telnix"
+            hint = "Root privileges required. Please start Telnix with sudo"
         else:
-            hint = "就绪"
+            hint = "Ready"
         return {
             "running": running,
             "pydivert_installed": False,  # 兼容字段，非 Windows 不用 pydivert
@@ -1035,9 +1046,9 @@ def raw_capture_status() -> dict:
 
 
 def _get_hint(pydivert_installed: bool, is_admin: bool) -> str:
-    """生成状态提示。"""
+    """Generate status hint."""
     if not pydivert_installed:
-        return "未安装 pydivert。请运行: pip install pydivert"
+        return "pydivert not installed. Please run: pip install pydivert"
     if not is_admin:
-        return "需要管理员权限。请用管理员身份重启 Telnix"
-    return "就绪"
+        return "Administrator privileges required. Please restart Telnix as administrator"
+    return "Ready"
