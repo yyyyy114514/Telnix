@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { useVirtualList } from '../composables/useVirtualList'
+import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Flow } from '../api/client'
@@ -10,6 +12,7 @@ import HexView from '../components/HexView.vue'
 const capture = useCaptureStore()
 const flowsStore = useFlowsStore()
 const router = useRouter()
+const { t } = useI18n()
 
 // 性能优化：flows 列表只做顶层替换（无 .push 单条），用 shallowRef 避免对每条 flow 深度代理
 const flows = shallowRef<Flow[]>([])
@@ -189,7 +192,7 @@ async function confirmDeleteFlows() {
   if (!ids.length) { showDeleteConfirm.value = false; return }
   try {
     await api.batchDeleteFlows(ids)
-    ElMessage.success(`已删除 ${ids.length} 条`)
+    ElMessage.success(t('ws.deletedNFlows', { n: ids.length }))
     flows.value = flows.value.filter(x => !ids.includes(x.id))
     if (selectedId.value !== null && ids.includes(selectedId.value)) {
       selectedId.value = null
@@ -199,7 +202,7 @@ async function confirmDeleteFlows() {
     multiSelectMode.value = false
     showDeleteConfirm.value = false
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('ws.deleteFailed', { msg: e?.message || e }))
     showDeleteConfirm.value = false
   }
 }
@@ -211,14 +214,14 @@ function cancelDeleteFlows() {
 async function ignoreHost() {
   const f = selectedFlow.value
   if (!f || !f.host) {
-    ElMessage.warning('该流量无 Host 信息')
+    ElMessage.warning(t('ws.noHostInfo'))
     return
   }
   try {
     await api.ignoreHost(f.host)
-    ElMessage.success(`已忽略 Host ${f.host}（对新连接生效，已有连接需重启后端）`)
+    ElMessage.success(t('ws.ignoredHost', { host: f.host }))
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('ws.ignoreFailed', { msg: e?.message || e }))
   }
 }
 
@@ -260,10 +263,17 @@ const gridCols = computed(() => {
 
 // 自动滚动
 const bodyRef = ref<HTMLElement | null>(null)
+// P1 虚拟滚动：固定行高 28px，窗口化渲染
+const { onScroll: onVScroll, visibleItems, topPad, bottomPad } = useVirtualList<any>({
+  containerRef: bodyRef,
+  items: () => displayFlows.value,
+  itemHeight: 28,
+})
 let scrollPauseTimer: number | null = null
 let programmaticScroll = false
 
-function onBodyScroll() {
+function onBodyScroll(e: Event) {
+  onVScroll(e)
   if (programmaticScroll) {
     programmaticScroll = false
     return
@@ -306,16 +316,16 @@ const ctxMenu = ref<{ visible: boolean; x: number; y: number; flow: Flow | null 
 })
 const ctxMenuRef = ref<HTMLElement | null>(null)
 
-const COPY_FIELDS = [
+const COPY_FIELDS = computed(() => [
   { key: 'id', label: 'ID', field: 'id' },
-  { key: 'method', label: '方向', field: 'method' },
+  { key: 'method', label: t('ws.direction'), field: 'method' },
   { key: 'host', label: 'Host', field: 'host' },
   { key: 'path', label: 'Path', field: 'path' },
-  { key: 'process', label: '进程', field: 'process_name' },
+  { key: 'process', label: t('ws.process'), field: 'process_name' },
   { key: 'pid', label: 'PID', field: 'pid' },
-  { key: 'size', label: '大小', field: 'size' },
-  { key: 'time', label: '时间', field: 'timestamp' },
-]
+  { key: 'size', label: t('ws.size'), field: 'size' },
+  { key: 'time', label: t('ws.time'), field: 'timestamp' },
+])
 
 function onContextMenu(e: MouseEvent, flow: Flow) {
   e.preventDefault()
@@ -349,7 +359,7 @@ function copyField(field: string) {
   if (!f) return
   const text = getFieldValue(f, field)
   navigator.clipboard.writeText(text).catch(() => {})
-  ElMessage.success(`已复制：${text.length > 40 ? text.slice(0, 40) + '...' : text}`)
+  ElMessage.success(t('ws.copied', { text: text.length > 40 ? text.slice(0, 40) + '...' : text }))
   closeCtxMenu()
 }
 
@@ -364,8 +374,8 @@ async function ctxDelete() {
   const f = ctxMenu.value.flow
   if (!f) return
   try {
-    await ElMessageBox.confirm(`确定删除 #${f.id}？`, '删除', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('ws.deleteConfirm', { id: f.id }), t('ws.delete'), {
+      confirmButtonText: t('ws.delete'), cancelButtonText: t('ws.cancel'), type: 'warning',
     })
   } catch {
     closeCtxMenu()
@@ -378,9 +388,9 @@ async function ctxDelete() {
       selectedId.value = null
       selectedHex.value = ''
     }
-    ElMessage.success('已删除')
+    ElMessage.success(t('ws.deleted'))
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('ws.deleteFailed', { msg: e?.message || e }))
   }
   closeCtxMenu()
 }
@@ -536,50 +546,50 @@ onUnmounted(() => {
     <!-- 顶部工具栏 -->
     <div class="ws-toolbar">
       <span class="ws-title">
-        <el-icon><Connection /></el-icon>&nbsp;WebSocket 消息
+        <el-icon><Connection /></el-icon>&nbsp;{{ t('ws.title') }}
       </span>
       <div class="ws-status-tags">
-        <el-tag size="small" type="info">{{ flows.length }} 条消息</el-tag>
+        <el-tag size="small" type="info">{{ t('ws.messagesCount', { n: flows.length }) }}</el-tag>
       </div>
       <div class="flex-1"></div>
       <span class="text-dim mono" style="font-size: 11px">
-        WebSocket 帧按 message 聚合记录 · 双击在抓包页查看
+        {{ t('ws.aggregateHint') }}
       </span>
     </div>
 
     <!-- 过滤栏（图标按钮风格，对齐抓包页 FlowList） -->
     <div class="filter-bar">
       <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
-        <el-icon><Filter /></el-icon>&nbsp;筛选
+        <el-icon><Filter /></el-icon>&nbsp;{{ t('ws.filter') }}
         <span v-if="hasActiveFilters" class="filter-badge"></span>
       </el-button>
       <el-dropdown size="small" :disabled="!selectedFlow" @command="(c: string) => { c === 'host' && ignoreHost() }">
         <el-button size="small" :disabled="!selectedFlow">
-          <el-icon><RemoveFilled /></el-icon>&nbsp;忽略<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('ws.ignore') }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="host" :disabled="!selectedFlow?.host">按 Host</el-dropdown-item>
+            <el-dropdown-item command="host" :disabled="!selectedFlow?.host">{{ t('ws.byHost') }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
       <!-- 专注模式：点击打开悬浮窗 -->
-      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="bottom">
+      <el-tooltip :content="focusEnabled ? t('ws.focusActiveHint') : t('ws.focusModeHint')" placement="bottom">
         <el-button
           size="small"
           :type="focusEnabled ? 'success' : 'default'"
           @click="togglePopup('focus')"
         >
-          <el-icon><Aim /></el-icon>&nbsp;专注
+          <el-icon><Aim /></el-icon>&nbsp;{{ t('ws.focus') }}
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? `自动滚动：暂停中（${flowsStore.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="bottom">
+      <el-tooltip :content="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? t('ws.autoScrollPaused', { n: flowsStore.autoScrollDelay }) : t('ws.autoScrollOn')) : t('ws.autoScrollOff')" placement="bottom">
         <el-button size="small" :type="flowsStore.autoScroll ? (flowsStore.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="flowsStore.autoScroll = !flowsStore.autoScroll">
           <el-icon><Bottom /></el-icon>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
+      <el-tooltip :content="multiSelectMode ? t('ws.exitMultiSelect') : t('ws.multiSelectMode')" placement="bottom">
         <el-button
           size="small"
           :type="multiSelectMode ? 'warning' : 'default'"
@@ -600,7 +610,7 @@ onUnmounted(() => {
         @click.stop
       >
         <div class="popup-header" @mousedown="onPopupHeaderDown">
-          <span class="popup-title">{{ activePopup === 'filter' ? '筛选' : '专注' }}</span>
+          <span class="popup-title">{{ activePopup === 'filter' ? t('ws.filter') : t('ws.focus') }}</span>
           <el-icon class="popup-close" @click="closePopup"><Close /></el-icon>
         </div>
         <div class="popup-body">
@@ -615,7 +625,7 @@ onUnmounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="输入 host 按 Enter 添加，支持 * ? 通配符"
+                :placeholder="t('ws.filterHostPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -624,24 +634,24 @@ onUnmounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">方向</label>
+              <label class="fp-label">{{ t('ws.direction') }}</label>
               <el-select
                 v-model="filterDirs"
                 multiple
                 :reserve-keyword="false"
-                placeholder="选择方向（可多选）"
+                :placeholder="t('ws.selectDirPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
               >
-                <el-option label="↑ 发送 (WS-SEND)" value="WS-SEND" />
-                <el-option label="↓ 接收 (WS-RECV)" value="WS-RECV" />
+                <el-option :label="t('ws.sendDir')" value="WS-SEND" />
+                <el-option :label="t('ws.recvDir')" value="WS-RECV" />
               </el-select>
             </div>
-            <div class="fp-tip text-dim">筛选采用 AND 语义：所有条件都需满足。仅前端有效。</div>
+            <div class="fp-tip text-dim">{{ t('ws.filterAndTip') }}</div>
             <div class="fp-actions">
-              <el-button size="small" @click="resetFilters">重置</el-button>
-              <el-button size="small" type="primary" @click="closePopup">完成</el-button>
+              <el-button size="small" @click="resetFilters">{{ t('ws.reset') }}</el-button>
+              <el-button size="small" type="primary" @click="closePopup">{{ t('ws.done') }}</el-button>
             </div>
           </template>
           <!-- 专注 -->
@@ -655,7 +665,7 @@ onUnmounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="通配符如 *.example.com 或选择已出现 host"
+                :placeholder="t('ws.focusHostPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -664,24 +674,24 @@ onUnmounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">方向</label>
+              <label class="fp-label">{{ t('ws.direction') }}</label>
               <el-select
                 v-model="focusDirs"
                 multiple
                 :reserve-keyword="false"
-                placeholder="选择方向（多选，OR 匹配）"
+                :placeholder="t('ws.selectDirOrPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
               >
-                <el-option label="↑ 发送 (WS-SEND)" value="WS-SEND" />
-                <el-option label="↓ 接收 (WS-RECV)" value="WS-RECV" />
+                <el-option :label="t('ws.sendDir')" value="WS-SEND" />
+                <el-option :label="t('ws.recvDir')" value="WS-RECV" />
               </el-select>
             </div>
-            <div class="fp-tip text-dim">专注采用 OR 语义：满足任一条件即显示。仅前端有效。</div>
+            <div class="fp-tip text-dim">{{ t('ws.focusOrTip') }}</div>
             <div class="fp-actions">
-              <el-button size="small" @click="resetFocus">重置</el-button>
-              <el-button size="small" type="primary" @click="closePopup">完成</el-button>
+              <el-button size="small" @click="resetFocus">{{ t('ws.reset') }}</el-button>
+              <el-button size="small" type="primary" @click="closePopup">{{ t('ws.done') }}</el-button>
             </div>
           </template>
         </div>
@@ -694,15 +704,16 @@ onUnmounted(() => {
         <div class="wl-head mono" :style="{ gridTemplateColumns: gridCols }">
           <div v-if="multiSelectMode" class="wl-check"></div>
           <div class="wl-id">#</div>
-          <div class="wl-dir">方向</div>
+          <div class="wl-dir">{{ t('ws.direction') }}</div>
           <div class="wl-host">Host</div>
           <div class="wl-path">Path</div>
-          <div class="wl-size">大小</div>
-          <div class="wl-time">时间</div>
+          <div class="wl-size">{{ t('ws.size') }}</div>
+          <div class="wl-time">{{ t('ws.time') }}</div>
         </div>
         <div ref="bodyRef" class="wl-body flex-1 overflow-auto" @scroll="onBodyScroll">
+          <div :style="{ height: topPad + 'px' }"></div>
           <div
-            v-for="f in displayFlows"
+            v-for="f in visibleItems"
             :key="f.id"
             class="wl-row mono"
             :class="{ selected: selectedId === f.id, checked: selectedFlowIds.has(f.id) }"
@@ -722,7 +733,8 @@ onUnmounted(() => {
             <div class="wl-size text-muted">{{ formatSize(f.size) }}</div>
             <div class="wl-time text-muted">{{ formatTime(f.timestamp) }}</div>
           </div>
-          <div v-if="!displayFlows.length" class="empty-text text-dim">暂无 WebSocket 消息</div>
+          <div :style="{ height: bottomPad + 'px' }"></div>
+          <div v-if="!displayFlows.length" class="empty-text text-dim">{{ t('ws.noMessages') }}</div>
         </div>
 
         <!-- 多选模式悬浮工具栏 -->
@@ -732,16 +744,16 @@ onUnmounted(() => {
             class="multi-float-bar"
             @mouseenter="showFloatBarNow"
           >
-            <span class="mfb-count">已选 {{ selectedCount }}</span>
-            <el-button size="small" @click="selectAllFlows">全选</el-button>
-            <el-button size="small" @click="clearSelection" :disabled="!selectedCount">清空</el-button>
+            <span class="mfb-count">{{ t('ws.selectedN', { n: selectedCount }) }}</span>
+            <el-button size="small" @click="selectAllFlows">{{ t('ws.selectAll') }}</el-button>
+            <el-button size="small" @click="clearSelection" :disabled="!selectedCount">{{ t('ws.clear') }}</el-button>
             <el-button
               size="small"
               type="danger"
               :disabled="!selectedCount"
               @click="batchDeleteFlows"
             >
-              <el-icon><Delete /></el-icon>&nbsp;删除
+              <el-icon><Delete /></el-icon>&nbsp;{{ t('ws.delete') }}
             </el-button>
             <!-- 子悬浮窗：删除确认 -->
             <transition name="popup-fade">
@@ -751,10 +763,10 @@ onUnmounted(() => {
                 @click.stop
                 @mouseenter="showFloatBarNow"
               >
-                <div class="dc-text">确定删除选中的 {{ selectedCount }} 条流量？</div>
+                <div class="dc-text">{{ t('ws.deleteConfirmFlows', { n: selectedCount }) }}</div>
                 <div class="dc-actions">
-                  <el-button size="small" @click="cancelDeleteFlows">取消</el-button>
-                  <el-button size="small" type="danger" @click="confirmDeleteFlows">删除</el-button>
+                  <el-button size="small" @click="cancelDeleteFlows">{{ t('ws.cancel') }}</el-button>
+                  <el-button size="small" type="danger" @click="confirmDeleteFlows">{{ t('ws.delete') }}</el-button>
                 </div>
               </div>
             </transition>
@@ -764,7 +776,7 @@ onUnmounted(() => {
       <div class="ws-detail-pane">
         <div v-if="!selectedFlow" class="empty-detail text-dim">
           <el-icon :size="36"><Document /></el-icon>
-          <div style="margin-top: 10px">选择左侧消息查看 Hex</div>
+          <div style="margin-top: 10px">{{ t('ws.selectToViewHex') }}</div>
         </div>
         <template v-else>
           <div class="detail-head">
@@ -782,7 +794,7 @@ onUnmounted(() => {
             </el-tab-pane>
             <el-tab-pane label="Raw" name="raw" lazy>
               <div class="ws-raw-view mono overflow-auto">
-                <pre>{{ selectedRaw || '(空)' }}</pre>
+                <pre>{{ selectedRaw || t('ws.empty') }}</pre>
               </div>
             </el-tab-pane>
           </el-tabs>
@@ -799,17 +811,17 @@ onUnmounted(() => {
         :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
         @click.stop
       >
-        <div class="ctx-item" @click="onFlowDblClick(ctxMenu.flow!)"><el-icon><Aim /></el-icon>&nbsp;在抓包页查看</div>
+        <div class="ctx-item" @click="onFlowDblClick(ctxMenu.flow!)"><el-icon><Aim /></el-icon>&nbsp;{{ t('ws.viewInCapture') }}</div>
         <div class="ctx-sep"></div>
         <div class="ctx-item ctx-submenu">
-          <el-icon><CopyDocument /></el-icon>&nbsp;复制
+          <el-icon><CopyDocument /></el-icon>&nbsp;{{ t('ws.copy') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
         </div>
         <div class="ctx-submenu-panel">
           <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">{{ item.label }}</div>
         </div>
         <div class="ctx-sep"></div>
-        <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;删除</div>
+        <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;{{ t('ws.delete') }}</div>
       </div>
     </teleport>
   </div>

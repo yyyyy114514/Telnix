@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { useVirtualList } from '../composables/useVirtualList'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -369,10 +370,17 @@ const gridCols = computed(() => {
 
 // ---------- 自动滚动（复用 flows store，与抓包页/设置同步）----------
 const bodyRef = ref<HTMLElement | null>(null)
+// P1 虚拟滚动：固定行高 28px，窗口化渲染
+const { onScroll: onVScroll, visibleItems, topPad, bottomPad } = useVirtualList<any>({
+  containerRef: bodyRef,
+  items: () => displayFlows.value,
+  itemHeight: 28,
+})
 let scrollPauseTimer: number | null = null
 let programmaticScroll = false
 
-function onBodyScroll() {
+function onBodyScroll(e: Event) {
+  onVScroll(e)
   if (programmaticScroll) {
     programmaticScroll = false
     return
@@ -980,8 +988,9 @@ onUnmounted(() => {
           <div class="rl-time">{{ t('raw.time') }}</div>
         </div>
         <div ref="bodyRef" class="rl-body flex-1 overflow-auto" @scroll="onBodyScroll">
+          <div :style="{ height: topPad + 'px' }"></div>
           <div
-            v-for="f in displayFlows"
+            v-for="f in visibleItems"
             :key="f.id"
             class="rl-row mono"
             :class="{ selected: selectedId === f.id, checked: selectedFlowIds.has(f.id) }"
@@ -1003,6 +1012,7 @@ onUnmounted(() => {
             <div class="rl-size text-muted">{{ formatSize(f.size) }}</div>
             <div class="rl-time text-muted">{{ formatTime(f.timestamp) }}</div>
           </div>
+          <div :style="{ height: bottomPad + 'px' }"></div>
           <div v-if="!displayFlows.length" class="empty-text text-dim">{{ t('raw.noPackets') }}</div>
         </div>
 

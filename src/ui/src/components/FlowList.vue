@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useVirtualList } from '../composables/useVirtualList'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useFlowsStore } from '../stores/flows'
@@ -36,6 +37,13 @@ const store = useFlowsStore()
 const capture = useCaptureStore()
 
 const bodyRef = ref<HTMLElement | null>(null)
+
+// P1 虚拟滚动：固定行高 26px，窗口化渲染（详见 composables/useVirtualList）
+const { onScroll: onVScroll, visibleItems, topPad, bottomPad } = useVirtualList<any>({
+  containerRef: bodyRef,
+  items: () => displayFlows.value,
+  itemHeight: 26,
+})
 
 // ---------- 多选模式 ----------
 const multiSelectMode = ref(false)
@@ -779,7 +787,8 @@ const focusHostSelectRef = ref<any>(null)
 let scrollPauseTimer: number | null = null
 let programmaticScroll = false
 
-function onBodyScroll() {
+function onBodyScroll(e: Event) {
+  onVScroll(e)
   if (programmaticScroll) {
     programmaticScroll = false
     return
@@ -1678,8 +1687,9 @@ onMounted(() => {
     </div>
     <!-- 表体 -->
     <div ref="bodyRef" class="fl-body flex-1 overflow-auto" v-loading="store.initialLoading && store.flows.length === 0" @scroll="onBodyScroll">
+      <div :style="{ height: topPad + 'px' }"></div>
       <div
-        v-for="f in displayFlows"
+        v-for="f in visibleItems"
         :key="f.id"
         v-memo="[f.id, f.breakpoint_status, store.selectedId === f.id, selectedFlowIds.has(f.id), gridCols]"
         class="fl-row mono"
@@ -1698,6 +1708,7 @@ onMounted(() => {
           :class="cellFullClass(c, f)"
         >{{ c.text(f) }}</div>
       </div>
+      <div :style="{ height: bottomPad + 'px' }"></div>
       <div v-if="!store.flows.length" class="empty-text text-dim">{{ t('flowList.noFlows') }}</div>
     </div>
 

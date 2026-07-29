@@ -1,6 +1,7 @@
-"""SQLite 数据库：sessions / flows / auto_reply_rules / settings / ignored_processes 表。
+"""SQLite database: sessions / flows / auto_reply_rules / settings / ignored_processes tables.
 
-每个操作创建独立连接并提交关闭，配合 WAL 模式与 busy_timeout 处理并发。
+Each operation creates an independent connection, commits, and closes, combined with
+WAL mode and busy_timeout for concurrency handling.
 """
 
 import asyncio
@@ -30,15 +31,15 @@ _VALID_COL_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def _validate_column_names(cols) -> None:
-    """校验列名只包含合法字符（字母/数字/下划线，首字符非数字）。
+    """Validate that column names contain only legal characters (letters/digits/underscore, first char not a digit).
 
-    安全：防止 dict key 中混入 SQL 元字符（如 \"id; DROP TABLE--\"）。
-    合法列名示例：id, session_id, request_headers, http_version
+    Security: prevents SQL metacharacters from sneaking in via dict keys (e.g. \"id; DROP TABLE--\").
+    Legal column name examples: id, session_id, request_headers, http_version
     """
     for c in cols:
         if not isinstance(c, str) or not _VALID_COL_NAME.match(c):
             raise ValueError(
-                f"非法列名: {c!r}（仅允许字母/数字/下划线，首字符非数字）"
+                f"Invalid column name: {c!r} (only letters/digits/underscore allowed, first char must not be a digit)"
             )
 
 # 建表语句（不含 INDEX）：CREATE TABLE IF NOT EXISTS 不会修改已有表结构，
@@ -173,10 +174,10 @@ _local = threading.local()
 
 
 def _get_thread_conn() -> sqlite3.Connection:
-    """获取当前线程的复用连接（首次调用时建立，后续复用）。
+    """Get the current thread's reused connection (created on first call, reused afterwards).
 
-    PRAGMA busy_timeout 只需在连接首次建立时设一次（连接级设置）。
-    row_factory 也只需设一次。
+    PRAGMA busy_timeout only needs to be set once when the connection is first
+    established (connection-level setting). row_factory also only needs to be set once.
     """
     conn = getattr(_local, "conn", None)
     if conn is not None:
@@ -191,11 +192,12 @@ def _get_thread_conn() -> sqlite3.Connection:
 
 @contextmanager
 def get_connection():
-    """获取数据库连接（threading.local 复用，自动提交）。
+    """Get a database connection (threading.local reuse, auto-commit).
 
-    性能优化：每个工作线程复用一个长连接，避免每次操作都 connect/close。
-    WAL 模式是持久设置（init_db 时设一次），不需要每次连接都设。
-    busy_timeout 是连接级设置，首次建立时设一次即可。
+    Performance optimization: each worker thread reuses a long-lived connection,
+    avoiding connect/close on every operation.
+    WAL mode is a persistent setting (set once in init_db), no need to set per connection.
+    busy_timeout is a connection-level setting, set once when first established.
     """
     conn = _get_thread_conn()
     try:
@@ -208,14 +210,17 @@ def get_connection():
 
 
 def init_db():
-    """初始化数据库与表，写入默认设置。
+    """Initialize the database and tables, writing default settings.
 
-    默认启动时清空 flows 表并重置自增序列，避免 ID 无限累积。
-    设置环境变量 TELNIX_KEEP_FLOWS=1 可保留历史流量。
+    By default, the flows table is cleared and the auto-increment sequence is
+    reset on startup, to avoid IDs accumulating indefinitely.
+    Set the environment variable TELNIX_KEEP_FLOWS=1 to keep historical flows.
 
-    性能优化：清空 flows 时用 DROP TABLE + CREATE TABLE 替代 DELETE FROM flows。
-    DELETE 需逐行删除并写 WAL 日志，行数多时耗时几秒；DROP+CREATE 直接释放页，
-    不写 WAL，瞬时完成（< 1ms）。同样适用于 sessions 表与 sqlite_sequence。
+    Performance optimization: when clearing flows, DROP TABLE + CREATE TABLE is
+    used instead of DELETE FROM flows. DELETE removes rows one by one and writes
+    WAL logs, taking seconds when there are many rows; DROP+CREATE releases pages
+    directly without writing WAL, completing instantly (< 1ms). The same applies
+    to the sessions table and sqlite_sequence.
     """
     db_path = get_db_path()
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -307,10 +312,12 @@ def init_db():
 
 
 def _migrate(conn):
-    """数据库迁移：补齐新字段。失败说明已存在，忽略。
+    """Database migration: add missing new columns. Failure means it already exists, ignored.
 
-    安全：仅吞掉 "duplicate column" / "already exists" 错误（说明字段已存在），
-    其他错误（磁盘满、DB 损坏、权限错误）向上抛出，避免迁移静默失败导致后续查询缺列崩溃。
+    Safety: only swallows "duplicate column" / "already exists" errors (meaning the
+    column already exists); other errors (disk full, DB corruption, permission errors)
+    propagate up, to avoid silent migration failures that would cause subsequent
+    queries to crash due to missing columns.
     """
 
     def _safe_alter(sql: str):
@@ -418,7 +425,7 @@ def _migrate(conn):
         # （v2 已建但旧表未删，或旧表已删但 RENAME 失败），后续查询会崩溃
         # 记录 error 便于诊断；不抛出避免阻断启动
         try:
-            _logger.error("ignored_processes 表迁移失败: %s: %s",
+            _logger.error("ignored_processes table migration failed: %s: %s",
                           type(e).__name__, e)
         except Exception:  # noqa: BLE001
             pass
@@ -430,14 +437,14 @@ from . import settings_store  # noqa: E402
 
 
 def _sqlite_get_all_settings() -> dict:
-    """从 SQLite settings 表读取所有键值（仅迁移用）。"""
+    """Read all key-values from the SQLite settings table (migration only)."""
     with get_connection() as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
         return {row["key"]: row["value"] for row in rows}
 
 
 def get_setting(key: str, default: str = "") -> str:
-    """读取单个设置项（从 settings.json）。"""
+    """Read a single setting (from settings.json)."""
     v = settings_store.get_setting(key, default)
     # 兼容旧调用：返回字符串
     if isinstance(v, (list, dict)):
@@ -449,12 +456,12 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_setting(key: str, value: str):
-    """写入单个设置项到 settings.json。"""
+    """Write a single setting to settings.json."""
     settings_store.set_setting(key, value)
 
 
 def get_all_settings() -> dict:
-    """读取全部设置（从 settings.json）。"""
+    """Read all settings (from settings.json)."""
     return settings_store.get_all_settings()
 
 
@@ -489,7 +496,7 @@ def update_session_ended(session_id: int):
 
 
 def delete_session(session_id: int) -> int:
-    """删除会话及其所有流量。返回删除的流量条数。"""
+    """Delete a session and all its flows. Returns the number of deleted flows."""
     with get_connection() as conn:
         cur = conn.execute("DELETE FROM flows WHERE session_id=?", (session_id,))
         deleted = cur.rowcount
@@ -500,7 +507,7 @@ def delete_session(session_id: int) -> int:
 # ---------- flows ----------
 
 def insert_flow(flow: dict) -> int:
-    """插入一条流量记录，flow 为字段名到值的映射，返回自增 id。"""
+    """Insert a single flow record. flow is a field-name-to-value mapping. Returns the auto-increment id."""
     cols = list(flow.keys())
     _validate_column_names(cols)  # 安全：校验列名防 SQL 注入
     placeholders = ",".join("?" * len(cols))
@@ -514,9 +521,11 @@ def insert_flow(flow: dict) -> int:
 
 
 def insert_flows_batch(flows: list[dict]) -> int:
-    """批量插入流量（单事务提交 + SAVEPOINT 失败隔离），远快于逐条 insert。
+    """Batch insert flows (single transaction commit + SAVEPOINT failure isolation),
+    much faster than inserting one by one.
 
-    返回成功插入的条数；单条插入失败仅跳过该条，不影响其余。
+    Returns the number of successfully inserted rows; a single row failure only
+    skips that row and does not affect the others.
     """
     if not flows:
         return 0
@@ -546,7 +555,7 @@ def insert_flows_batch(flows: list[dict]) -> int:
 
 
 def get_flows_by_ids(ids: list[int]) -> dict[int, dict]:
-    """按 id 列表批量获取 flow，返回 {id: flow} 映射，消除逐条查询的 N+1。"""
+    """Batch-get flows by id list, returning an {id: flow} mapping, eliminating the N+1 of per-id queries."""
     if not ids:
         return {}
     unique = list(dict.fromkeys(ids))
@@ -575,7 +584,7 @@ _flow_dropped_count = 0
 
 
 def _start_flow_writer():
-    """启动后台写入线程（懒启动，首次调用时创建）。"""
+    """Start the background writer thread (lazily started on first call)."""
     global _flow_writer_started
     with _flow_writer_lock:
         if _flow_writer_started:
@@ -586,10 +595,12 @@ def _start_flow_writer():
 
 
 def _flow_writer_loop():
-    """后台线程：从队列取 flow 数据，批量 INSERT + COMMIT。
+    """Background thread: takes flow data from the queue, batch INSERTs + COMMITs.
 
-    性能优化：首条触发模式——收到第一条后立即用 get_nowait 拉取后续凑批，
-    凑满 BATCH_SIZE 或无更多数据立即 flush。首批延迟从 20ms 降到 <1ms。
+    Performance optimization: first-item trigger mode -- after receiving the first
+    item, immediately uses get_nowait to pull subsequent items to fill the batch,
+    flushing as soon as BATCH_SIZE is reached or no more data is available.
+    First-batch latency drops from 20ms to <1ms.
     """
     conn = sqlite3.connect(get_db_path(), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -639,12 +650,14 @@ def _flow_writer_loop():
 
 
 def _flush_batch(conn: sqlite3.Connection, batch: list[dict]):
-    """批量插入 flows，单次 COMMIT。
+    """Batch insert flows with a single COMMIT.
 
-    性能优化：使用 executemany 批量插入（比逐条 execute 快 5-10 倍），
-    通过 last_insert_rowid() + rowcount 反推每条 flow 的自增 id。
-    失败时回退到二分定位坏数据并跳过。
-    SSE 通知：INSERT 后回填 flow.id 并通知订阅者（前端立即收到带 id 的 flow）。
+    Performance optimization: uses executemany for batch insertion (5-10x faster
+    than per-row execute), and infers each flow's auto-increment id via
+    last_insert_rowid() + rowcount. On failure, falls back to binary search to
+    locate and skip bad data.
+    SSE notification: after INSERT, backfills flow.id and notifies subscribers
+    (the frontend immediately receives flows with ids).
     """
     if not batch:
         return
@@ -678,12 +691,14 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]):
 
 
 def _flush_batch_split(conn: sqlite3.Connection, sql: str, batch: list[dict]):
-    """二分法定位并跳过坏数据，避免逐条 commit 的 N 倍延迟。
+    """Binary search to locate and skip bad data, avoiding the N-fold latency of per-row commits.
 
-    策略：对 batch 做二分，好的一半批量插入，坏的一半继续二分，
-    直到单条仍失败则跳过。总 commit 次数 = O(log N + 坏数据数)，远优于 N。
+    Strategy: bisect the batch; insert the good half in bulk, continue bisecting
+    the bad half, until a single row still fails and is skipped. Total commit
+    count = O(log N + bad-data count), far better than N.
 
-    修复：成功插入的子段必须回填 id 并触发 SSE 通知，否则前端看不到实时包。
+    Fix: successfully inserted sub-segments must backfill ids and trigger SSE
+    notifications, otherwise the frontend won't see real-time packets.
     """
     if not batch:
         return
@@ -724,10 +739,10 @@ def _flush_batch_split(conn: sqlite3.Connection, sql: str, batch: list[dict]):
 
 
 def _backfill_ids_and_notify(sub_batch: list[dict], cur) -> None:
-    """子段插入成功后回填自增 id 并触发 SSE 批量通知。
+    """Backfill auto-increment ids and trigger batch SSE notification after a sub-segment insert succeeds.
 
-    SQLite executemany 的 lastrowid 是最后一条插入的 id，
-    rowcount 是插入条数；据此反推每条 flow 的 id。
+    SQLite executemany's lastrowid is the id of the last inserted row, and
+    rowcount is the number of inserted rows; each flow's id is inferred from these.
     """
     if not sub_batch:
         return
@@ -744,12 +759,15 @@ def _backfill_ids_and_notify(sub_batch: list[dict], cur) -> None:
 
 
 def insert_flow_async(flow: dict):
-    """异步插入 flow（入队，后台批量写入）。不返回 flow_id。
+    """Asynchronously insert a flow (enqueue, background batch write). Does not return flow_id.
 
-    用于非断点场景（_record_flow），代理线程无需等待 DB 写完。
-    SSE 通知在 _flush_batch INSERT 后触发（带 flow.id），而非此处入队时。
+    Used in non-breakpoint scenarios (_record_flow); the proxy thread does not
+    need to wait for the DB write to complete.
+    SSE notification is triggered in _flush_batch after INSERT (with flow.id),
+    not when enqueuing here.
 
-    队列满时丢弃最旧的条目（get_nowait 后 put）并计数，避免代理线程阻塞。
+    When the queue is full, the oldest entry is dropped (get_nowait then put) and
+    counted, to avoid blocking the proxy thread.
     """
     global _flow_dropped_count
     _start_flow_writer()
@@ -783,22 +801,23 @@ _SSE_NOTIFY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 
 
 def register_flow_subscriber(q: "asyncio.Queue", loop: "asyncio.AbstractEventLoop") -> None:
-    """注册一个 SSE 订阅者（asyncio.Queue + 所属事件循环）。"""
+    """Register an SSE subscriber (asyncio.Queue + its owning event loop)."""
     with _flow_subscribers_lock:
         _flow_subscribers.append((q, loop))
 
 
 def unregister_flow_subscriber(q: "asyncio.Queue") -> None:
-    """取消注册 SSE 订阅者。"""
+    """Unregister an SSE subscriber."""
     with _flow_subscribers_lock:
         _flow_subscribers[:] = [(q2, l) for (q2, l) in _flow_subscribers if q2 is not q]
 
 
 def _notify_flow_subscribers_batch(flows: list[dict]) -> None:
-    """在专用线程中批量通知所有 SSE 订阅者（锁只获取一次，不阻塞 flow-writer）。
+    """Batch-notify all SSE subscribers in a dedicated thread (lock acquired only once, does not block flow-writer).
 
-    性能优化：每个订阅者一次 call_soon_threadsafe 投递整个 lite 列表，
-    避免逐条 call_soon_threadsafe 的 N×M 次跨线程调度开销。
+    Performance optimization: each subscriber gets the entire lite list delivered
+    via a single call_soon_threadsafe, avoiding the N*M cross-thread scheduling
+    overhead of per-item call_soon_threadsafe.
     """
     if not _flow_subscribers or not flows:
         return
@@ -816,7 +835,7 @@ def _notify_flow_subscribers_batch(flows: list[dict]) -> None:
 
 
 def _notify_flow_subscribers(flow: dict) -> None:
-    """通知所有 SSE 订阅者有新 flow（单条，保留供断点等少量场景使用）。"""
+    """Notify all SSE subscribers of a new flow (single item, kept for low-volume scenarios like breakpoints)."""
     if not _flow_subscribers:
         return
     lite = _flow_to_lite(flow)
@@ -830,7 +849,7 @@ def _notify_flow_subscribers(flow: dict) -> None:
 
 
 def _batch_put_nowait(q: "asyncio.Queue", items: list) -> None:
-    """在事件循环线程中批量 put_nowait，队列满则丢弃剩余。"""
+    """Batch put_nowait in the event loop thread; drops the rest if the queue is full."""
     for item in items:
         try:
             q.put_nowait(item)
@@ -839,7 +858,7 @@ def _batch_put_nowait(q: "asyncio.Queue", items: list) -> None:
 
 
 def _safe_put_nowait(q: "asyncio.Queue", item: dict) -> None:
-    """在事件循环线程中安全 put_nowait，队列满则丢弃。"""
+    """Safely put_nowait in the event loop thread; drops the item if the queue is full."""
     try:
         q.put_nowait(item)
     except Exception:  # noqa: BLE001
@@ -856,12 +875,12 @@ _SSE_LITE_FIELDS = (
 
 
 def _flow_to_lite(flow: dict) -> dict:
-    """提取 flow 的 lite 字段（用于 SSE 推送，减少传输量）。"""
+    """Extract the lite fields of a flow (for SSE push, to reduce transfer size)."""
     return {k: flow.get(k) for k in _SSE_LITE_FIELDS if k in flow}
 
 
 def flush_pending_flows(timeout: float = 2.0):
-    """等待队列中所有 pending flows 写完（用于 flows/clear 等需要一致性的场景）。"""
+    """Wait for all pending flows in the queue to be written (for scenarios requiring consistency, e.g. flows/clear)."""
     if not _flow_writer_started:
         return
     # 入队一个 flush 标记，等待后台线程处理到此处
@@ -872,7 +891,7 @@ def flush_pending_flows(timeout: float = 2.0):
 
 def update_flow_response(flow_id: int, status_code, response_headers, response_body,
                          duration_ms, size):
-    """更新流量记录的响应字段。"""
+    """Update the response fields of a flow record."""
     with get_connection() as conn:
         conn.execute(
             "UPDATE flows SET status_code=?, response_headers=?, response_body=?, "
@@ -889,7 +908,7 @@ _update_writer_lock = threading.Lock()
 
 
 def _start_update_writer():
-    """启动 update 后台线程（懒启动）。"""
+    """Start the update background thread (lazily started)."""
     global _update_writer_started
     with _update_writer_lock:
         if _update_writer_started:
@@ -900,10 +919,12 @@ def _start_update_writer():
 
 
 def _update_writer_loop():
-    """后台线程：批量执行 UPDATE 操作。
+    """Background thread: batch-executes UPDATE operations.
 
-    性能优化：合并同一批的多个 UPDATE 为一次 COMMIT，减少写锁竞争。
-    UPDATE 操作幂等（按 flow_id），重复执行无副作用。
+    Performance optimization: merges multiple UPDATEs in the same batch into a
+    single COMMIT, reducing write-lock contention.
+    UPDATE operations are idempotent (keyed by flow_id); repeated execution has
+    no side effects.
     """
     conn = sqlite3.connect(get_db_path(), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -936,7 +957,7 @@ def _update_writer_loop():
 
 
 def _flush_update_batch(conn: sqlite3.Connection, batch: list[dict]):
-    """批量执行 UPDATE（每条单独 execute，最后一次 commit）。"""
+    """Batch-execute UPDATEs (each row executed separately, a single commit at the end)."""
     fail_count = 0
     for item in batch:
         try:
@@ -950,14 +971,14 @@ def _flush_update_batch(conn: sqlite3.Connection, batch: list[dict]):
             if fail_count <= 3:  # 限制日志量，避免大批量失败时刷屏
                 try:
                     _logger.warning(
-                        "flush_update_batch SQL 执行失败: %s: %s, params=%r",
+                        "flush_update_batch SQL execution failed: %s: %s, params=%r",
                         type(e).__name__, e, params,
                     )
                 except Exception:  # noqa: BLE001
                     pass
     if fail_count > 3:
         try:
-            _logger.warning("flush_update_batch 还有 %d 条失败未记录", fail_count - 3)
+            _logger.warning("flush_update_batch has %d more unrecorded failures", fail_count - 3)
         except Exception:  # noqa: BLE001
             pass
     try:
@@ -965,7 +986,7 @@ def _flush_update_batch(conn: sqlite3.Connection, batch: list[dict]):
     except Exception as e:  # noqa: BLE001
         # 修复审计 6.2：commit 失败也记录日志
         try:
-            _logger.warning("flush_update_batch commit 失败: %s: %s",
+            _logger.warning("flush_update_batch commit failed: %s: %s",
                             type(e).__name__, e)
         except Exception:  # noqa: BLE001
             pass
@@ -974,9 +995,11 @@ def _flush_update_batch(conn: sqlite3.Connection, batch: list[dict]):
 
 def update_flow_response_async(flow_id: int, status_code, response_headers, response_body,
                                 duration_ms, size):
-    """异步更新响应字段（入队，后台批量执行）。不阻塞代理线程。
+    """Asynchronously update response fields (enqueue, background batch execution).
+    Does not block the proxy thread.
 
-    用于非断点场景的响应记录。断点场景需要同步可见，仍用 update_flow_response。
+    Used for response recording in non-breakpoint scenarios. Breakpoint scenarios
+    require synchronous visibility and still use update_flow_response.
     """
     _start_update_writer()
     _update_queue.put({
@@ -987,7 +1010,7 @@ def update_flow_response_async(flow_id: int, status_code, response_headers, resp
 
 
 def update_flow_breakpoint(flow_id: int, status: str | None):
-    """更新断点状态（同步，断点状态需要立即可见给前端）。"""
+    """Update the breakpoint status (synchronous; breakpoint status must be immediately visible to the frontend)."""
     with get_connection() as conn:
         conn.execute(
             "UPDATE flows SET breakpoint_status=? WHERE id=?", (status, flow_id)
@@ -996,7 +1019,7 @@ def update_flow_breakpoint(flow_id: int, status: str | None):
 
 def update_flow_request(flow_id: int, method: str, url: str, host: str, path: str,
                         request_headers: str, request_body: str):
-    """断点放行时更新请求字段（用户修改后的值）。"""
+    """Update request fields on breakpoint release (with user-modified values)."""
     with get_connection() as conn:
         conn.execute(
             "UPDATE flows SET method=?, url=?, host=?, path=?, request_headers=?, "
@@ -1007,7 +1030,7 @@ def update_flow_request(flow_id: int, method: str, url: str, host: str, path: st
 
 def update_flow_response_fields(flow_id: int, status_code, response_headers: str,
                                 response_body: str):
-    """断点放行时更新响应字段（用户修改后的值）。"""
+    """Update response fields on breakpoint release (with user-modified values)."""
     with get_connection() as conn:
         conn.execute(
             "UPDATE flows SET status_code=?, response_headers=?, response_body=? "
@@ -1029,10 +1052,11 @@ def get_flows(session_id: int, limit: int = 100, offset: int = 0,
               tag: str | None = None,
               lite: bool = False,
               has_tags: bool = False) -> list[dict]:
-    """获取会话流量列表，支持按 host/进程/状态码/方法/增量/协议/标签过滤。
+    """Get the flow list for a session, supporting filtering by host/process/status code/method/incremental/protocol/tag.
 
-    lite=True 时 SELECT 不包含 request_body / response_body / raw_data 字段，
-    用于列表加速（选中详情时再单独 GET /flows/{id} 补齐）。
+    When lite=True, the SELECT does not include request_body / response_body /
+    raw_data fields, used for list acceleration (details are fetched separately
+    via GET /flows/{id} when selected).
     """
     # lite 模式：排除大字段（request_body/response_body/raw_data），只返回列表展示所需字段
     select_cols = (
@@ -1081,10 +1105,12 @@ def search_flows(session_id: int, body_regex: str | None = None,
                  pid: int | None = None, process_name: str | None = None,
                  offset_start: int | None = None,
                  offset_end: int | None = None) -> list[dict]:
-    """跨 body 正则/二进制搜索流量。session_id=0 表示跨所有会话搜索。
+    """Search flows by body regex/binary. session_id=0 means search across all sessions.
 
-    性能优化：精确字段过滤（method/status/pid/process_name）下推到 SQL WHERE，
-    只投影搜索所需列（不含 raw_data 等大字段），避免把全量全列流量拉进内存。
+    Performance optimization: exact field filters (method/status/pid/process_name)
+    are pushed down to SQL WHERE, and only the columns needed for search are
+    projected (excluding large fields like raw_data), avoiding loading all flows
+    with all columns into memory.
     """
     # 只投影搜索所需列，避免 SELECT * 拉取 raw_data 等大字段
     proj = ("id, session_id, method, status_code, pid, process_name, "
@@ -1109,9 +1135,13 @@ def search_flows(session_id: int, body_regex: str | None = None,
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = f"SELECT {proj} FROM flows{where} ORDER BY id DESC LIMIT ?"
     args.append(10000)
-    with get_connection() as conn:
-        rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
-    results = []
+    # P2-4 修复：分批游标替代一次性 fetchall(10000)。
+    # 原实现把最多 10000 行（含 request_body/response_body 大字段）全量载入内存再
+    # Python 逐行正则匹配，大 body 场景内存峰值可达数百 MB、CPU 耗时百 ms~秒级，
+    # 且即便命中 limit(200) 条也拉满了 10000 行。改为 fetchmany(500) 分批：
+    # - 内存峰值降至 500 行；
+    # - 命中达到 limit 即停止后续扫描，避免无谓拉取。
+    # SQL 仍带 LIMIT 10000 限制总扫描量，正确性不受影响（结果上限仍为 limit）。
     rx = re.compile(body_regex) if body_regex else None
     hrx = re.compile(header_regex) if header_regex else None
     needle = None
@@ -1120,57 +1150,65 @@ def search_flows(session_id: int, body_regex: str | None = None,
             needle = bytes.fromhex(binary_hex.replace(" ", "").replace("0x", ""))
         except ValueError:
             pass
-    for f in rows:
-        matched = False
-        if rx:
-            for field in ("request_body", "response_body", "url", "path"):
-                val = f.get(field) or ""
-                if val.startswith("base64:"):
-                    try:
-                        val = base64.b64decode(val[7:]).decode("utf-8", "ignore")
-                    except Exception:  # noqa: BLE001
-                        pass
-                if rx.search(val):
-                    matched = True
-                    break
-        if not matched and needle:
-            for field in ("request_body", "response_body"):
-                val = f.get(field) or ""
-                raw = val.encode("utf-8")
-                if val.startswith("base64:"):
-                    try:
-                        raw = base64.b64decode(val[7:])
-                    except Exception:  # noqa: BLE001
-                        pass
-                # §3.14 hex 偏移范围搜索：只搜 [offset_start, offset_end)
-                if offset_start is not None or offset_end is not None:
-                    s = offset_start or 0
-                    e = offset_end if offset_end is not None else len(raw)
-                    if needle in raw[s:e]:
-                        matched = True
-                        break
-                else:
-                    if needle in raw:
-                        matched = True
-                        break
-        if not matched and hrx:
-            for field in ("request_headers", "response_headers"):
-                val = f.get(field) or ""
-                if hrx.search(val):
-                    matched = True
-                    break
-        # 如果没有任何正则/hex 条件（只有精确字段过滤），所有过滤后的行都算匹配
-        if not (rx or needle or hrx):
-            matched = True
-        if matched:
-            results.append(f)
-            if len(results) >= limit:
+    results = []
+    with get_connection() as conn:
+        cur = conn.execute(sql, args)
+        while len(results) < limit:
+            batch = cur.fetchmany(500)
+            if not batch:
                 break
+            for r in batch:
+                f = dict(r)
+                matched = False
+                if rx:
+                    for field in ("request_body", "response_body", "url", "path"):
+                        val = f.get(field) or ""
+                        if val.startswith("base64:"):
+                            try:
+                                val = base64.b64decode(val[7:]).decode("utf-8", "ignore")
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if rx.search(val):
+                            matched = True
+                            break
+                if not matched and needle:
+                    for field in ("request_body", "response_body"):
+                        val = f.get(field) or ""
+                        raw = val.encode("utf-8")
+                        if val.startswith("base64:"):
+                            try:
+                                raw = base64.b64decode(val[7:])
+                            except Exception:  # noqa: BLE001
+                                pass
+                        # §3.14 hex 偏移范围搜索：只搜 [offset_start, offset_end)
+                        if offset_start is not None or offset_end is not None:
+                            s = offset_start or 0
+                            e = offset_end if offset_end is not None else len(raw)
+                            if needle in raw[s:e]:
+                                matched = True
+                                break
+                        else:
+                            if needle in raw:
+                                matched = True
+                                break
+                if not matched and hrx:
+                    for field in ("request_headers", "response_headers"):
+                        val = f.get(field) or ""
+                        if hrx.search(val):
+                            matched = True
+                            break
+                # 如果没有任何正则/hex 条件（只有精确字段过滤），所有过滤后的行都算匹配
+                if not (rx or needle or hrx):
+                    matched = True
+                if matched:
+                    results.append(f)
+                    if len(results) >= limit:
+                        break
     return results
 
 
 def stats_flows(session_id: int) -> dict:
-    """按 host/method/status 分组统计。"""
+    """Group statistics by host/method/status."""
     with get_connection() as conn:
         by_host = conn.execute(
             "SELECT host, COUNT(*) as c, AVG(duration_ms) as avg_ms "
@@ -1205,7 +1243,7 @@ def stats_flows(session_id: int) -> dict:
 
 
 def get_max_flow_id(session_id: int) -> int:
-    """获取会话内最大 flow id（用于增量查询基线）。"""
+    """Get the maximum flow id within a session (used as the baseline for incremental queries)."""
     with get_connection() as conn:
         row = conn.execute(
             "SELECT MAX(id) as m FROM flows WHERE session_id=?", (session_id,)
@@ -1214,9 +1252,10 @@ def get_max_flow_id(session_id: int) -> int:
 
 
 def get_max_flow_id_all() -> int:
-    """获取全局最大 flow id（用于 SSE 初始基线 + 增量轮询）。
+    """Get the global maximum flow id (used for SSE initial baseline + incremental polling).
 
-    性能优化：优先读内存缓存（_flush_batch 写入时更新），避免每次 SSE 连接查 SQLite。
+    Performance optimization: prefers reading the in-memory cache (updated by
+    _flush_batch on write), avoiding a SQLite query on every SSE connection.
     """
     global _max_flow_id_cache
     with _max_flow_id_lock:
@@ -1237,7 +1276,7 @@ def count_flows(session_id: int) -> int:
 
 
 def count_flows_batch(session_ids: list[int]) -> dict[int, int]:
-    """批量统计多个会话的流量数。返回 {session_id: count}。"""
+    """Batch-count flows for multiple sessions. Returns {session_id: count}."""
     if not session_ids:
         return {}
     with get_connection() as conn:
@@ -1253,7 +1292,9 @@ def count_flows_batch(session_ids: list[int]) -> dict[int, int]:
 
 
 def get_all_tags_summary() -> list[dict]:
-    """全局标签统计：解析所有流量的 tags 字段（逗号分隔），返回 [{tag, count}] 按计数降序。"""
+    """Global tag statistics: parses the tags field (comma-separated) of all flows,
+    returns [{tag, count}] sorted by count descending.
+    """
     with get_connection() as conn:
         rows = conn.execute("SELECT tags FROM flows WHERE tags IS NOT NULL AND tags != ''").fetchall()
     counter: dict[str, int] = {}
@@ -1266,7 +1307,7 @@ def get_all_tags_summary() -> list[dict]:
 
 
 def delete_flows(session_id: int):
-    """清空会话流量。"""
+    """Clear all flows of a session."""
     with get_connection() as conn:
         conn.execute("DELETE FROM flows WHERE session_id=?", (session_id,))
 
@@ -1280,10 +1321,12 @@ def get_all_flows(limit: int = 200, offset: int = 0,
                   lite: bool = False,
                   skip_total: bool = False,
                   has_tags: bool = False) -> tuple[list[dict], int | None]:
-    """跨会话查询所有流量（用于全局分析），返回 (flows, total)。
+    """Query all flows across sessions (for global analysis), returns (flows, total).
 
-    lite=True 时只返回轻量字段（不含 request_body/response_body/request_headers/
-    response_headers/raw_data），用于全局分析列表加速（选中详情时再单独 GET /flows/{id}）。
+    When lite=True, only lightweight fields are returned (excluding
+    request_body/response_body/request_headers/response_headers/raw_data), used
+    for global analysis list acceleration (details are fetched separately via
+    GET /flows/{id} when selected).
     """
     where = []
     args: list = []
@@ -1336,11 +1379,12 @@ def get_all_flows(limit: int = 200, offset: int = 0,
 
 
 def delete_all_flows() -> int:
-    """清空所有流量（跨会话），返回删除条数。
+    """Clear all flows (across sessions), returns the number of deleted rows.
 
-    修复审计 7.4：原代码先置 _max_flow_id_cache=0 再 DELETE，存在窗口：
-    其他线程在此期间调 get_max_flow_id_all 会查 DB 得到旧 max 并缓存，
-    DELETE 后缓存持有过期值。改为先 DELETE 再置 0。
+    Audit fix 7.4: the original code set _max_flow_id_cache=0 before DELETE,
+    creating a window: other threads calling get_max_flow_id_all during this
+    window would query the DB and get the old max, then cache it; after DELETE
+    the cache holds a stale value. Changed to DELETE first, then set to 0.
     """
     global _max_flow_id_cache
     with get_connection() as conn:
@@ -1353,7 +1397,7 @@ def delete_all_flows() -> int:
 
 
 def reset_max_flow_id():
-    """重置内存 max_flow_id 缓存（清空流量后调用，让下次查询重新从 DB 读取）。"""
+    """Reset the in-memory max_flow_id cache (called after clearing flows, so the next query re-reads from DB)."""
     global _max_flow_id_cache
     with _max_flow_id_lock:
         _max_flow_id_cache = 0
@@ -1361,10 +1405,10 @@ def reset_max_flow_id():
 
 def get_flows_stats(group_by: str = "host",
                     host: str | None = None, process: str | None = None) -> list[dict]:
-    """全量流量分组统计（不分页），用于统计图显示所有数据的比例。
+    """Full-volume flow group statistics (unpaginated), used for the stats chart to show the proportion of all data.
 
     group_by: host / process / content_type / status_code / method
-    返回 [{key, label, count}] 按 count 降序。
+    Returns [{key, label, count}] sorted by count descending.
     """
     where = []
     args: list = []
@@ -1445,13 +1489,14 @@ def get_flows_stats(group_by: str = "host",
 
 
 def get_flows_overview() -> dict:
-    """跨会话多维聚合统计（一次返回所有维度），供 CoolUI 仪表盘使用。
+    """Cross-session multi-dimensional aggregate statistics (returns all dimensions at once),
+    for the CoolUI dashboard.
 
-    返回 {total, total_bytes, incoming_bytes, outgoing_bytes,
-          success_count, error_count, avg_duration_ms,
-          by_protocol, by_method, by_status_range,
-          by_host, by_process, by_ip_region}
-    每个分组为 [{key, count, bytes?}] 列表，按 count 降序，前 20 条。
+    Returns {total, total_bytes, incoming_bytes, outgoing_bytes,
+             success_count, error_count, avg_duration_ms,
+             by_protocol, by_method, by_status_range,
+             by_host, by_process, by_ip_region}
+    Each group is a [{key, count, bytes?}] list, sorted by count descending, top 20 entries.
     """
     with get_connection() as conn:
         # 总数 + 总字节
@@ -1584,20 +1629,20 @@ def get_flows_overview() -> dict:
 
 
 def delete_flows_before(flow_id: int) -> int:
-    """删除 id < flow_id 的所有流量（按 id 清理旧数据），返回删除条数。"""
+    """Delete all flows with id < flow_id (clean up old data by id). Returns the number of deleted rows."""
     with get_connection() as conn:
         cur = conn.execute("DELETE FROM flows WHERE id < ?", (flow_id,))
         return cur.rowcount
 
 
 def delete_flow(flow_id: int):
-    """删除单条流量。"""
+    """Delete a single flow."""
     with get_connection() as conn:
         conn.execute("DELETE FROM flows WHERE id=?", (flow_id,))
 
 
 def delete_flow_batch(flow_ids: list[int]):
-    """批量删除流量。"""
+    """Batch-delete flows."""
     if not flow_ids:
         return
     with get_connection() as conn:
@@ -1606,8 +1651,8 @@ def delete_flow_batch(flow_ids: list[int]):
 
 
 def get_pending_flow_ids(flow_ids: list[int]) -> list[int]:
-    """从给定 id 列表中，返回有断点状态（breakpoint_status IS NOT NULL）的 id 列表。
-    单次 SQL 查询，避免批量放行时的 N+1 查询。
+    """From the given id list, return the ids that have a breakpoint status (breakpoint_status IS NOT NULL).
+    A single SQL query, avoiding the N+1 queries during batch release.
     """
     if not flow_ids:
         return []
@@ -1621,7 +1666,7 @@ def get_pending_flow_ids(flow_ids: list[int]) -> list[int]:
 
 
 def get_pending_breakpoint_flows() -> list[dict]:
-    """获取所有断点暂停中的流量。"""
+    """Get all flows currently paused at a breakpoint."""
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT * FROM flows WHERE breakpoint_status IS NOT NULL ORDER BY id DESC"
@@ -1660,7 +1705,7 @@ def insert_rule(rule: dict):
 
 
 def add_rule(rule: dict) -> str:
-    """插入规则并返回生成的 ID。"""
+    """Insert a rule and return the generated ID."""
     import uuid
     rule_id = str(uuid.uuid4())[:8]
     rule["id"] = rule_id
@@ -1685,7 +1730,7 @@ def delete_rule(rule_id: str):
 
 
 def increment_rule_hit(rule_id: str, flow_id: int | None = None):
-    """§3.2 命中计数：自增 hit_count，更新 last_hit_at 和 last_hit_flow_id。"""
+    """§3.2 Hit counting: increments hit_count, updates last_hit_at and last_hit_flow_id."""
     now = datetime.now().isoformat()
     with get_connection() as conn:
         conn.execute(
@@ -1696,7 +1741,7 @@ def increment_rule_hit(rule_id: str, flow_id: int | None = None):
 
 
 def delete_all_rules() -> int:
-    """清空所有自动回复规则（环境快照导入前调用）。返回删除条数。"""
+    """Clear all auto-reply rules (called before environment snapshot import). Returns the number of deleted rows."""
     with get_connection() as conn:
         cur = conn.execute("DELETE FROM auto_reply_rules")
         return cur.rowcount
@@ -1705,9 +1750,9 @@ def delete_all_rules() -> int:
 # ---------- flow tags（§3.1 流量标签）----------
 
 def update_flow_tags(flow_id: int, tags: str, tag_note: str | None = None):
-    """更新流量标签（逗号分隔字符串）和可选备注。
+    """Update flow tags (comma-separated string) and optional note.
 
-    tag_note 为 None 时不修改备注字段（保持原值）。
+    When tag_note is None, the note field is not modified (keeps its original value).
     """
     with get_connection() as conn:
         if tag_note is None:
@@ -1722,7 +1767,7 @@ def update_flow_tags(flow_id: int, tags: str, tag_note: str | None = None):
 
 
 def get_flows_by_tag(tag: str) -> list[dict]:
-    """查询所有带指定标签的流量（跨会话）。tag 精确匹配逗号分隔列表中的某一项。"""
+    """Query all flows with the given tag (across sessions). tag exactly matches one item in the comma-separated list."""
     if not tag:
         return []
     with get_connection() as conn:
@@ -1737,7 +1782,7 @@ def get_flows_by_tag(tag: str) -> list[dict]:
 # ---------- flow_groups（§3.13 流量分组）----------
 
 def create_flow_group(name: str, flow_ids: list[int]) -> int:
-    """创建流量分组，返回自增 id。flow_ids 以逗号分隔字符串存储。"""
+    """Create a flow group, returns the auto-increment id. flow_ids are stored as a comma-separated string."""
     now = datetime.now().isoformat()
     ids_str = ",".join(str(i) for i in flow_ids)
     with get_connection() as conn:
@@ -1771,7 +1816,7 @@ def delete_flow_group(group_id: int):
 
 def update_flow_group(group_id: int, name: str | None = None,
                       flow_ids: list[int] | None = None):
-    """更新分组。name 或 flow_ids 为 None 表示不更新该字段。"""
+    """Update a group. name or flow_ids being None means that field is not updated."""
     updates = {}
     if name is not None:
         updates["name"] = name
@@ -1820,7 +1865,7 @@ def remove_ignored_process(row_id: int):
 # ---------- ignored_hosts ----------
 
 def get_ignored_hosts() -> list[dict]:
-    """已忽略 host 通配符列表（按创建时间倒序）。"""
+    """List of ignored host wildcards (sorted by creation time descending)."""
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT * FROM ignored_hosts ORDER BY id DESC"
@@ -1829,7 +1874,7 @@ def get_ignored_hosts() -> list[dict]:
 
 
 def add_ignored_host(host_pattern: str) -> dict:
-    """添加忽略 host 通配符（重复时忽略）。"""
+    """Add an ignored host wildcard (ignored if duplicate)."""
     created_at = datetime.now().isoformat()
     with get_connection() as conn:
         cur = conn.execute(
@@ -1853,7 +1898,7 @@ def remove_ignored_host(host_id: int):
 # ---------- ai_chats / ai_messages ----------
 
 def create_ai_chat(title: str, flow_ids: list[int], flow_context: str) -> int:
-    """创建 AI 分析记录，返回 chat id。"""
+    """Create an AI analysis record, returns the chat id."""
     now = datetime.now().isoformat()
     with get_connection() as conn:
         cur = conn.execute(
@@ -1896,7 +1941,7 @@ def delete_ai_chat(chat_id: int):
 
 
 def add_ai_message(chat_id: int, role: str, content: str) -> int:
-    """添加一条对话消息，返回 message id。"""
+    """Add a chat message, returns the message id."""
     now = datetime.now().isoformat()
     with get_connection() as conn:
         cur = conn.execute(
