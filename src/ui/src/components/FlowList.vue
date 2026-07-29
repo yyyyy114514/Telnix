@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useFlowsStore } from '../stores/flows'
 import { useCaptureStore } from '../stores/capture'
 import { api, type ProcessInfo } from '../api/client'
@@ -8,6 +9,7 @@ import { syncPrefs } from '../stores/prefs'
 import { parseFlowFilter, matchFlow, type ParsedFilter } from '../utils/flowfilter'
 
 // 会话列表：表格 + 统一悬浮窗（筛选/专注） + 一键忽略 + 右键菜单
+const { t } = useI18n()
 const props = defineProps<{
   processes: ProcessInfo[]
   // 可显示的额外列（status/method/protocol/content_type/size/duration），默认全不显示
@@ -94,14 +96,14 @@ async function confirmDeleteFlows() {
   if (!ids.length) { showDeleteConfirm.value = false; return }
   try {
     await api.batchDeleteFlows(ids)
-    ElMessage.success(`已删除 ${ids.length} 条`)
+    ElMessage.success(t('flowList.deletedN', { n: ids.length }))
     // 前端直接移除，避免全量重载导致卡顿
     store.removeFlows(ids)
     selectedFlowIds.value.clear()
     multiSelectMode.value = false
     showDeleteConfirm.value = false
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('flowList.deleteFailed') + (e?.message || e))
     showDeleteConfirm.value = false
   }
 }
@@ -114,16 +116,16 @@ async function batchReleaseFlows(action: 'release' | 'drop' = 'release') {
   if (!ids.length) return
   try {
     const r: any = await api.batchReleaseFlows(ids, action)
-    const label = action === 'drop' ? '丢弃' : '放行'
-    ElMessage.success(`已${label} ${r.released}/${r.total} 条`)
+    const label = action === 'drop' ? t('flowList.drop') : t('flowList.release')
+    ElMessage.success(t('flowList.releasedN', { label, released: r.released, total: r.total }))
     // 放行/丢弃后前端移除断点标记（不从列表删除，仅清除断点状态）
     // shallowRef 模式下用 store.patchFlows 原地 mutate + triggerRef
     store.patchFlows(ids, (f) => { f.breakpoint_status = null })
     selectedFlowIds.value.clear()
     multiSelectMode.value = false
   } catch (e: any) {
-    const label = action === 'drop' ? '丢弃' : '放行'
-    ElMessage.error(`${label}失败：` + (e?.message || e))
+    const label = action === 'drop' ? t('flowList.drop') : t('flowList.release')
+    ElMessage.error(t('flowList.actionFailed', { label }) + (e?.message || e))
   }
 }
 
@@ -189,7 +191,7 @@ function applyDsl() {
   const parsed = parseFlowFilter(q)
   if (parsed.error) {
     dslError.value = parsed.error
-    ElMessage.warning('DSL 语法错误：' + parsed.error)
+    ElMessage.warning(t('flowList.dslError') + parsed.error)
     return
   }
   dslError.value = ''
@@ -339,9 +341,9 @@ async function onFocusByName() {
       focusPids.value = r.pids
       focusProcessSelect.value = r.pids
     }
-    ElMessage.success(`专注进程 ${name}：匹配 ${r?.pids?.length || 0} 个 PID`)
+    ElMessage.success(t('flowList.focusProcessResult', { name, n: r?.pids?.length || 0 }))
   } catch (e: any) {
-    ElMessage.error('专注失败：' + (e?.message || e))
+    ElMessage.error(t('flowList.focusFailed') + (e?.message || e))
   }
 }
 
@@ -399,20 +401,20 @@ type ColDef = {
   statusColor?: (f: any) => string
 }
 
-const COL_DEFS: ColDef[] = [
+const COL_DEFS = computed<ColDef[]>(() => [
   { key: 'id', label: '#', width: '60px', always: true, cellClass: 'col-id text-dim', text: (f) => idWithScheme(f) },
-  { key: 'status', label: '结果', width: '56px', cellClass: 'col-code', text: (f) => String(f.status_code ?? '...'), statusColor: (f) => statusClass(f.status_code) },
-  { key: 'method', label: '方法', width: '72px', cellClass: 'col-method text-muted', text: (f) => f.method || '' },
-  { key: 'protocol', label: '协议', width: '54px', cellClass: 'col-proto text-muted', text: (f) => protocolLabel(f) },
+  { key: 'status', label: t('flowList.colResult'), width: '56px', cellClass: 'col-code', text: (f) => String(f.status_code ?? '...'), statusColor: (f) => statusClass(f.status_code) },
+  { key: 'method', label: t('common.method'), width: '72px', cellClass: 'col-method text-muted', text: (f) => f.method || '' },
+  { key: 'protocol', label: t('common.protocol'), width: '54px', cellClass: 'col-proto text-muted', text: (f) => protocolLabel(f) },
   { key: 'host', label: 'Host', width: '1.4fr', always: true, cellClass: 'col-host', text: (f) => f.host || '' },
   { key: 'url', label: 'URL', width: '2.2fr', always: true, cellClass: 'col-url text-muted', text: (f) => f.path || '' },
   { key: 'content_type', label: 'Content-Type', width: '1.2fr', cellClass: 'col-ctype text-muted', text: (f) => extractContentType(f) },
   { key: 'pid', label: 'PID', width: '64px', cellClass: 'col-pid text-muted', text: (f) => String(f.pid ?? '-') },
-  { key: 'proc', label: '进程', width: '1fr', always: true, cellClass: 'col-proc text-muted', text: (f) => f.process_name || '-' },
-  { key: 'size', label: '大小', width: '70px', cellClass: 'col-size text-muted', text: (f) => formatSize(f.size) },
-  { key: 'duration', label: '耗时', width: '64px', cellClass: 'col-time text-muted', text: (f) => f.duration_ms !== null ? f.duration_ms + 'ms' : '' },
-  { key: 'ip_region', label: 'IP 属地', width: '90px', cellClass: 'col-ip-region text-muted', text: (f) => (f.ip_region && !f.ip_region.startsWith('base64:')) ? f.ip_region : '-' },
-]
+  { key: 'proc', label: t('flowList.process'), width: '1fr', always: true, cellClass: 'col-proc text-muted', text: (f) => f.process_name || '-' },
+  { key: 'size', label: t('common.size'), width: '70px', cellClass: 'col-size text-muted', text: (f) => formatSize(f.size) },
+  { key: 'duration', label: t('common.duration'), width: '64px', cellClass: 'col-time text-muted', text: (f) => f.duration_ms !== null ? f.duration_ms + 'ms' : '' },
+  { key: 'ip_region', label: t('flowList.ipRegion'), width: '90px', cellClass: 'col-ip-region text-muted', text: (f) => (f.ip_region && !f.ip_region.startsWith('base64:')) ? f.ip_region : '-' },
+])
 const COL_ORDER_KEY = 'telnix_col_order'
 
 function loadColOrder(): string[] {
@@ -421,11 +423,11 @@ function loadColOrder(): string[] {
     saved = JSON.parse(localStorage.getItem(COL_ORDER_KEY) || '[]')
   } catch {
     // 缓存损坏时回退默认列顺序，避免组件初始化崩溃导致整页白屏
-    return COL_DEFS.map(c => c.key)
+    return COL_DEFS.value.map(c => c.key)
   }
-  if (!Array.isArray(saved) || !saved.length) return COL_DEFS.map(c => c.key)
+  if (!Array.isArray(saved) || !saved.length) return COL_DEFS.value.map(c => c.key)
   // 按保存顺序排列，新列追加末尾
-  const allKeys = new Set(COL_DEFS.map(c => c.key))
+  const allKeys = new Set(COL_DEFS.value.map(c => c.key))
   const result: string[] = []
   for (const k of saved) {
     if (allKeys.has(k)) {
@@ -447,7 +449,7 @@ function persistColOrder() {
 // 按顺序排列的列定义（仅可见列）
 const visibleCols = computed<ColDef[]>(() => {
   const byKey: Record<string, ColDef> = {}
-  for (const c of COL_DEFS) byKey[c.key] = c
+  for (const c of COL_DEFS.value) byKey[c.key] = c
   return colOrder.value
     .map(k => byKey[k])
     .filter(c => c && (c.always || colVisible(c.key)))
@@ -1094,22 +1096,22 @@ function ctxCopyCurl() {
 
 // ---------- 复制项管理（hover 二级菜单） ----------
 // 可复制字段：url/curl 是固定项，其余对应 flow 字段
-const COPY_FIELD_DEFS: { key: string; label: string; field: string }[] = [
+const COPY_FIELD_DEFS = computed<{ key: string; label: string; field: string }[]>(() => [
   { key: 'url', label: 'URL', field: 'url' },
   { key: 'curl', label: 'cURL', field: '_curl' },
   { key: 'host', label: 'Host', field: 'host' },
-  { key: 'method', label: '方法', field: 'method' },
+  { key: 'method', label: t('common.method'), field: 'method' },
   { key: 'path', label: 'Path', field: 'path' },
-  { key: 'status', label: '状态码', field: 'status_code' },
-  { key: 'protocol', label: '协议', field: 'protocol' },
+  { key: 'status', label: t('flowList.statusCode'), field: 'status_code' },
+  { key: 'protocol', label: t('common.protocol'), field: 'protocol' },
   { key: 'content_type', label: 'Content-Type', field: '_content_type' },
   { key: 'pid', label: 'PID', field: 'pid' },
-  { key: 'process', label: '进程', field: 'process_name' },
-  { key: 'size', label: '大小', field: 'size' },
-  { key: 'duration', label: '耗时', field: 'duration_ms' },
-  { key: 'remote_ip', label: '对端 IP', field: 'remote_ip' },
-  { key: 'ip_region', label: 'IP 属地', field: 'ip_region' },
-]
+  { key: 'process', label: t('flowList.process'), field: 'process_name' },
+  { key: 'size', label: t('common.size'), field: 'size' },
+  { key: 'duration', label: t('common.duration'), field: 'duration_ms' },
+  { key: 'remote_ip', label: t('flowList.remoteIp'), field: 'remote_ip' },
+  { key: 'ip_region', label: t('flowList.ipRegion'), field: 'ip_region' },
+])
 const COPY_PREF_KEY = 'telnix_copy_fields'
 // 默认复制项：url 和 curl
 function loadCopyFields(): string[] {
@@ -1150,13 +1152,13 @@ function copyField(field: string) {
   if (!f) return
   const text = getFieldValue(f, field)
   navigator.clipboard.writeText(text).catch(() => {})
-  ElMessage.success(`已复制：${text.length > 40 ? text.slice(0, 40) + '...' : text}`)
+  ElMessage.success(t('flowList.copiedText', { text: text.length > 40 ? text.slice(0, 40) + '...' : text }))
   closeCtxMenu()
 }
 
 // 当前启用的复制项（按用户设置过滤，# 不参与复制）
 const enabledCopyItems = computed(() => {
-  return COPY_FIELD_DEFS.filter(d => enabledCopyFields.value.includes(d.key))
+  return COPY_FIELD_DEFS.value.filter(d => enabledCopyFields.value.includes(d.key))
 })
 
 function ctxMultiSelect() {
@@ -1171,8 +1173,8 @@ async function ctxDelete() {
   const f = ctxMenu.value.flow
   if (!f) return
   try {
-    await ElMessageBox.confirm(`确定删除该流量 #${f.id}？`, '删除', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('flowList.deleteConfirmMsg', { id: f.id }), t('common.delete'), {
+      confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel'), type: 'warning',
     })
   } catch {
     closeCtxMenu()
@@ -1180,10 +1182,10 @@ async function ctxDelete() {
   }
   try {
     await api.deleteFlow(f.id)
-    ElMessage.success('已删除')
+    ElMessage.success(t('flowList.deleted'))
     store.removeFlows([f.id])
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('flowList.deleteFailed') + (e?.message || e))
   }
   closeCtxMenu()
 }
@@ -1211,7 +1213,7 @@ onMounted(() => {
     <!-- 筛选栏（精简：筛选按钮 + 忽略 + 专注 + 自动滚动 + 多选） -->
     <div class="filter-bar">
       <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
-        <el-icon><Filter /></el-icon>&nbsp;筛选
+        <el-icon><Filter /></el-icon>&nbsp;{{ t('flowList.filterBtn') }}
         <span v-if="hasActiveFilters" class="filter-badge"></span>
       </el-button>
       <!-- Flowfilter DSL 输入框：支持 ~d host ~m POST ~s 4xx 语法 -->
@@ -1219,7 +1221,7 @@ onMounted(() => {
         v-model="dslQuery"
         size="small"
         :class="['dsl-input', { 'dsl-error': dslError }]"
-        placeholder="DSL 过滤：~d host ~m POST ~s 4xx"
+        :placeholder="t('flowList.dslPlaceholder')"
         clearable
         @keydown.enter="applyDsl"
       >
@@ -1227,55 +1229,55 @@ onMounted(() => {
           <el-icon class="dsl-icon"><Search /></el-icon>
         </template>
         <template #suffix>
-          <el-tooltip content="语法帮助" placement="bottom">
+          <el-tooltip :content="t('flowList.syntaxHelp')" placement="bottom">
             <el-icon class="dsl-help" @click="showDslHelp = !showDslHelp"><QuestionFilled /></el-icon>
           </el-tooltip>
         </template>
       </el-input>
       <transition name="el-fade-in">
         <div v-if="showDslHelp" class="dsl-help-panel">
-          <div class="dsl-help-title">DSL 语法</div>
-          <div class="dsl-help-row"><code>~d host</code> host 包含（支持 * 通配）</div>
-          <div class="dsl-help-row"><code>~m POST</code> 方法等于</div>
-          <div class="dsl-help-row"><code>~s 4xx</code> 状态码（4xx 通配或 200 精确）</div>
-          <div class="dsl-help-row"><code>~p http</code> 协议（http/https/tcp/udp/ws）</div>
-          <div class="dsl-help-row"><code>~u /api</code> URL 包含</div>
-          <div class="dsl-help-row"><code>~h Auth</code> Header 包含</div>
-          <div class="dsl-help-row"><code>~b text</code> Body 包含</div>
-          <div class="dsl-help-row"><code>"text"</code> 任意字段包含</div>
-          <div class="dsl-help-hint">空格分隔 = AND（与关系）</div>
+          <div class="dsl-help-title">{{ t('flowList.dslSyntaxTitle') }}</div>
+          <div class="dsl-help-row"><code>~d host</code> {{ t('flowList.dslHelpHost') }}</div>
+          <div class="dsl-help-row"><code>~m POST</code> {{ t('flowList.dslHelpMethod') }}</div>
+          <div class="dsl-help-row"><code>~s 4xx</code> {{ t('flowList.dslHelpStatus') }}</div>
+          <div class="dsl-help-row"><code>~p http</code> {{ t('flowList.dslHelpProtocol') }}</div>
+          <div class="dsl-help-row"><code>~u /api</code> {{ t('flowList.dslHelpUrl') }}</div>
+          <div class="dsl-help-row"><code>~h Auth</code> {{ t('flowList.dslHelpHeader') }}</div>
+          <div class="dsl-help-row"><code>~b text</code> {{ t('flowList.dslHelpBody') }}</div>
+          <div class="dsl-help-row"><code>"text"</code> {{ t('flowList.dslHelpAny') }}</div>
+          <div class="dsl-help-hint">{{ t('flowList.dslHelpHint') }}</div>
         </div>
       </transition>
       <el-dropdown size="small" :disabled="!store.selectedFlow" @command="(c: string) => { c === 'pid' && ignorePid(); c === 'process' && ignoreProcess(); c === 'host' && ignoreHost() }">
         <el-button size="small" :disabled="!store.selectedFlow">
-          <el-icon><RemoveFilled /></el-icon>&nbsp;忽略<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('flowList.ignoreBtn') }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="pid" :disabled="!(store.selectedFlow?.pid && store.selectedFlow.pid > 0)">按 PID</el-dropdown-item>
-            <el-dropdown-item command="process" :disabled="!store.selectedFlow?.process_name">按进程名</el-dropdown-item>
-            <el-dropdown-item command="host" :disabled="!store.selectedFlow?.host">按 Host</el-dropdown-item>
+            <el-dropdown-item command="pid" :disabled="!(store.selectedFlow?.pid && store.selectedFlow.pid > 0)">{{ t('flowList.ignoreByPid') }}</el-dropdown-item>
+            <el-dropdown-item command="process" :disabled="!store.selectedFlow?.process_name">{{ t('flowList.ignoreByProcess') }}</el-dropdown-item>
+            <el-dropdown-item command="host" :disabled="!store.selectedFlow?.host">{{ t('flowList.ignoreByHost') }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
       <!-- 专注模式：点击打开悬浮窗 -->
-      <el-tooltip :content="focusEnabled ? '专注中（点击配置/清空条件）' : '专注模式（点击配置条件）'" placement="bottom">
+      <el-tooltip :content="focusEnabled ? t('flowList.focusActiveHint') : t('flowList.focusModeHint')" placement="bottom">
         <el-button
           size="small"
           :type="focusEnabled ? 'success' : 'default'"
           @click="togglePopup('focus')"
         >
-          <el-icon><Aim /></el-icon>&nbsp;专注
+          <el-icon><Aim /></el-icon>&nbsp;{{ t('flowList.focusBtn') }}
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
       <div v-if="actionsRight" class="flex-1"></div>
-      <el-tooltip :content="store.autoScroll ? (store.autoScrollPaused ? `自动滚动：暂停中（${store.autoScrollDelay}s 后恢复）` : '自动滚动：开') : '自动滚动：关'" placement="bottom">
+      <el-tooltip :content="store.autoScroll ? (store.autoScrollPaused ? t('flowList.autoScrollPausedHint', { n: store.autoScrollDelay }) : t('flowList.autoScrollOnHint')) : t('flowList.autoScrollOffHint')" placement="bottom">
         <el-button size="small" :type="store.autoScroll ? (store.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="store.autoScroll = !store.autoScroll">
           <el-icon><Bottom /></el-icon>
         </el-button>
       </el-tooltip>
-      <el-tooltip :content="multiSelectMode ? '退出多选' : '多选模式'" placement="bottom">
+      <el-tooltip :content="multiSelectMode ? t('flowList.exitMultiSelect') : t('flowList.multiSelectMode')" placement="bottom">
         <el-button
           size="small"
           :type="multiSelectMode ? 'warning' : 'default'"
@@ -1296,20 +1298,20 @@ onMounted(() => {
         @click.stop
       >
         <div class="popup-header" @mousedown="onPopupHeaderDown">
-          <span class="popup-title">{{ activePopup === 'filter' ? '筛选' : '专注' }}</span>
+          <span class="popup-title">{{ activePopup === 'filter' ? t('flowList.filterTitle') : t('flowList.focusTitle') }}</span>
           <el-icon class="popup-close" @click="closePopup"><Close /></el-icon>
         </div>
         <div class="popup-body">
           <!-- 筛选 -->
           <template v-if="activePopup === 'filter'">
             <div class="fp-row">
-              <label class="fp-label">进程</label>
+              <label class="fp-label">{{ t('flowList.processLabel') }}</label>
               <el-select
                 ref="filterProcessSelectRef"
                 v-model="store.filterProcessPids"
                 multiple
                 filterable
-                placeholder="选择进程（可多选）"
+                :placeholder="t('flowList.selectProcessPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1328,7 +1330,7 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="输入 host 按 Enter 添加，支持 * ? 通配符"
+                :placeholder="t('flowList.hostEnterPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1338,7 +1340,7 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">方法</label>
+              <label class="fp-label">{{ t('common.method') }}</label>
               <el-select
                 ref="filterMethodSelectRef"
                 v-model="store.filterMethods"
@@ -1347,7 +1349,7 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="选择或输入 HTTP 方法（可多选）"
+                :placeholder="t('flowList.methodPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1364,7 +1366,7 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">协议</label>
+              <label class="fp-label">{{ t('common.protocol') }}</label>
               <el-select
                 ref="filterProtocolSelectRef"
                 v-model="store.filterProtocols"
@@ -1373,7 +1375,7 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="选择协议（可多选）"
+                :placeholder="t('flowList.selectProtocolPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1386,7 +1388,7 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">状态码</label>
+              <label class="fp-label">{{ t('flowList.statusCodeLabel') }}</label>
               <el-select
                 ref="filterStatusCodeSelectRef"
                 v-model="store.filterStatusCodes"
@@ -1395,7 +1397,7 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="输入 200 / 2xx / 4* 按 Enter 添加，支持通配符"
+                :placeholder="t('flowList.statusCodePlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1412,39 +1414,39 @@ onMounted(() => {
                 filterable
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="选择 Content-Type 大类（可多选）"
+                :placeholder="t('flowList.contentTypePlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
               >
-                <el-option label="application（应用数据/json/xml 等）" value="application" />
-                <el-option label="text（文本/html/css/js 等）" value="text" />
-                <el-option label="image（图片）" value="image" />
-                <el-option label="video（视频）" value="video" />
-                <el-option label="audio（音频）" value="audio" />
-                <el-option label="font（字体）" value="font" />
-                <el-option label="multipart（表单上传）" value="multipart" />
-                <el-option label="message（消息）" value="message" />
-                <el-option label="model（3D 模型）" value="model" />
-                <el-option label="unknown（未知/无）" value="unknown" />
+                <el-option :label="t('analyze.contentTypeApplication')" value="application" />
+                <el-option :label="t('analyze.contentTypeText')" value="text" />
+                <el-option :label="t('analyze.contentTypeImage')" value="image" />
+                <el-option :label="t('analyze.contentTypeVideo')" value="video" />
+                <el-option :label="t('analyze.contentTypeAudio')" value="audio" />
+                <el-option :label="t('analyze.contentTypeFont')" value="font" />
+                <el-option :label="t('analyze.contentTypeMultipart')" value="multipart" />
+                <el-option :label="t('analyze.contentTypeMessage')" value="message" />
+                <el-option :label="t('analyze.contentTypeModel')" value="model" />
+                <el-option :label="t('analyze.contentTypeUnknown')" value="unknown" />
               </el-select>
             </div>
             <div class="fp-actions">
-              <el-button size="small" @click="resetFilters">重置</el-button>
-              <el-button size="small" type="primary" @click="closePopup">完成</el-button>
+              <el-button size="small" @click="resetFilters">{{ t('common.reset') }}</el-button>
+              <el-button size="small" type="primary" @click="closePopup">{{ t('flowList.doneBtn') }}</el-button>
             </div>
           </template>
           <!-- 专注 -->
           <template v-if="activePopup === 'focus'">
             <div class="fp-row">
-              <label class="fp-label">进程</label>
+              <label class="fp-label">{{ t('flowList.processLabel') }}</label>
               <el-select
                 ref="focusProcessSelectRef"
                 v-model="focusProcessSelect"
                 multiple
                 filterable
                 :reserve-keyword="false"
-                placeholder="按 PID 选择进程"
+                :placeholder="t('flowList.focusProcessPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1454,11 +1456,11 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">进程名</label>
-              <el-input v-model="focusProcessName" placeholder="如 chrome.exe（含子进程）" size="small" clearable style="width: 200px"
+              <label class="fp-label">{{ t('flowList.processNameLabel') }}</label>
+              <el-input v-model="focusProcessName" :placeholder="t('flowList.processNamePlaceholder')" size="small" clearable style="width: 200px"
                 @keyup.enter="onFocusByName" />
-              <el-checkbox v-model="focusIncludeChildren" size="small">子进程</el-checkbox>
-              <el-button size="small" @click="onFocusByName">应用</el-button>
+              <el-checkbox v-model="focusIncludeChildren" size="small">{{ t('flowList.includeChildren') }}</el-checkbox>
+              <el-button size="small" @click="onFocusByName">{{ t('flowList.applyBtn') }}</el-button>
             </div>
             <div class="fp-row">
               <label class="fp-label">Host</label>
@@ -1470,7 +1472,7 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="通配符如 *.bilibili.com 或选择已出现 host"
+                :placeholder="t('flowList.focusHostPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1480,12 +1482,12 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">方法</label>
+              <label class="fp-label">{{ t('common.method') }}</label>
               <el-select
                 v-model="focusMethods"
                 multiple
                 :reserve-keyword="false"
-                placeholder="HTTP 方法（GET/POST/...）"
+                :placeholder="t('flowList.focusMethodPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
@@ -1501,7 +1503,7 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">状态码</label>
+              <label class="fp-label">{{ t('flowList.statusCodeLabel') }}</label>
               <el-select
                 v-model="focusStatusCodes"
                 multiple
@@ -1509,16 +1511,16 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="如 200、2xx、404"
+                :placeholder="t('flowList.focusStatusCodePlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
                 @change="onFocusExtraChange"
               >
-                <el-option label="2xx（成功）" value="2xx" />
-                <el-option label="3xx（重定向）" value="3xx" />
-                <el-option label="4xx（客户端错误）" value="4xx" />
-                <el-option label="5xx（服务端错误）" value="5xx" />
+                <el-option :label="t('flowList.status2xxOption')" value="2xx" />
+                <el-option :label="t('flowList.status3xxOption')" value="3xx" />
+                <el-option :label="t('flowList.status4xxOption')" value="4xx" />
+                <el-option :label="t('flowList.status5xxOption')" value="5xx" />
                 <el-option label="200" value="200" />
                 <el-option label="201" value="201" />
                 <el-option label="204" value="204" />
@@ -1543,26 +1545,26 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="按主类型（application/image/text...），可直接输入"
+                :placeholder="t('flowList.focusContentTypePlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
                 @change="onFocusExtraChange"
               >
-                <el-option label="application（JSON/XML/...）" value="application" />
-                <el-option label="text（文本）" value="text" />
-                <el-option label="image（图片）" value="image" />
-                <el-option label="video（视频）" value="video" />
-                <el-option label="audio（音频）" value="audio" />
-                <el-option label="font（字体）" value="font" />
-                <el-option label="multipart（表单上传）" value="multipart" />
-                <el-option label="message（消息）" value="message" />
-                <el-option label="model（3D 模型）" value="model" />
-                <el-option label="unknown（未知/无）" value="unknown" />
+                <el-option :label="t('flowList.contentTypeAppOption')" value="application" />
+                <el-option :label="t('flowList.contentTypeTextOption')" value="text" />
+                <el-option :label="t('analyze.contentTypeImage')" value="image" />
+                <el-option :label="t('analyze.contentTypeVideo')" value="video" />
+                <el-option :label="t('analyze.contentTypeAudio')" value="audio" />
+                <el-option :label="t('analyze.contentTypeFont')" value="font" />
+                <el-option :label="t('analyze.contentTypeMultipart')" value="multipart" />
+                <el-option :label="t('analyze.contentTypeMessage')" value="message" />
+                <el-option :label="t('analyze.contentTypeModel')" value="model" />
+                <el-option :label="t('analyze.contentTypeUnknown')" value="unknown" />
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">协议</label>
+              <label class="fp-label">{{ t('common.protocol') }}</label>
               <el-select
                 v-model="focusProtocols"
                 multiple
@@ -1570,20 +1572,20 @@ onMounted(() => {
                 allow-create
                 default-first-option
                 :reserve-keyword="false"
-                placeholder="选择协议（可多选），http 含 https"
+                :placeholder="t('flowList.focusProtocolPlaceholder')"
                 size="small"
                 class="vertical-tags"
                 style="width: 360px"
                 @change="onFocusExtraChange"
               >
-                <el-option label="HTTP（含 HTTPS）" value="http" />
+                <el-option :label="t('flowList.httpWithHttps')" value="http" />
                 <el-option label="TCP" value="tcp" />
                 <el-option label="UDP" value="udp" />
               </el-select>
             </div>
             <div class="fp-actions">
-              <el-button size="small" @click="resetFocus">重置</el-button>
-              <el-button size="small" type="primary" @click="closePopup">完成</el-button>
+              <el-button size="small" @click="resetFocus">{{ t('common.reset') }}</el-button>
+              <el-button size="small" type="primary" @click="closePopup">{{ t('flowList.doneBtn') }}</el-button>
             </div>
           </template>
         </div>
@@ -1597,24 +1599,24 @@ onMounted(() => {
         class="multi-float-bar"
         @mouseenter="showFloatBarNow"
       >
-        <span class="mfb-count">已选 {{ selectedCount }}</span>
-        <el-button size="small" @click="selectAllFlows">全选</el-button>
-        <el-button size="small" @click="clearSelection" :disabled="!selectedCount">清空</el-button>
+        <span class="mfb-count">{{ t('flowList.selectedCount', { n: selectedCount }) }}</span>
+        <el-button size="small" @click="selectAllFlows">{{ t('flowList.selectAll') }}</el-button>
+        <el-button size="small" @click="clearSelection" :disabled="!selectedCount">{{ t('common.clear') }}</el-button>
         <el-button
           size="small"
           type="primary"
           :disabled="!selectedCount"
           @click="batchAIAnalyze"
         >
-          <el-icon><MagicStick /></el-icon>&nbsp;发送到AI
+          <el-icon><MagicStick /></el-icon>&nbsp;{{ t('flowList.sendToAi') }}
         </el-button>
         <el-button
           size="small"
           :disabled="!selectedCount"
           @click="batchReplay"
-          title="按指定 QPS 依次重放选中流量"
+          :title="t('flowList.batchReplayTitle')"
         >
-          <el-icon><RefreshRight /></el-icon>&nbsp;批量重放
+          <el-icon><RefreshRight /></el-icon>&nbsp;{{ t('flowList.batchReplay') }}
         </el-button>
         <el-button
           v-if="hasPendingBreakpoint"
@@ -1623,7 +1625,7 @@ onMounted(() => {
           :disabled="!selectedCount"
           @click="batchReleaseFlows('release')"
         >
-          <el-icon><Promotion /></el-icon>&nbsp;放行断点
+          <el-icon><Promotion /></el-icon>&nbsp;{{ t('flowList.releaseBreakpoint') }}
         </el-button>
         <el-button
           v-if="hasPendingBreakpoint"
@@ -1632,7 +1634,7 @@ onMounted(() => {
           :disabled="!selectedCount"
           @click="batchReleaseFlows('drop')"
         >
-          <el-icon><CircleClose /></el-icon>&nbsp;丢弃断点
+          <el-icon><CircleClose /></el-icon>&nbsp;{{ t('flowList.dropBreakpoint') }}
         </el-button>
         <el-button
           size="small"
@@ -1640,7 +1642,7 @@ onMounted(() => {
           :disabled="!selectedCount"
           @click="batchDeleteFlows"
         >
-          <el-icon><Delete /></el-icon>&nbsp;删除
+          <el-icon><Delete /></el-icon>&nbsp;{{ t('common.delete') }}
         </el-button>
         <!-- 子悬浮窗：删除确认 -->
         <transition name="popup-fade">
@@ -1650,10 +1652,10 @@ onMounted(() => {
             @click.stop
             @mouseenter="showFloatBarNow"
           >
-            <div class="dc-text">确定删除选中的 {{ selectedCount }} 条流量？</div>
+            <div class="dc-text">{{ t('flowList.deleteConfirmSelected', { n: selectedCount }) }}</div>
             <div class="dc-actions">
-              <el-button size="small" @click="cancelDeleteFlows">取消</el-button>
-              <el-button size="small" type="danger" @click="confirmDeleteFlows">删除</el-button>
+              <el-button size="small" @click="cancelDeleteFlows">{{ t('common.cancel') }}</el-button>
+              <el-button size="small" type="danger" @click="confirmDeleteFlows">{{ t('common.delete') }}</el-button>
             </div>
           </div>
         </transition>
@@ -1675,7 +1677,7 @@ onMounted(() => {
       >{{ c.label }}</div>
     </div>
     <!-- 表体 -->
-    <div ref="bodyRef" class="fl-body flex-1 overflow-auto" @scroll="onBodyScroll">
+    <div ref="bodyRef" class="fl-body flex-1 overflow-auto" v-loading="store.initialLoading && store.flows.length === 0" @scroll="onBodyScroll">
       <div
         v-for="f in displayFlows"
         :key="f.id"
@@ -1696,7 +1698,7 @@ onMounted(() => {
           :class="cellFullClass(c, f)"
         >{{ c.text(f) }}</div>
       </div>
-      <div v-if="!store.flows.length" class="empty-text text-dim">暂无流量，开始抓包后此处显示会话</div>
+      <div v-if="!store.flows.length" class="empty-text text-dim">{{ t('flowList.noFlows') }}</div>
     </div>
 
     <!-- 右键菜单 -->
@@ -1708,33 +1710,33 @@ onMounted(() => {
         :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
         @click.stop
       >
-        <div class="ctx-item" @click="ctxReplay"><el-icon><RefreshRight /></el-icon>&nbsp;重放请求</div>
-        <div class="ctx-item" @click="ctxAI"><el-icon><MagicStick /></el-icon>&nbsp;发送到AI</div>
-        <div class="ctx-item" @click="ctxViewInAnalyze"><el-icon><DataLine /></el-icon>&nbsp;在全局分析查看</div>
-        <div class="ctx-item" @click="ctxMultiSelect"><el-icon><CircleCheck /></el-icon>&nbsp;多选模式</div>
+        <div class="ctx-item" @click="ctxReplay"><el-icon><RefreshRight /></el-icon>&nbsp;{{ t('flowList.replayRequest') }}</div>
+        <div class="ctx-item" @click="ctxAI"><el-icon><MagicStick /></el-icon>&nbsp;{{ t('flowList.sendToAi') }}</div>
+        <div class="ctx-item" @click="ctxViewInAnalyze"><el-icon><DataLine /></el-icon>&nbsp;{{ t('flowList.viewInAnalyze') }}</div>
+        <div class="ctx-item" @click="ctxMultiSelect"><el-icon><CircleCheck /></el-icon>&nbsp;{{ t('flowList.multiSelectMode') }}</div>
         <!-- 自动修改：hover 展开二级菜单（自动请求 / 自动响应） -->
         <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'modify')" @mouseleave="onSubmenuLeave('modify')">
-          <el-icon><MagicStick /></el-icon>&nbsp;自动修改
+          <el-icon><MagicStick /></el-icon>&nbsp;{{ t('flowList.autoModify') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
           <div v-if="showModifySubmenu" class="ctx-submenu-panel" :class="{ 'ctx-submenu-left': submenuAlign === 'left' }" :style="{ left: submenuPos.left + 'px', top: submenuPos.top + 'px' }">
-            <div class="ctx-item" @click="ctxAutoModify('request')">自动请求（基于请求预填）</div>
-            <div class="ctx-item" @click="ctxAutoModify('response')">自动响应（基于响应预填）</div>
+            <div class="ctx-item" @click="ctxAutoModify('request')">{{ t('flowList.autoRequest') }}</div>
+            <div class="ctx-item" @click="ctxAutoModify('response')">{{ t('flowList.autoResponse') }}</div>
           </div>
         </div>
         <!-- 忽略：hover 展开二级菜单（按 PID / 按进程名 / 按 Host） -->
         <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'ignore')" @mouseleave="onSubmenuLeave('ignore')">
-          <el-icon><RemoveFilled /></el-icon>&nbsp;忽略
+          <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('flowList.ignoreBtn') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
           <div v-if="showIgnoreSubmenu" class="ctx-submenu-panel" :class="{ 'ctx-submenu-left': submenuAlign === 'left' }" :style="{ left: submenuPos.left + 'px', top: submenuPos.top + 'px' }">
-            <div class="ctx-item" @click="ctxIgnorePid">按 PID</div>
-            <div class="ctx-item" @click="ctxIgnoreProcess">按进程名</div>
-            <div class="ctx-item" @click="ctxIgnoreHost">按 Host</div>
+            <div class="ctx-item" @click="ctxIgnorePid">{{ t('flowList.ignoreByPid') }}</div>
+            <div class="ctx-item" @click="ctxIgnoreProcess">{{ t('flowList.ignoreByProcess') }}</div>
+            <div class="ctx-item" @click="ctxIgnoreHost">{{ t('flowList.ignoreByHost') }}</div>
           </div>
         </div>
         <div class="ctx-sep"></div>
         <!-- 复制：hover 展开二级菜单，含 url/curl 及启用的所有显示列 -->
         <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'copy')" @mouseleave="onSubmenuLeave('copy')">
-          <el-icon><CopyDocument /></el-icon>&nbsp;复制
+          <el-icon><CopyDocument /></el-icon>&nbsp;{{ t('common.copy') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
           <div v-if="showCopySubmenu" class="ctx-submenu-panel" :class="{ 'ctx-submenu-left': submenuAlign === 'left' }" :style="{ left: submenuPos.left + 'px', top: submenuPos.top + 'px' }">
             <div
@@ -1743,11 +1745,11 @@ onMounted(() => {
               class="ctx-item"
               @click="copyField(item.field)"
             >{{ item.label }}</div>
-            <div v-if="enabledCopyItems.length === 0" class="ctx-item ctx-disabled">未启用复制项</div>
+            <div v-if="enabledCopyItems.length === 0" class="ctx-item ctx-disabled">{{ t('flowList.noCopyItems') }}</div>
           </div>
         </div>
         <div class="ctx-sep"></div>
-        <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;删除流量</div>
+        <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;{{ t('flowList.deleteFlow') }}</div>
       </div>
     </teleport>
   </div>

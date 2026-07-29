@@ -134,6 +134,10 @@ export const useFlowsStore = defineStore('flows', () => {
   })())
   const autoScrollPaused = ref(false) // 用户滚动时暂停
 
+  // UX 复审修复：首屏流量加载状态。列表为空时用于区分"加载中"与"确实无流量"，
+  // 配合 FlowList 列表容器的 v-loading 显示加载反馈。
+  const initialLoading = ref(false)
+
   // 自动滚动设置持久化
   function persistAutoScroll() {
     localStorage.setItem('telnix_auto_scroll', autoScroll.value ? 'true' : 'false')
@@ -248,6 +252,7 @@ export const useFlowsStore = defineStore('flows', () => {
     if (!sessionId) return
     if (polling) return
     polling = true
+    initialLoading.value = true
     try {
       // 进程/状态码/方法改为前端过滤，不再传后端参数
       const params: any = { limit: 300, offset: 0 }
@@ -261,6 +266,7 @@ export const useFlowsStore = defineStore('flows', () => {
       /* 静默 */
     } finally {
       polling = false
+      initialLoading.value = false
     }
   }
 
@@ -268,6 +274,7 @@ export const useFlowsStore = defineStore('flows', () => {
   async function loadAllFlows(limit: number = 300) {
     if (polling) return
     polling = true
+    initialLoading.value = true
     try {
       const res: any = await api.getAllFlows({ limit, offset: 0 })
       let list: Flow[] = res.flows || []
@@ -283,6 +290,7 @@ export const useFlowsStore = defineStore('flows', () => {
       /* 静默 */
     } finally {
       polling = false
+      initialLoading.value = false
     }
   }
 
@@ -341,9 +349,13 @@ export const useFlowsStore = defineStore('flows', () => {
     // 选中时自动从后端拉取完整数据，确保 Inspector 能显示标签内容
     if (id != null) {
       const f = flowIndex.get(id)
-      if (f && f.request_headers === undefined) {
+      # Bug 复审修复：SSE 推送与 localStorage 缓存的 lite flow 实际**包含**
+      # request_headers/response_headers(值为 null)但省略 request_body/response_body，
+      # 原 `request_headers === undefined` 探测恒为 false，导致选中时从不补齐 body、
+      # Inspector 显示空白且 UX3 提示成死代码。改为探测真正缺失的大字段 request_body。
+      if (f && f.request_body === undefined) {
         // lite flow，异步拉取完整数据并原地更新
-          api.getFlow(id).then((full: Flow) => {
+        api.getFlow(id).then((full: Flow) => {
           // 原地 mutate flow 对象（shallowRef 模式下需 triggerRef）
           Object.assign(f, full)
           triggerRef(flows)
@@ -557,6 +569,7 @@ export const useFlowsStore = defineStore('flows', () => {
     autoScroll,
     autoScrollDelay,
     autoScrollPaused,
+    initialLoading,
     skipNextAutoScroll,
     persistAutoScroll,
     aiFlowIds,
