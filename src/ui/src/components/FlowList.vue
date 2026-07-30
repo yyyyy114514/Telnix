@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useVirtualList } from '../composables/useVirtualList'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useFlowsStore } from '../stores/flows'
@@ -8,6 +7,7 @@ import { useCaptureStore } from '../stores/capture'
 import { api, type ProcessInfo } from '../api/client'
 import { syncPrefs } from '../stores/prefs'
 import { parseFlowFilter, matchFlow, type ParsedFilter } from '../utils/flowfilter'
+import { useVirtualList } from '../composables/useVirtualList'
 
 // 会话列表：表格 + 统一悬浮窗（筛选/专注） + 一键忽略 + 右键菜单
 const { t } = useI18n()
@@ -37,13 +37,6 @@ const store = useFlowsStore()
 const capture = useCaptureStore()
 
 const bodyRef = ref<HTMLElement | null>(null)
-
-// P1 虚拟滚动：固定行高 26px，窗口化渲染（详见 composables/useVirtualList）
-const { onScroll: onVScroll, visibleItems, topPad, bottomPad } = useVirtualList<any>({
-  containerRef: bodyRef,
-  items: () => displayFlows.value,
-  itemHeight: 26,
-})
 
 // ---------- 多选模式 ----------
 const multiSelectMode = ref(false)
@@ -222,6 +215,9 @@ function togglePopup(name: 'filter' | 'focus') {
     // 打开新的，直接关闭旧的
     activePopup.value = name
     popupPos.value = { left: 10, top: 46 }
+    // P1-PF-004: 打开 popup 时立即刷新已知值列表，确保显示最新数据
+    // （watch store.flows 的 debounce 已加长到 1500ms，打开时需立即同步）
+    updateKnownsNow()
   }
 }
 
@@ -243,10 +239,12 @@ function onPopupHeaderDown(e: MouseEvent) {
 }
 function onPopupDragMove(e: MouseEvent) {
   if (!isDraggingPopup) return
-  popupPos.value = {
-    left: popupStartLeft + (e.clientX - dragStartX),
-    top: popupStartTop + (e.clientY - dragStartY),
-  }
+  // clamp 到视口范围内，确保悬浮窗 header 始终可见可拖回
+  const maxLeft = Math.max(0, window.innerWidth - 120)
+  const maxTop = Math.max(0, window.innerHeight - 60)
+  const left = Math.min(Math.max(0, popupStartLeft + (e.clientX - dragStartX)), maxLeft)
+  const top = Math.min(Math.max(0, popupStartTop + (e.clientY - dragStartY)), maxTop)
+  popupPos.value = { left, top }
 }
 function onPopupDragUp() {
   isDraggingPopup = false
@@ -411,16 +409,16 @@ type ColDef = {
 
 const COL_DEFS = computed<ColDef[]>(() => [
   { key: 'id', label: '#', width: '60px', always: true, cellClass: 'col-id text-dim', text: (f) => idWithScheme(f) },
-  { key: 'status', label: t('flowList.colResult'), width: '56px', cellClass: 'col-code', text: (f) => String(f.status_code ?? '...'), statusColor: (f) => statusClass(f.status_code) },
-  { key: 'method', label: t('common.method'), width: '72px', cellClass: 'col-method text-muted', text: (f) => f.method || '' },
-  { key: 'protocol', label: t('common.protocol'), width: '54px', cellClass: 'col-proto text-muted', text: (f) => protocolLabel(f) },
-  { key: 'host', label: 'Host', width: '1.4fr', always: true, cellClass: 'col-host', text: (f) => f.host || '' },
-  { key: 'url', label: 'URL', width: '2.2fr', always: true, cellClass: 'col-url text-muted', text: (f) => f.path || '' },
-  { key: 'content_type', label: 'Content-Type', width: '1.2fr', cellClass: 'col-ctype text-muted', text: (f) => extractContentType(f) },
-  { key: 'pid', label: 'PID', width: '64px', cellClass: 'col-pid text-muted', text: (f) => String(f.pid ?? '-') },
-  { key: 'proc', label: t('flowList.process'), width: '1fr', always: true, cellClass: 'col-proc text-muted', text: (f) => f.process_name || '-' },
-  { key: 'size', label: t('common.size'), width: '70px', cellClass: 'col-size text-muted', text: (f) => formatSize(f.size) },
-  { key: 'duration', label: t('common.duration'), width: '64px', cellClass: 'col-time text-muted', text: (f) => f.duration_ms !== null ? f.duration_ms + 'ms' : '' },
+  { key: 'status', label: 'flowList.colResult', width: '56px', cellClass: 'col-code', text: (f) => String(f.status_code ?? '...'), statusColor: (f) => statusClass(f.status_code) },
+  { key: 'method', label: 'common.method', width: '72px', cellClass: 'col-method text-muted', text: (f) => f.method || '' },
+  { key: 'protocol', label: 'common.protocol', width: '54px', cellClass: 'col-proto text-muted', text: (f) => protocolLabel(f) },
+  { key: 'host', label: 'flowList.colHost', width: '1.4fr', always: true, cellClass: 'col-host', text: (f) => f.host || '' },
+  { key: 'url', label: 'flowList.colUrl', width: '2.2fr', always: true, cellClass: 'col-url text-muted', text: (f) => f.path || '' },
+  { key: 'content_type', label: 'flowList.colContentType', width: '1.2fr', cellClass: 'col-ctype text-muted', text: (f) => extractContentType(f) },
+  { key: 'pid', label: 'flowList.colPid', width: '64px', cellClass: 'col-pid text-muted', text: (f) => String(f.pid ?? '-') },
+  { key: 'proc', label: 'flowList.process', width: '1fr', always: true, cellClass: 'col-proc text-muted', text: (f) => f.process_name || '-' },
+  { key: 'size', label: 'common.size', width: '70px', cellClass: 'col-size text-muted', text: (f) => formatSize(f.size) },
+  { key: 'duration', label: 'common.duration', width: '64px', cellClass: 'col-time text-muted', text: (f) => f.duration_ms !== null ? f.duration_ms + 'ms' : '' },
   { key: 'ip_region', label: t('flowList.ipRegion'), width: '90px', cellClass: 'col-ip-region text-muted', text: (f) => (f.ip_region && !f.ip_region.startsWith('base64:')) ? f.ip_region : '-' },
 ])
 const COL_ORDER_KEY = 'telnix_col_order'
@@ -502,8 +500,8 @@ function cellFullClass(c: ColDef, f: any): string {
 
 // 性能优化：extractContentType 结果缓存（按 flow.id），避免渲染期反复 JSON.parse
 // LRU 上限 5000，防止长期运行内存泄漏
-// 注意：lite flow（SSE 推送，缺少 response_headers）不缓存，
-// 否则 select() 拉取完整数据后 response_headers 变更，缓存仍是旧空值不会失效。
+// 注意：lite flow 的 response_headers 为 null，同样缓存空结果（避免反复进入函数体）；
+// select() 拉取完整数据后由 watch(store.flows) 失效对应条目，防止旧空值过期。
 const _ctCache = new Map<number, string>()
 function extractContentType(flow: any): string {
   if (!flow) return ''
@@ -523,7 +521,7 @@ function extractContentType(flow: any): string {
       }
     } catch { /* ignore */ }
   }
-  // 仅当 response_headers 存在时缓存（lite flow 不缓存，等完整数据到达后再缓存）
+  // null/字符串均缓存（null 缓存为 ''）；仅 undefined（字段缺失）不缓存
   if (raw !== undefined) {
     if (_ctCache.size >= 5000) {
       const firstKey = _ctCache.keys().next().value
@@ -612,8 +610,11 @@ const displayFlows = computed(() => {
   const dslConditions = dslFilter.value.conditions
   const hasDsl = dslConditions.length > 0
 
-  // 无任何过滤条件：直接返回源数组（零开销）
-  if (!focusOn && !hasFilterAny && !hasDsl) return src
+  // 无任何过滤条件：返回源数组的浅拷贝（确保新引用，触发下游 computed 重新计算）
+  // 修复实时出包：store.flows 是 shallowRef，flushSSEBatch/pollNewFlows 用 unshift 修改原数组
+  // 后 triggerRef 触发 displayFlows 重新计算，但若直接返回 src（同一引用），Object.is 比较
+  // 认为值未变，下游 useVirtualList 的 visibleItems 不会重新计算，导致新流量不渲染。
+  if (!focusOn && !hasFilterAny && !hasDsl) return src.slice()
 
   const result: any[] = []
   for (const f of src) {
@@ -675,6 +676,36 @@ function extractContentTypeMain(f: any): string {
   return ct.split('/')[0].toLowerCase() || 'unknown'
 }
 
+// ---------- 虚拟滚动（P0-PF-001）----------
+// 行高 27px = fl-row height 26px + border-bottom 1px；overscan=8 与 RawCaptureView 一致
+// 仅渲染可视区 + overscan 行，5000 条流量 DOM 节点从 5000×N 降至约 50×N
+const ROW_HEIGHT = 27
+const { onScroll: onVScroll, visibleItems, topPad, bottomPad } = useVirtualList<any>({
+  containerRef: bodyRef,
+  items: () => displayFlows.value,
+  itemHeight: ROW_HEIGHT,
+})
+
+// 根据_flow_id 在 displayFlows 中的索引直接计算 scrollTop，定位到该行。
+// 用于虚拟滚动后 querySelector([data-flow-id]) 找不到不可见行的回退场景。
+function scrollToFlowById(id: number): boolean {
+  const list = displayFlows.value
+  const idx = list.findIndex(f => f.id === id)
+  if (idx < 0) return false
+  const el = bodyRef.value
+  if (!el) return false
+  const targetTop = idx * ROW_HEIGHT
+  const targetBottom = targetTop + ROW_HEIGHT
+  const viewTop = el.scrollTop
+  const viewBottom = viewTop + el.clientHeight
+  if (targetTop < viewTop) {
+    el.scrollTop = targetTop
+  } else if (targetBottom > viewBottom) {
+    el.scrollTop = targetBottom - el.clientHeight
+  }
+  return true
+}
+
 // 状态码匹配：支持精确（200）和通配（2xx、3xx、4xx）
 function matchStatusCode(code: string, pattern: string): boolean {
   const p = pattern.trim().toLowerCase()
@@ -700,26 +731,45 @@ const knownMethods = ref<string[]>([])
 const knownStatusCodes = ref<string[]>([])
 
 let knownDebounceTimer: number | null = null
+function updateKnownsNow() {
+  // 立即执行一次已知值计算（取消 pending debounce，避免重复遍历）
+  if (knownDebounceTimer !== null) {
+    clearTimeout(knownDebounceTimer)
+    knownDebounceTimer = null
+  }
+  const hostSet = new Set<string>()
+  const methodSet = new Set<string>()
+  const codeSet = new Set<string>()
+  for (const f of store.flows as any[]) {
+    if (f.host) hostSet.add(f.host)
+    if (f.method) methodSet.add((f.method as string).toUpperCase())
+    if (f.status_code !== null && f.status_code !== undefined) codeSet.add(String(f.status_code))
+  }
+  knownHosts.value = [...hostSet].sort()
+  knownMethods.value = [...methodSet].sort()
+  knownStatusCodes.value = [...codeSet].sort()
+}
 function scheduleUpdateKnowns() {
+  // P1-PF-004: knownHosts/knownMethods/knownStatusCodes 仅在 filter/focus popup 中显示，
+  // 无需实时刷新。debounce 从 300ms 加长到 1500ms，降低高频 SSE 推送下的遍历频率（5x）。
+  // 打开 popup 时由 togglePopup 调用 updateKnownsNow 立即刷新，保证数据新鲜。
   if (knownDebounceTimer !== null) return
   knownDebounceTimer = window.setTimeout(() => {
     knownDebounceTimer = null
-    const hostSet = new Set<string>()
-    const methodSet = new Set<string>()
-    const codeSet = new Set<string>()
-    for (const f of store.flows as any[]) {
-      if (f.host) hostSet.add(f.host)
-      if (f.method) methodSet.add((f.method as string).toUpperCase())
-      if (f.status_code !== null && f.status_code !== undefined) codeSet.add(String(f.status_code))
-    }
-    knownHosts.value = [...hostSet].sort()
-    knownMethods.value = [...methodSet].sort()
-    knownStatusCodes.value = [...codeSet].sort()
-  }, 300)
+    updateKnownsNow()
+  }, 1500)
 }
 
 watch(() => store.flows, () => {
   scheduleUpdateKnowns()
+  // 失效可能被升级的 lite flow 的 Content-Type 缓存：
+  // select() 拉取完整数据后 response_headers 从 null 变为字符串，
+  // 需删除 _ctCache 中旧空值，下次 extractContentType 才会重新解析真实 Content-Type
+  const sid = store.selectedId
+  if (sid != null) {
+    const sf = store.selectedFlow
+    if (sf && sf.response_headers) _ctCache.delete(sid)
+  }
 }, { deep: false })
 
 function resetFilters() {
@@ -788,6 +838,7 @@ let scrollPauseTimer: number | null = null
 let programmaticScroll = false
 
 function onBodyScroll(e: Event) {
+  // 虚拟滚动：更新可视区 startIndex/endIndex
   onVScroll(e)
   if (programmaticScroll) {
     programmaticScroll = false
@@ -854,6 +905,9 @@ watch(
         programmaticScroll = true
         scrollRowIntoView(row)
       }
+    } else {
+      // 虚拟滚动回退：选中行不在可视区（未渲染 DOM），按索引直接定位
+      if (scrollToFlowById(store.selectedId)) programmaticScroll = true
     }
   },
   { deep: false }
@@ -888,6 +942,9 @@ watch(
     if (row) {
       programmaticScroll = true
       scrollRowIntoView(row)
+    } else {
+      // 虚拟滚动回退：选中行不在可视区（未渲染 DOM），按索引直接定位
+      if (scrollToFlowById(id)) programmaticScroll = true
     }
   }
 )
@@ -1106,20 +1163,20 @@ function ctxCopyCurl() {
 // ---------- 复制项管理（hover 二级菜单） ----------
 // 可复制字段：url/curl 是固定项，其余对应 flow 字段
 const COPY_FIELD_DEFS = computed<{ key: string; label: string; field: string }[]>(() => [
-  { key: 'url', label: 'URL', field: 'url' },
-  { key: 'curl', label: 'cURL', field: '_curl' },
-  { key: 'host', label: 'Host', field: 'host' },
-  { key: 'method', label: t('common.method'), field: 'method' },
-  { key: 'path', label: 'Path', field: 'path' },
-  { key: 'status', label: t('flowList.statusCode'), field: 'status_code' },
-  { key: 'protocol', label: t('common.protocol'), field: 'protocol' },
-  { key: 'content_type', label: 'Content-Type', field: '_content_type' },
-  { key: 'pid', label: 'PID', field: 'pid' },
-  { key: 'process', label: t('flowList.process'), field: 'process_name' },
-  { key: 'size', label: t('common.size'), field: 'size' },
-  { key: 'duration', label: t('common.duration'), field: 'duration_ms' },
-  { key: 'remote_ip', label: t('flowList.remoteIp'), field: 'remote_ip' },
-  { key: 'ip_region', label: t('flowList.ipRegion'), field: 'ip_region' },
+  { key: 'url', label: 'flowList.colUrl', field: 'url' },
+  { key: 'curl', label: 'flowList.colCurl', field: '_curl' },
+  { key: 'host', label: 'flowList.colHost', field: 'host' },
+  { key: 'method', label: 'common.method', field: 'method' },
+  { key: 'path', label: 'flowList.colPath', field: 'path' },
+  { key: 'status', label: 'flowList.statusCode', field: 'status_code' },
+  { key: 'protocol', label: 'common.protocol', field: 'protocol' },
+  { key: 'content_type', label: 'flowList.colContentType', field: '_content_type' },
+  { key: 'pid', label: 'flowList.colPid', field: 'pid' },
+  { key: 'process', label: 'flowList.process', field: 'process_name' },
+  { key: 'size', label: 'common.size', field: 'size' },
+  { key: 'duration', label: 'common.duration', field: 'duration_ms' },
+  { key: 'remote_ip', label: 'flowList.remoteIp', field: 'remote_ip' },
+  { key: 'ip_region', label: 'flowList.ipRegion', field: 'ip_region' },
 ])
 const COPY_PREF_KEY = 'telnix_copy_fields'
 // 默认复制项：url 和 curl
@@ -1207,10 +1264,15 @@ onMounted(() => {
     nextTick(() => {
       const el = bodyRef.value
       if (!el) return
-      const row = el.querySelector(`[data-flow-id="${store.selectedId}"]`) as HTMLElement | null
+      const sid = store.selectedId
+      if (sid == null) return
+      const row = el.querySelector(`[data-flow-id="${sid}"]`) as HTMLElement | null
       if (row) {
         programmaticScroll = true
         scrollRowIntoView(row)
+      } else {
+        // 虚拟滚动回退：选中行不在可视区（未渲染 DOM），按索引直接定位
+        if (scrollToFlowById(sid)) programmaticScroll = true
       }
     })
   }
@@ -1683,10 +1745,11 @@ onMounted(() => {
         @dragstart="onColDragStart(c.key)"
         @dragover="onColDragOver($event, c.key)"
         @dragend="onColDragEnd"
-      >{{ c.label }}</div>
+      >{{ t(c.label) }}</div>
     </div>
     <!-- 表体 -->
-    <div ref="bodyRef" class="fl-body flex-1 overflow-auto" v-loading="store.initialLoading && store.flows.length === 0" @scroll="onBodyScroll">
+    <div ref="bodyRef" class="fl-body flex-1 overflow-auto" @scroll="onBodyScroll">
+      <!-- 虚拟滚动顶部占位 -->
       <div :style="{ height: topPad + 'px' }"></div>
       <div
         v-for="f in visibleItems"
@@ -1708,6 +1771,7 @@ onMounted(() => {
           :class="cellFullClass(c, f)"
         >{{ c.text(f) }}</div>
       </div>
+      <!-- 虚拟滚动底部占位 -->
       <div :style="{ height: bottomPad + 'px' }"></div>
       <div v-if="!store.flows.length" class="empty-text text-dim">{{ t('flowList.noFlows') }}</div>
     </div>
@@ -1755,7 +1819,7 @@ onMounted(() => {
               :key="item.key"
               class="ctx-item"
               @click="copyField(item.field)"
-            >{{ item.label }}</div>
+            >{{ t(item.label) }}</div>
             <div v-if="enabledCopyItems.length === 0" class="ctx-item ctx-disabled">{{ t('flowList.noCopyItems') }}</div>
           </div>
         </div>

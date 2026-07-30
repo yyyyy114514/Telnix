@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { ElMessage } from 'element-plus'
 import type { Flow, ReplayOverride } from '../api/client'
 import CodeEditor from './CodeEditor.vue'
+
+const { t } = useI18n()
 
 // 重放对话框：支持覆盖 method/host/port/body/headers
 const props = defineProps<{
@@ -54,7 +58,10 @@ function confirm() {
     try {
       const h = JSON.parse(editHeaders.value || '{}')
       override.headers = h
-    } catch { /* 忽略无效 JSON */ }
+    } catch {
+      // JSON 格式错误时提示用户，避免静默丢弃 Headers 覆盖
+      ElMessage.error(t('replay.headersJsonInvalid'))
+    }
     emit('replay', props.flow.id, override)
   }
   emit('update:modelValue', false)
@@ -68,8 +75,8 @@ function close() {
   <el-dialog
     :model-value="modelValue"
     @update:model-value="close"
-    title="重放流量"
-    width="640px"
+    :title="t('replay.title')"
+    width="min(640px, 95vw)"
   >
     <div v-if="flow" class="replay-body">
       <div class="replay-row">
@@ -77,16 +84,16 @@ function close() {
         <span class="mono text-muted">{{ flow.url }}</span>
       </div>
       <div class="replay-meta text-muted">
-        默认按原始记录重放。如需修改参数，开启下方「参数覆盖」。
+        {{ t('replay.defaultHint') }}
       </div>
 
       <el-divider content-position="left">
-        <el-switch v-model="useOverride" /> 参数覆盖
+        <el-switch v-model="useOverride" /> {{ t('replay.override') }}
       </el-divider>
 
       <div v-if="useOverride" class="override-form">
         <div class="ov-row">
-          <label class="ov-label">Method</label>
+          <label class="ov-label">{{ t('replay.methodLabel') }}</label>
           <el-select v-model="editMethod" size="small" style="width: 120px">
             <el-option label="GET" value="GET" />
             <el-option label="POST" value="POST" />
@@ -96,25 +103,25 @@ function close() {
             <el-option label="HEAD" value="HEAD" />
             <el-option label="OPTIONS" value="OPTIONS" />
           </el-select>
-          <label class="ov-label" style="margin-left: 12px">Host</label>
+          <label class="ov-label" style="margin-left: 12px">{{ t('replay.hostLabel') }}</label>
           <el-input v-model="editHost" size="small" style="width: 200px" />
-          <label class="ov-label" style="margin-left: 12px">Port</label>
-          <el-input-number v-model="editPort" :controls="false" size="small" style="width: 80px" :min="1" :max="65535" placeholder="默认" />
+          <label class="ov-label" style="margin-left: 12px">{{ t('replay.portLabel') }}</label>
+          <el-input-number v-model="editPort" :controls="false" size="small" style="width: 80px" :min="1" :max="65535" :placeholder="t('replay.portPlaceholder')" />
         </div>
         <div class="ov-row">
-          <label class="ov-label">Body</label>
+          <label class="ov-label">{{ t('replay.bodyLabel') }}</label>
           <CodeEditor v-model="editBody" language="plaintext" :min-height="'100px'" />
         </div>
         <div class="ov-row">
-          <label class="ov-label">Headers</label>
-          <CodeEditor v-model="editHeaders" language="json" :min-height="'100px'" placeholder="JSON 格式" />
+          <label class="ov-label">{{ t('replay.headersLabel') }}</label>
+          <CodeEditor v-model="editHeaders" language="json" :min-height="'100px'" :placeholder="t('replay.headersPlaceholder')" />
         </div>
       </div>
     </div>
     <template #footer>
-      <el-button @click="close">取消</el-button>
+      <el-button @click="close">{{ t('common.cancel') }}</el-button>
       <el-button type="primary" @click="confirm">
-        <el-icon><RefreshRight /></el-icon>&nbsp;确认重放
+        <el-icon><RefreshRight /></el-icon>&nbsp;{{ t('replay.confirm') }}
       </el-button>
     </template>
   </el-dialog>

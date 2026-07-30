@@ -90,10 +90,12 @@ function onPopupHeaderDown(e: MouseEvent) {
 }
 function onPopupDragMove(e: MouseEvent) {
   if (!isDraggingPopup) return
-  popupPos.value = {
-    left: popupStartLeft + (e.clientX - dragStartX),
-    top: popupStartTop + (e.clientY - dragStartY),
-  }
+  // clamp 到视口范围内，确保悬浮窗 header 始终可见可拖回
+  const maxLeft = Math.max(0, window.innerWidth - 120)
+  const maxTop = Math.max(0, window.innerHeight - 60)
+  const left = Math.min(Math.max(0, popupStartLeft + (e.clientX - dragStartX)), maxLeft)
+  const top = Math.min(Math.max(0, popupStartTop + (e.clientY - dragStartY)), maxTop)
+  popupPos.value = { left, top }
 }
 function onPopupDragUp() {
   isDraggingPopup = false
@@ -770,7 +772,7 @@ onUnmounted(() => {
       </el-button>
       <div class="raw-status-tags">
         <el-tag size="small" :type="rawStatus.is_admin ? 'success' : 'danger'">
-          {{ rawStatus.is_admin ? (rawStatus.backend === 'windivert' ? t('raw.admin') : 'root') : (rawStatus.backend === 'windivert' ? t('raw.nonAdmin') : t('raw.nonRoot')) }}
+          {{ rawStatus.is_admin ? (rawStatus.backend === 'windivert' ? t('raw.admin') : t('raw.root')) : (rawStatus.backend === 'windivert' ? t('raw.nonAdmin') : t('raw.nonRoot')) }}
         </el-tag>
         <el-tag v-if="rawStatus.backend && rawStatus.backend !== 'none'" size="small" type="info">
           {{ backendDisplayName }}
@@ -789,7 +791,7 @@ onUnmounted(() => {
       </div>
       <div class="flex-1"></div>
       <span class="text-dim mono" style="font-size: 11px">
-        {{ t('raw.networkCaptureHint', { backend: backendDisplayName, perm: rawStatus.backend === 'windivert' ? t('raw.admin') : 'root' }) }}
+        {{ t('raw.networkCaptureHint', { backend: backendDisplayName, perm: rawStatus.backend === 'windivert' ? t('raw.admin') : t('raw.root') }) }}
       </span>
     </div>
 
@@ -797,7 +799,7 @@ onUnmounted(() => {
     <div v-if="!rawStatus.is_admin" class="raw-warn-bar">
       <el-icon><WarningFilled /></el-icon>
       <span>{{ t('raw.warnBarText', {
-        perm: rawStatus.backend === 'windivert' ? t('raw.admin') : 'root',
+        perm: rawStatus.backend === 'windivert' ? t('raw.admin') : t('raw.root'),
         restart: rawStatus.backend === 'windivert' ? t('raw.adminRestart') : t('raw.elevateRestart')
       }) }}</span>
     </div>
@@ -872,10 +874,10 @@ onUnmounted(() => {
               <el-button size="small" @click="filterStr = 'tcp or udp'">{{ t('raw.presetAll') }}</el-button>
               <el-button size="small" @click="filterStr = 'tcp'">{{ t('raw.presetTcpOnly') }}</el-button>
               <el-button size="small" @click="filterStr = 'udp'">{{ t('raw.presetUdpOnly') }}</el-button>
-              <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 80 or tcp.SrcPort == 80)'">HTTP 80</el-button>
-              <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443)'">HTTPS 443</el-button>
-              <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 53 or udp.SrcPort == 53)'">DNS 53</el-button>
-              <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 123 or udp.SrcPort == 123)'">NTP 123</el-button>
+              <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 80 or tcp.SrcPort == 80)'">{{ t('raw.presetHttp80') }}</el-button>
+              <el-button size="small" @click="filterStr = 'tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443)'">{{ t('raw.presetHttps443') }}</el-button>
+              <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 53 or udp.SrcPort == 53)'">{{ t('raw.presetDns53') }}</el-button>
+              <el-button size="small" @click="filterStr = 'udp and (udp.DstPort == 123 or udp.SrcPort == 123)'">{{ t('raw.presetNtp123') }}</el-button>
               <el-tooltip :content="t('raw.bpfSyntaxHelp')" placement="bottom">
                 <el-icon class="bpf-help"><QuestionFilled /></el-icon>
               </el-tooltip>
@@ -1080,7 +1082,7 @@ onUnmounted(() => {
             <span class="text-muted">{{ selectedFlow.process_name || 'pid:' + selectedFlow.pid }}</span>
             <div class="flex-1"></div>
             <el-radio-group v-model="detailTab" size="small" class="detail-tab">
-              <el-radio-button label="hex">Hex</el-radio-button>
+              <el-radio-button label="hex">{{ t('raw.hex') }}</el-radio-button>
               <el-radio-button label="protocol">{{ t('raw.protocolAnalysis') }}</el-radio-button>
             </el-radio-group>
             <el-select v-model="hexField" size="small" style="width: 140px" @change="refreshHex">

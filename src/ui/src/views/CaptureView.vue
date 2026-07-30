@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useCaptureStore } from '../stores/capture'
 import { useFlowsStore } from '../stores/flows'
 import { api, type ProcessInfo, type Flow, type AutoReplyRule } from '../api/client'
@@ -13,6 +14,7 @@ import RuleEditor from '../components/RuleEditor.vue'
 
 const capture = useCaptureStore()
 const flows = useFlowsStore()
+const { t } = useI18n()
 
 const processes = ref<ProcessInfo[]>([])
 const enabledTabs = ref<string[]>([])
@@ -81,20 +83,28 @@ async function loadSettings() {
 // 不再依赖 capture.status.capturing 作为轮询开关：只要本页打开就保持流量最新，
 // 即使后端 capturing 状态同步有抖动也不影响实时性。
 let lastProcLoadTime = 0
+let lastFullLoadTime = 0
 async function pollFlows() {
   // SSE 健康 = 已连接 且 近期有消息（init/flow/ping），否则视为需要兜底轮询
   const sseHealthy = flows.sseActive && !flows.sseStale()
   if (!sseHealthy) {
     // SSE 失活/假死：增量轮询补齐新流量；本地无历史时先全量加载基线
     if (flows.maxFlowId) {
-      await flows.pollNewFlows()
+      flows.pollNewFlows()  // 不 await，避免阻塞下一个 pollTimer tick
     } else {
-      await flows.loadAllFlows()
+      // 避免频繁全量加载：至少间隔 5 秒才再次 loadAllFlows
+      // initialLoading 为 true 时跳过 5 秒限制：让 loadAllFlows 触发 polling 锁分支
+      // (initialLoading=false)，提前结束转圈（最多转 1.5s 而非 3s）
+      const now = Date.now()
+      if (flows.initialLoading || now - lastFullLoadTime > 5000) {
+        lastFullLoadTime = now
+        flows.loadAllFlows()  // 不 await
+      }
     }
   }
-  // 进程列表每 3 秒刷新一次（后端有 5 秒缓存），不阻塞流量刷新
+  // 进程列表每 5 秒刷新一次（与后端 list_processes 5s TTL 缓存对齐，命中率 100%）
   const now = Date.now()
-  if (now - lastProcLoadTime > 3000) {
+  if (now - lastProcLoadTime > 5000) {
     lastProcLoadTime = now
     loadProcesses()  // 不 await，避免阻塞流量轮询
   }
@@ -111,7 +121,7 @@ function startPolling() {
   flows.startSSE()
   // 兜底轮询：1.5 秒一次，防止 SSE 异常断开未重连时漏掉流量
   // 性能优化：从 5s 降到 1.5s，SSE 异常时延迟从 5s 降到 1.5s
-  // 也用于触发 loadProcesses（进程列表每 3 秒刷新）
+  // 也用于触发 loadProcesses（进程列表每 5 秒刷新，与后端 5s TTL 缓存对齐）
   pollTimer = window.setInterval(pollFlows, 1500)
 }
 
@@ -128,31 +138,31 @@ async function onToggleCapture() {
     if (capture.status.capturing) {
       // 停止抓包：fire-and-forget（store 内部已乐观更新 capturing=false）
       capture.toggleCapture().catch((e: any) =>
-        ElMessage.error('停止抓包失败：' + (e?.message || e))
+        ElMessage.error(t('capture.stopCaptureFailed') + (e?.message || e))
       )
       stopPolling()
     } else {
       // 开始抓包：fire-and-forget（store 内部已乐观更新 capturing=true）
       // 不 await，按钮立即响应；轮询立即启动，乐观状态由后续 fetchStatus 校正
       capture.toggleCapture().catch((e: any) =>
-        ElMessage.error('开始抓包失败：' + (e?.message || e))
+        ElMessage.error(t('capture.startCaptureFailed') + (e?.message || e))
       )
-      // 乐观更新已设置 capturing=true，立即启动轮询
+      // 乐观更新已设置 capturing=true，立即启动 SSE + 轮询
+      // 不调用 pollFlows()：SSE 会推送新流量，避免触发不必要的 loadAllFlows
       startPolling()
       loadProcesses()
-      pollFlows()
     }
   } catch (e: any) {
-    ElMessage.error('操作失败：' + (e?.message || e))
+    ElMessage.error(t('capture.operationFailed') + (e?.message || e))
   }
 }
 
 async function onClear() {
   try {
     await ElMessageBox.confirm(
-      '确定清空全部流量？此操作不可恢复。',
-      '清空',
-      { confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning' }
+      t('capture.clearConfirmMessage'),
+      t('capture.clearConfirmTitle'),
+      { confirmButtonText: t('capture.clearButton'), cancelButtonText: t('capture.cancelButton'), type: 'warning' }
     )
   } catch {
     return
@@ -168,9 +178,9 @@ async function onClear() {
     //（现象：点清空后过一会旧包又弹出来）。
     await api.clearAllFlows('all')
     ok = true
-    ElMessage.success('已清空全部流量')
+    ElMessage.success(t('capture.clearAllSuccess'))
   } catch (e: any) {
-    ElMessage.error('清空失败：' + (e?.message || e))
+    ElMessage.error(t('capture.clearFailed') + (e?.message || e))
   } finally {
     // 后端清空（或失败恢复）后才重连 SSE：此时 init 的 max_id=0，不会把旧包拉回
     flows.reconnectSSE()
@@ -180,7 +190,7 @@ async function onClear() {
 
 function onReplay() {
   if (!flows.selectedId) {
-    ElMessage.warning('请先选中一条流量')
+    ElMessage.warning(t('capture.selectFlowFirst'))
     return
   }
   replayVisible.value = true
@@ -192,21 +202,21 @@ let batchReplaying = false
 async function onBatchReplay(ids: number[]) {
   if (!ids.length) return
   if (batchReplaying) {
-    ElMessage.warning('正在批量重放中，请等待完成')
+    ElMessage.warning(t('capture.batchReplayInProgress'))
     return
   }
   let qps = 5
   try {
     const { value } = await ElMessageBox.prompt(
-      `即将依次重放 ${ids.length} 条流量。\n请输入 QPS（每秒发送条数，0=不限速）：`,
-      '批量重放',
+      t('capture.batchReplayPrompt', { n: ids.length }),
+      t('capture.batchReplayTitle'),
       {
-        confirmButtonText: '开始重放',
-        cancelButtonText: '取消',
+        confirmButtonText: t('capture.startReplayButton'),
+        cancelButtonText: t('capture.cancelButton'),
         inputValue: '5',
         inputValidator: (v: string) => {
           const n = Number(v)
-          if (!isFinite(n) || n < 0 || !Number.isInteger(n)) return '请输入非负整数'
+          if (!isFinite(n) || n < 0 || !Number.isInteger(n)) return t('capture.batchReplayInputError')
           return true
         },
       }
@@ -221,7 +231,7 @@ async function onBatchReplay(ids: number[]) {
   let ok = 0
   let fail = 0
   const startMsg = ElMessage({
-    message: `批量重放中：0/${total}`,
+    message: t('capture.batchReplaying', { current: 0, total }),
     type: 'info',
     duration: 0,
   })
@@ -236,12 +246,12 @@ async function onBatchReplay(ids: number[]) {
     }
     // 每 5 条更新一次进度
     if ((i + 1) % 5 === 0 || i === total - 1) {
-      (startMsg as any).message = `批量重放中：${i + 1}/${total}（成功 ${ok}，失败 ${fail}）`
+      (startMsg as any).message = t('capture.batchReplayingDetail', { current: i + 1, total, ok, fail })
     }
     if (delay > 0 && i < total - 1) await sleep(delay)
   }
   startMsg.close()
-  ElMessage.success(`批量重放完成：共 ${total} 条，成功 ${ok}，失败 ${fail}`)
+  ElMessage.success(t('capture.batchReplayComplete', { total, ok, fail }))
   batchReplaying = false
 }
 
@@ -302,7 +312,7 @@ function onCtxAutoModify(flow: any, mode: 'request' | 'response') {
       mock_headers: reqHeaders,
       mock_body: flow.request_body || '',
       modify_rules: [],
-      note: `写死请求：${method} ${host}${path}`.slice(0, 100),
+      note: t('capture.mockRequestNote', { method, host, path }).slice(0, 100),
     }
   } else {
     // 写死响应：基于该响应创建 mock 规则，预填原响应 headers 和 body（固化当前响应）
@@ -318,7 +328,7 @@ function onCtxAutoModify(flow: any, mode: 'request' | 'response') {
       mock_headers: respHeaders,
       mock_body: flow.response_body || '',
       modify_rules: [],
-      note: `写死响应：${method} ${host}${path}`.slice(0, 100),
+      note: t('capture.mockResponseNote', { method, host, path }).slice(0, 100),
     }
   }
   ruleEditorVisible.value = true
@@ -332,9 +342,9 @@ async function saveRule(r: AutoReplyRule) {
       try { payload.mock_headers = JSON.parse(payload.mock_headers) } catch { payload.mock_headers = {} }
     }
     await api.createRule(payload)
-    ElMessage.success('规则已保存')
+    ElMessage.success(t('capture.ruleSaved'))
   } catch (e: any) {
-    ElMessage.error('保存失败：' + (e?.message || e))
+    ElMessage.error(t('capture.saveFailed') + (e?.message || e))
   }
 }
 
@@ -345,28 +355,28 @@ async function doReplay(id: number, override?: any) {
     } else {
       await api.replayFlow(id)
     }
-    ElMessage.success('重放请求已发送')
+    ElMessage.success(t('capture.replaySent'))
   } catch (e: any) {
-    ElMessage.error('重放失败：' + (e?.message || e))
+    ElMessage.error(t('capture.replayFailed') + (e?.message || e))
   }
 }
 
 async function onIgnoreProcess(proc: ProcessInfo) {
   try {
     await api.ignoreProcess(proc)
-    ElMessage.success(`已忽略进程 ${proc.name}（对新连接生效，已有连接需重启后端）`)
+    ElMessage.success(t('capture.ignoredProcess', { name: proc.name }))
     await loadProcesses()
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('capture.ignoreFailed') + (e?.message || e))
   }
 }
 
 async function onIgnoreHost(host: string) {
   try {
     await api.ignoreHost(host)
-    ElMessage.success(`已忽略 Host ${host}（对新连接生效，已有连接需重启后端）`)
+    ElMessage.success(t('capture.ignoredHost', { host }))
   } catch (e: any) {
-    ElMessage.error('忽略失败：' + (e?.message || e))
+    ElMessage.error(t('capture.ignoreFailed') + (e?.message || e))
   }
 }
 
@@ -381,14 +391,14 @@ async function onRelease(action: 'release' | 'drop', modified: any) {
     // 放行后刷新流量（不依赖抓包状态）
     await onFlowsChanged()
   } catch (e: any) {
-    ElMessage.error('操作失败：' + (e?.message || e))
+    ElMessage.error(t('capture.operationFailed') + (e?.message || e))
   }
 }
 
 // 导出：所有格式统一通过浏览器下载
 async function onExport(format: string) {
   if (!capture.status.session_id) {
-    ElMessage.warning('当前无活动会话')
+    ElMessage.warning(t('capture.noActiveSession'))
     return
   }
   try {
@@ -415,7 +425,7 @@ async function onExport(format: string) {
     // content 可能是字符串（python-requests/curl）或对象（har/json/postman）
     const content = res?.content ?? res?.data
     if (content === undefined) {
-      ElMessage.warning('导出结果为空')
+      ElMessage.warning(t('capture.exportEmpty'))
       return
     }
     const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2)
@@ -431,16 +441,16 @@ async function onExport(format: string) {
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
-    ElMessage.success(`已导出：${fname}`)
+    ElMessage.success(t('capture.exportedFile', { name: fname }))
   } catch (e: any) {
-    ElMessage.error('导出失败：' + (e?.message || e))
+    ElMessage.error(t('capture.exportFailed') + (e?.message || e))
   }
 }
 
 // 跳转 AI 分析
 function goAI() {
   if (!flows.selectedId) {
-    ElMessage.warning('请先选中流量')
+    ElMessage.warning(t('capture.selectFlowFirstShort'))
     return
   }
   flows.aiFlowIds = flows.selectedId ? [flows.selectedId] : []
@@ -490,6 +500,12 @@ onMounted(() => {
 onUnmounted(() => {
   capture.stopPolling()
   stopPolling()
+  // 拖拽中卸载（如切换路由）时清理 window 监听器，避免泄漏
+  if (dragging.value) {
+    window.removeEventListener('mousemove', onSplitMove)
+    window.removeEventListener('mouseup', onSplitUp)
+    dragging.value = false
+  }
 })
 </script>
 
@@ -503,32 +519,32 @@ onUnmounted(() => {
         @click="onToggleCapture"
       >
         <el-icon><component :is="capture.status.capturing ? 'VideoPause' : 'VideoPlay'" /></el-icon>
-        &nbsp;{{ capture.status.capturing ? '停止抓包' : '开始抓包' }}
+        &nbsp;{{ capture.status.capturing ? t('capture.stopCapture') : t('capture.startCapture') }}
       </el-button>
       <el-button size="small" @click="onClear">
-        <el-icon><Delete /></el-icon>&nbsp;清空
+        <el-icon><Delete /></el-icon>&nbsp;{{ t('capture.clear') }}
       </el-button>
       <el-button size="small" :disabled="!flows.selectedId" @click="onReplay">
-        <el-icon><RefreshRight /></el-icon>&nbsp;重放
+        <el-icon><RefreshRight /></el-icon>&nbsp;{{ t('capture.replay') }}
       </el-button>
       <el-button size="small" :disabled="!flows.selectedId" @click="goAI">
-        <el-icon><MagicStick /></el-icon>&nbsp;发送到AI
+        <el-icon><MagicStick /></el-icon>&nbsp;{{ t('capture.sendToAI') }}
       </el-button>
       <div class="toolbar-sep"></div>
       <BreakpointBar />
       <div class="flex-1"></div>
       <el-dropdown @command="onExport" size="small">
         <el-button size="small">
-          <el-icon><Download /></el-icon>&nbsp;导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          <el-icon><Download /></el-icon>&nbsp;{{ t('capture.export') }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="har">HAR 格式</el-dropdown-item>
-            <el-dropdown-item command="json">JSON 格式</el-dropdown-item>
-            <el-dropdown-item command="csv">CSV 格式（Excel 友好）</el-dropdown-item>
-            <el-dropdown-item command="python-requests">Python 脚本</el-dropdown-item>
-            <el-dropdown-item command="postman">Postman Collection</el-dropdown-item>
-            <el-dropdown-item command="curl">cURL 脚本</el-dropdown-item>
+            <el-dropdown-item command="har">{{ t('capture.exportHarFormat') }}</el-dropdown-item>
+            <el-dropdown-item command="json">{{ t('capture.exportJsonFormat') }}</el-dropdown-item>
+            <el-dropdown-item command="csv">{{ t('capture.exportCsvFormat') }}</el-dropdown-item>
+            <el-dropdown-item command="python-requests">{{ t('capture.exportPythonScript') }}</el-dropdown-item>
+            <el-dropdown-item command="postman">{{ t('capture.exportPostman') }}</el-dropdown-item>
+            <el-dropdown-item command="curl">{{ t('capture.exportCurlScript') }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
