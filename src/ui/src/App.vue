@@ -441,7 +441,11 @@ function onSystemCmd(cmd: string) {
     <div class="main flex-1 flex flex-col">
       <CertBanner />
       <div class="content flex-1 overflow-hidden">
-        <router-view />
+        <router-view v-slot="{ Component, route }">
+          <keep-alive :include="['CaptureView', 'AnalyzeView', 'AutoReplyView', 'SearchView', 'ToolsView']">
+            <component :is="Component" :key="route.path" />
+          </keep-alive>
+        </router-view>
       </div>
       <!-- WinDivert 风险提示全局对话框（首次启用相关功能时弹出） -->
       <WinDivertWarningDialog />

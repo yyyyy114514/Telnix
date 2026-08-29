@@ -67,6 +67,9 @@ const compareFlowA = ref<Flow | null>(null)
 const compareFlowB = ref<Flow | null>(null)
 const compareMode = ref(false) // 对比模式：第一个选中为 A，等待第二个为 B
 
+// 扩展工具栏展开状态（默认收起）
+const extraBarExpanded = ref(false)
+
 // 预览相关
 const previewVisible = ref(false)
 const previewFlow = ref<Flow | null>(null)
@@ -74,6 +77,9 @@ const previewPosition = ref({ x: 0, y: 0 })
 
 // 标记相关的子菜单
 const showTagSubmenu = ref(false)
+
+// body ref for virtual scroll
+const bodyRef = ref<HTMLElement | null>(null)
 
 // ---------- 多选模式 ----------
 const multiSelectMode = ref(false)
@@ -1440,50 +1446,9 @@ function handleRowClick(f: any) {
 }
 
 // 行 hover 事件（懒加载预览）
-function onRowMouseEnter(e: MouseEvent, f: any) {
-  if (multiSelectMode.value || compareMode.value) return
-  // 延迟 500ms 后显示预览，避免快速划过时闪烁
-  if (previewTimer) clearTimeout(previewTimer)
-  previewTimer = setTimeout(() => {
-    previewFlow.value = f
-    // 计算预览位置：在鼠标附近
-    const rect = (e.target as HTMLElement).getBoundingClientRect()
-    let x = rect.right + 10
-    let y = rect.top
-    // 边界检查
-    if (x + 560 > window.innerWidth) {
-      x = rect.left - 570
-    }
-    if (y + 400 > window.innerHeight) {
-      y = window.innerHeight - 410
-    }
-    previewPosition.value = { x, y }
-    previewVisible.value = true
-  }, 500)
-}
-
-function onRowMouseLeave() {
-  if (previewTimer) {
-    clearTimeout(previewTimer)
-    previewTimer = null
-  }
-  // 延迟隐藏，让鼠标有移动到预览区域的时间
-  setTimeout(() => {
-    previewVisible.value = false
-  }, 200)
-}
-
-// 书签跳转
-function jumpToBookmark(bookmark: any) {
-  store.select(bookmark.flow_id)
-  // 滚动到该行
-  nextTick(() => {
-    const el = document.querySelector(`[data-flow-id="${bookmark.flow_id}"]`)
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
-  })
-}
+let previewTimer: number | null = null
+const hoveredFlow = ref<Flow | null>(null)
+const hoveredRow = ref<HTMLElement | null>(null)
 
 // 对比模式
 function toggleCompareMode() {
@@ -1564,10 +1529,6 @@ function swapCompareAB() {
 
 // ---------- 预览系统 ----------
 // hover 预览（防抖）
-let previewTimer: number | null = null
-const hoveredFlow = ref<Flow | null>(null)
-const hoveredRow = ref<HTMLElement | null>(null)
-
 function onRowMouseEnter(e: MouseEvent, flow: any) {
   if (multiSelectMode.value || compareMode.value) return
   hoveredFlow.value = flow
@@ -1593,12 +1554,23 @@ function onRowMouseLeave() {
 function showPreview() {
   if (!hoveredFlow.value || !hoveredRow.value) return
   const rect = hoveredRow.value.getBoundingClientRect()
-  // 预览显示在行右侧
-  previewPosition.value = {
-    x: Math.min(rect.right + 10, window.innerWidth - 620),
-    y: Math.max(rect.top - 50, 10),
+  // 检查 rect 有效性（虚拟滚动场景下 hoveredRow 可能已被回收）
+  if (!rect || rect.width === 0 || rect.height === 0) {
+    previewVisible.value = false
+    return
   }
+  // 预览框尺寸（CSS 中定义）
+  const PREVIEW_WIDTH = 570   // 560 + 10px padding
+  const PREVIEW_HEIGHT = 460  // 400 + header + footer + padding
+  // 水平位置：行右侧 + 10px，但不能超出右边界
+  const x = Math.min(rect.right + 10, window.innerWidth - PREVIEW_WIDTH)
+  // 垂直位置：行上方 - 50px，但不能低于顶部或超出底部
+  const y = Math.min(
+    Math.max(rect.top - 50, 10),
+    window.innerHeight - PREVIEW_HEIGHT - 10
+  )
   previewFlow.value = hoveredFlow.value
+  previewPosition.value = { x, y }
   previewVisible.value = true
 }
 
@@ -1619,8 +1591,8 @@ function removeBookmark(flowId: number) {
 }
 
 // 跳转到书签
-function jumpToBookmark(flowId: number) {
-  store.select(flowId)
+function jumpToBookmark(bookmark: { flow_id: number }) {
+  store.select(bookmark.flow_id)
   closeBookmarkManager()
 }
 
@@ -1674,93 +1646,6 @@ onMounted(() => {
   <div class="flow-list full flex flex-col" @click="closeCtxMenu">
     <!-- 筛选栏（精简：筛选按钮 + 忽略 + 专注 + 自动滚动 + 多选） -->
     <div class="filter-bar">
-      <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
-        <el-icon><Filter /></el-icon>&nbsp;{{ t('flowList.filterBtn') }}
-        <span v-if="hasActiveFilters" class="filter-badge"></span>
-      </el-button>
-      <!-- 标记筛选下拉 -->
-      <el-dropdown size="small" @command="onTagFilterChange">
-        <el-button size="small" :type="activeTagFilter ? 'primary' : 'default'">
-          <el-icon><PriceTag /></el-icon>&nbsp;{{ t('flowTag.filterByTag') }}
-          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="">{{ t('flowTag.allFlows') }}</el-dropdown-item>
-            <el-dropdown-item command="unmarked">{{ t('flowTag.unmarked') }}</el-dropdown-item>
-            <el-dropdown-item divided>
-              <el-dropdown trigger="click" @command="onTagFilterChange">
-                <span>{{ t('flowTag.byTag') }}&nbsp;<el-icon class="el-icon--right"><ArrowRight /></el-icon></span>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item v-for="tag in tagStore.tags" :key="tag.id" :command="tag.id">
-                      <span class="tag-dot-inline" :style="{ background: tag.color }"></span>
-                      {{ tag.name }}
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <!-- 书签下拉 -->
-      <el-dropdown size="small" @command="onBookmarkSelect">
-        <el-button size="small">
-          <el-icon><Star /></el-icon>&nbsp;{{ t('flowBookmark.bookmarks') }}
-          <el-badge v-if="bookmarkStore.bookmarkCount > 0" :value="bookmarkStore.bookmarkCount" :max="99" />
-          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item v-for="group in bookmarkStore.groups" :key="group.id">
-              <el-dropdown trigger="click">
-                <span>
-                  <span class="group-color-dot" :style="{ background: group.color }"></span>
-                  {{ group.name }} ({{ bookmarkStore.getGroupBookmarks(group.id).length }})
-                  <el-icon class="el-icon--right"><ArrowRight /></el-icon>
-                </span>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item
-                      v-for="bookmark in bookmarkStore.getGroupBookmarks(group.id)"
-                      :key="bookmark.id"
-                      @click="jumpToBookmark(bookmark)"
-                    >
-                      {{ bookmark.name }}
-                    </el-dropdown-item>
-                    <el-dropdown-item v-if="bookmarkStore.getGroupBookmarks(group.id).length === 0">
-                      <span class="text-muted">{{ t('flowBookmark.noBookmarks') }}</span>
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </el-dropdown-item>
-            <el-dropdown-item divided @click="showBookmarkManager = true">
-              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowBookmark.manage') }}
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <!-- 对比模式 -->
-      <el-button
-        v-if="actionsRight"
-        size="small"
-        :type="compareMode.value ? 'primary' : 'default'"
-        :disabled="compareMode.value ? false : selectedFlowIds.size < 2"
-        @click="toggleCompareMode"
-      >
-        <el-icon><Histogram /></el-icon>&nbsp;{{ t('compare.compareMode') }}
-        <el-badge v-if="compareMode.value" :value="selectedFlowIds.size" />
-      </el-button>
-      <el-button
-        v-if="actionsRight"
-        size="small"
-        :disabled="selectedFlowIds.size < 2"
-        @click="openCompareDialog"
-      >
-        <el-icon><Connection /></el-icon>&nbsp;{{ t('compare.compareSelected') }}
-      </el-button>
       <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
         <el-icon><Filter /></el-icon>&nbsp;{{ t('flowList.filterBtn') }}
         <span v-if="hasActiveFilters" class="filter-badge"></span>
@@ -1820,61 +1705,110 @@ onMounted(() => {
           <span v-if="focusEnabled" class="filter-badge"></span>
         </el-button>
       </el-tooltip>
-      <!-- 标记筛选 -->
-      <el-dropdown size="small" @command="onTagFilterChange">
-        <el-button size="small" :type="activeTagFilter ? 'warning' : 'default'">
-          <el-icon><PriceTag /></el-icon>&nbsp;{{ t('flowTag.title') }}
-          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="">
-              {{ t('flowTag.allTags') }}
-            </el-dropdown-item>
-            <el-dropdown-item
-              v-for="tag in tagStore.tags"
-              :key="tag.id"
-              :command="tag.id"
-            >
-              <span class="tag-dot-inline" :style="{ background: tag.color }"></span>
-              {{ tag.name }}
-            </el-dropdown-item>
-            <el-dropdown-item command="__manage__" divided>
-              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowTag.manageTags') }}
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <!-- 书签筛选 -->
-      <el-dropdown size="small" @command="onBookmarkFilterChange">
-        <el-button size="small" :type="activeBookmarkFilter ? 'warning' : 'default'">
-          <el-icon><Star /></el-icon>&nbsp;{{ t('flowBookmark.title') }}
-          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="">
-              {{ t('flowBookmark.allBookmarks') }}
-            </el-dropdown-item>
-            <el-dropdown-item
-              v-for="group in bookmarkStore.groups"
-              :key="group.id"
-              :command="'group:' + group.id"
-            >
-              {{ group.name }}
-            </el-dropdown-item>
-            <el-dropdown-item command="__manage__" divided>
-              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowBookmark.manageBookmarks') }}
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <!-- 对比按钮 -->
-      <el-tooltip :content="t('compare.title')" placement="bottom">
-        <el-button size="small" :type="compareMode ? 'primary' : 'default'" @click="toggleCompareMode">
-          <el-icon><Operation /></el-icon>
+      <!-- 扩展工具栏展开按钮 -->
+      <el-tooltip :content="extraBarExpanded ? t('flowList.collapseExtraBar') : t('flowList.expandExtraBar')" placement="bottom">
+        <el-button size="small" circle @click="extraBarExpanded = !extraBarExpanded">
+          <el-icon>
+            <ArrowDown v-if="!extraBarExpanded" />
+            <ArrowUp v-else />
+          </el-icon>
         </el-button>
       </el-tooltip>
+    </div>
+    <!-- 扩展工具栏（更多工具展开后的第二行） -->
+    <transition name="el-fade-in">
+      <div v-if="extraBarExpanded" class="extra-toolbar-row">
+        <!-- 对比模式 -->
+        <el-button
+          size="small"
+          :type="compareMode ? 'primary' : 'default'"
+          :disabled="compareMode ? false : selectedFlowIds.size < 2"
+          @click="toggleCompareMode"
+        >
+          <el-icon><Histogram /></el-icon>&nbsp;{{ t('compare.compareMode') }}
+          <el-badge v-if="compareMode" :value="selectedFlowIds.size" />
+        </el-button>
+        <el-button
+          size="small"
+          :disabled="selectedFlowIds.size < 2"
+          @click="showCompareDialog = true"
+        >
+          <el-icon><Connection /></el-icon>&nbsp;{{ t('compare.compareSelected') }}
+        </el-button>
+        <!-- 标记筛选 -->
+        <el-dropdown size="small" @command="onTagFilterChange">
+          <el-button size="small" :type="activeTagFilter ? 'warning' : 'default'">
+            <el-icon><PriceTag /></el-icon>&nbsp;{{ t('flowTag.filterByTag') }}
+            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="">{{ t('flowTag.allFlows') }}</el-dropdown-item>
+              <el-dropdown-item command="unmarked">{{ t('flowTag.unmarked') }}</el-dropdown-item>
+              <el-dropdown-item divided>
+                <el-dropdown trigger="click" @command="onTagFilterChange">
+                  <span>{{ t('flowTag.byTag') }}&nbsp;<el-icon class="el-icon--right"><ArrowRight /></el-icon></span>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-for="tag in tagStore.tags" :key="tag.id" :command="tag.id">
+                        <span class="tag-dot-inline" :style="{ background: tag.color }"></span>
+                        {{ tag.name }}
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <!-- 书签列表 -->
+        <el-dropdown size="small">
+          <el-button size="small">
+            <el-icon><Star /></el-icon>&nbsp;{{ t('flowBookmark.bookmarks') }}
+            <el-badge v-if="bookmarkStore.bookmarkCount > 0" :value="bookmarkStore.bookmarkCount" :max="99" />
+            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="group in bookmarkStore.groups" :key="group.id">
+                <el-dropdown trigger="click">
+                  <span>
+                    <span class="group-color-dot" :style="{ background: group.color }"></span>
+                    {{ group.name }} ({{ bookmarkStore.getGroupBookmarks(group.id).length }})
+                    <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+                  </span>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item
+                        v-for="bookmark in bookmarkStore.getGroupBookmarks(group.id)"
+                        :key="bookmark.id"
+                        @click="jumpToBookmark(bookmark)"
+                      >
+                        {{ bookmark.name }}
+                      </el-dropdown-item>
+                      <el-dropdown-item v-if="bookmarkStore.getGroupBookmarks(group.id).length === 0">
+                        <span class="text-muted">{{ t('flowBookmark.noBookmarks') }}</span>
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </el-dropdown-item>
+              <el-dropdown-item divided @click="showBookmarkManager = true">
+                <el-icon><Setting /></el-icon>&nbsp;{{ t('flowBookmark.manage') }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <!-- 对比按钮 -->
+        <el-tooltip :content="t('compare.title')" placement="bottom">
+          <el-button size="small" :type="compareMode ? 'primary' : 'default'" @click="toggleCompareMode">
+            <el-icon><Operation /></el-icon>
+          </el-button>
+        </el-tooltip>
+      </div>
+    </transition>
+    <!-- 主工具栏第二部分（筛选栏关闭后继续） -->
+    <div class="filter-bar" style="border-top: none; padding-top: 0;">
       <div v-if="actionsRight" class="flex-1"></div>
       <el-tooltip :content="store.autoScroll ? (store.autoScrollPaused ? t('flowList.autoScrollPausedHint', { n: store.autoScrollDelay }) : t('flowList.autoScrollOnHint')) : t('flowList.autoScrollOffHint')" placement="bottom">
         <el-button size="small" :type="store.autoScroll ? (store.autoScrollPaused ? 'warning' : 'primary') : 'default'" circle @click="store.autoScroll = !store.autoScroll">
@@ -2426,6 +2360,16 @@ onMounted(() => {
 <style scoped>
 .flow-list { background: var(--on-bg-elevated); position: relative; }
 
+/* 扩展工具栏 */
+/* 扩展工具栏（更多工具展开后的第二行工具栏） */
+.extra-toolbar-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
 /* 多选悬浮工具栏 */
 .multi-float-bar {
   position: absolute;
@@ -2472,6 +2416,15 @@ onMounted(() => {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-bottom: 1px solid var(--on-border-light);
   background: var(--on-bg-elevated);
+  flex-wrap: wrap;
+}
+/* 扩展工具栏（更多工具展开后的第二行工具栏） */
+.extra-toolbar-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
 }
 /* Flowfilter DSL 输入框 */
 .dsl-input {

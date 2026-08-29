@@ -13,11 +13,6 @@ export default {
     copyFailed: 'Copy failed',
     copied: 'Copied',
     export: 'Export',
-    failed: 'Failed',
-    copy: 'Copy',
-    copied: 'Copied',
-    copyFailed: 'Copy failed',
-    export: 'Export',
     import: 'Import',
     clear: 'Clear',
     search: 'Search',
@@ -57,6 +52,7 @@ export default {
     copySuccess: 'Copied to clipboard',
     noData: 'No data',
     back: 'Back',
+    ms: 'ms',
   },
   nav: {
     capture: 'Capture',
@@ -178,6 +174,13 @@ export default {
     triggerSave: 'Save Condition',
     triggerClear: 'Clear Condition',
     triggerReset: 'Reset Trigger',
+    filterOp: {
+      contains: 'Contains',
+      equals: 'Equals',
+      startsWith: 'Starts with',
+      regex: 'Regex',
+    },
+    addCondition: 'Add Condition',
   },
   analyze: {
     statsLoadFailed: 'Stats load failed: ',
@@ -776,9 +779,21 @@ export default {
     historyApplied: 'Search conditions applied from history',
     historyCleared: 'Search history cleared',
     clearHistory: 'Clear All',
+    // Search History Prefix Labels
+    prefixRegex: 'Regex:',
+    prefixHex: 'Hex:',
+    prefixHost: 'Host:',
+    prefixMethod: 'Method:',
+    prefixStatus: 'Status:',
+    prefixStatusRange: 'Status',
+    prefixProcess: 'Process:',
+    prefixHeader: 'Header:',
+    prefixPid: 'PID:',
+    emptyCondition: '(Empty)',
     // Regex Templates
     regexTemplates: 'Common Regex Templates',
     invalidRegex: 'Invalid regex expression: {field}',
+    invalidRegexSimple: 'Invalid regex expression',
     bodyRegex: 'Body Regex',
     headerRegexLabel: 'Header Regex',
     // Match Highlight
@@ -1320,6 +1335,8 @@ export default {
     autoSwitchTabHint: 'Auto switch to preview tab when selecting a flow',
     multiSelectBarDelay: 'Multi-select Bar Delay',
     multiSelectDelayHint: 'Delay for multi-select toolbar to reappear after scroll stops (seconds)',
+    triggerCaptureEnabled: 'Trigger Capture',
+    triggerCaptureEnabledHint: 'Capture flows based on trigger conditions',
     transparentProxy: 'Transparent Proxy',
     transparentProxyMode: 'Transparent Proxy Mode',
     transparentStarted: 'Transparent proxy started',
@@ -1766,6 +1783,8 @@ export default {
     delayResponsePhase: 'Response Phase Delay',
     addToMock: 'Add to Mock',
     addToRecording: 'Add to Recording',
+    expandExtraBar: 'Expand more tools',
+    collapseExtraBar: 'Collapse more tools',
   },
   breakpointBar: {
     label: 'Breakpoint: ',
@@ -2130,6 +2149,8 @@ export default {
     noDiff: 'Identical',
     diff: 'Different',
     same: 'Same',
+    compareMode: 'Compare Mode',
+    compareSelected: 'Compare Selected',
   },
 
   // Flow Tag System
@@ -2686,6 +2707,12 @@ export default {
     condValue: 'Condition Value',
     multiMatchEmpty: 'No multi-match rules yet, click "New Rule" to create',
     multiMatchNamePlaceholder: 'Rule name',
+    // Template variable types
+    varTypeString: 'String',
+    varTypeNumber: 'Number',
+    varTypeBoolean: 'Boolean',
+    varTypeJson: 'JSON',
+    varTypeRegex: 'Regex',
   },
 
   // 工作流
@@ -2755,6 +2782,47 @@ export default {
     actionCopy: 'Copy',
     actionBatchReplay: 'Batch Replay',
     actionUnknown: 'Unknown',
+    // 预设模板名称和描述
+    templateNames: {
+      batchReplay: 'Batch Replay',
+      batchTag: 'Batch Tag',
+      exportHar: 'Batch Export HAR',
+      delayTest: 'Delay Test',
+      batchDelete: 'Batch Delete',
+    },
+    templateDescriptions: {
+      batchReplay: 'Replay selected flows',
+      batchTag: 'Add tag to selected flows',
+      exportHar: 'Export selected flows as HAR format',
+      delayTest: 'Add delay then replay flows',
+      batchDelete: 'Delete selected flows',
+    },
+    // 副本后缀
+    copySuffix: '(Copy)',
+    // 日志消息
+    log: {
+      replaySuccess: 'Replay success',
+      replayFailed: 'Replay failed: {error}',
+      delayComplete: 'Delay {delayMs}ms complete',
+      waitComplete: 'Wait {waitMs}ms complete',
+      tagged: 'Tagged: {tag}',
+      tagFailed: 'Tag failed: {error}',
+      exportSuccess: 'Export success: {format}',
+      exportFailed: 'Export failed: {error}',
+      deleted: 'Deleted',
+      deleteFailed: 'Delete failed: {error}',
+      modified: 'Modified',
+      modifyFailed: 'Modify failed: {error}',
+      copied: 'Copied',
+      copyFailed: 'Copy failed: {error}',
+      stepError: 'Step execution error: {error}',
+      flowReplayed: 'Flow #{flowId} replay success',
+      flowReplayFailed: 'Flow #{flowId} replay failed: {error}',
+      flowTagged: 'Flow #{flowId} tagged: {tag}',
+      flowTagFailed: 'Flow #{flowId} tag failed: {error}',
+      flowDeleted: 'Flow #{flowId} deleted',
+      flowDeleteFailed: 'Flow #{flowId} delete failed: {error}',
+    },
     // 导入导出
     import: 'Import',
     importWorkflow: 'Import Workflow',

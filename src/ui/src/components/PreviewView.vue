@@ -44,6 +44,7 @@ const textBody = computed(() => (isBase64.value ? '' : props.body || ''))
 
 // 构造 data URL（用于图片/PDF/视频/音频）
 // 性能优化：props.body 本身就是 base64:xxx，直接拼接，跳过 atob+btoa 重复编解码
+// 修复：使用完整的 MIME 类型（parsed.value.main 已是完整类型，如 image/png）
 const dataUrl = computed(() => {
   if (!isBase64.value) return ''
   let b64 = props.body.slice(7)
@@ -51,6 +52,7 @@ const dataUrl = computed(() => {
   // base64 字符集：A-Z a-z 0-9 + / = ，遇到非 base64 字符截断
   const match = b64.match(/^[A-Za-z0-9+/=]+/)
   if (match) b64 = match[0]
+  // parsed.value.main 已经是完整类型（image/png），直接使用
   return `data:${parsed.value.main};base64,${b64}`
 })
 

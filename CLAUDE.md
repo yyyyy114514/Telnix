@@ -25,6 +25,16 @@ cd src/host
 python -m telnix --no-browser
 ```
 
+### 前端开发
+
+```bash
+cd src/ui
+npm run dev          # 开发调试（热更新）
+npm run typecheck    # 类型检查
+npm run build        # 构建（不含类型检查）
+npm run build:strict # 类型检查 + 构建
+```
+
 ### Agent CLI
 
 ```bash

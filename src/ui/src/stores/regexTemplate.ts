@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import i18n from '../i18n'
 
 // 正则表达式模板
 export interface RegexTemplate {
@@ -132,7 +133,7 @@ export function useRegexTemplate() {
       new RegExp(pattern)
       return { valid: true }
     } catch (e: any) {
-      return { valid: false, error: e.message || '无效的正则表达式' }
+      return { valid: false, error: e.message || i18n.global.t('search.invalidRegexSimple') }
     }
   }
 

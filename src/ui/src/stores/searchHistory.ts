@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
+import i18n from '../i18n'
 
 // 搜索历史记录数据结构
 export interface SearchHistoryItem {
@@ -85,24 +86,25 @@ export const useSearchHistoryStore = defineStore('searchHistory', () => {
     filterHeaderRegex?: string
   }): string {
     // 生成显示文本
+    const t = i18n.global.t.bind(i18n.global)
     const parts: string[] = []
-    if (params.bodyRegex) parts.push(`正则: ${params.bodyRegex}`)
-    if (params.binaryHex) parts.push(`Hex: ${params.binaryHex}`)
-    if (params.filterHost) parts.push(`Host: ${params.filterHost}`)
-    if (params.filterMethod) parts.push(`Method: ${params.filterMethod}`)
+    if (params.bodyRegex) parts.push(`${t('search.prefixRegex')} ${params.bodyRegex}`)
+    if (params.binaryHex) parts.push(`${t('search.prefixHex')} ${params.binaryHex}`)
+    if (params.filterHost) parts.push(`${t('search.prefixHost')} ${params.filterHost}`)
+    if (params.filterMethod) parts.push(`${t('search.prefixMethod')} ${params.filterMethod}`)
     if (params.filterStatusCode !== undefined && params.filterStatusCode !== null) {
-      parts.push(`Status: ${params.filterStatusCode}`)
+      parts.push(`${t('search.prefixStatus')} ${params.filterStatusCode}`)
     }
     if (params.filterStatusMin !== undefined && params.filterStatusMin !== null) {
-      parts.push(`Status ${params.filterStatusMin}-${params.filterStatusMax ?? ''}`)
+      parts.push(`${t('search.prefixStatusRange')} ${params.filterStatusMin}-${params.filterStatusMax ?? ''}`)
     }
-    if (params.filterProcess) parts.push(`Process: ${params.filterProcess}`)
-    if (params.filterHeaderRegex) parts.push(`Header: ${params.filterHeaderRegex}`)
+    if (params.filterProcess) parts.push(`${t('search.prefixProcess')} ${params.filterProcess}`)
+    if (params.filterHeaderRegex) parts.push(`${t('search.prefixHeader')} ${params.filterHeaderRegex}`)
     if (params.filterPid !== undefined && params.filterPid !== null) {
-      parts.push(`PID: ${params.filterPid}`)
+      parts.push(`${t('search.prefixPid')} ${params.filterPid}`)
     }
 
-    const displayText = parts.length > 0 ? parts.join(' | ') : '(空条件)'
+    const displayText = parts.length > 0 ? parts.join(' | ') : t('search.emptyCondition')
 
     // 检查是否与最近一条完全相同（避免重复）
     if (history.value.length > 0) {

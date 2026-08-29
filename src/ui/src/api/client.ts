@@ -121,6 +121,26 @@ export interface MockRule {
   template_variables?: TemplateVariable[]
 }
 
+/** Mock 日志条目 */
+export interface MockLog {
+  id: number
+  timestamp: string
+  matched_rule_id: string | null
+  method: string
+  path: string
+  status_code: number
+  response_time_ms: number
+  request_body_size: number
+  response_body_size: number
+}
+
+/** Mock 服务状态 */
+export interface MockStatus {
+  running: boolean
+  port: number
+  request_count: number
+}
+
 /** 录制脚本变量 */
 export interface RecordScriptVariables {
   script_id: string
@@ -680,7 +700,7 @@ export interface CookieItem {
   samesite: string
   host: string
   /** 来源：set-cookie（服务端设置，带属性） / request-cookie（客户端发送） */
-  source: string
+  source: 'set-cookie' | 'request-cookie'
   flow_id: number
   last_seen: string
 }
@@ -836,7 +856,7 @@ async function _handleWindivertAck(resp: AxiosResponse, msg: string): Promise<an
   // 弹全局对话框，等待用户响应
   const accepted = await waitForWindivertAck(fullMsg, briefMsg)
   if (!accepted) {
-    return Promise.reject(new Error('用户取消了 WinDivert 风险提示确认'))
+    return Promise.reject(new Error(i18n.global.t('api.userCancelledWindivertAck')))
   }
   // 用户确认：调 ack API 持久化（永久不再提示）
   try {

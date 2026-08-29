@@ -882,7 +882,7 @@ onUnmounted(() => {
       <el-form label-width="120px" size="default">
         <el-form-item :label="t('record.envName')">
           <el-select v-model="parameterizedForm.environment_id" :placeholder="t('record.selectEnv')" clearable style="width: 100%">
-            <el-option v-for="env in environments" :key="env.id" :label="env.name" :value="env.id" />
+            <el-option v-for="env in environments" :key="env.id" :label="env.name" :value="env.id || ''" />
           </el-select>
         </el-form-item>
         <el-form-item :label="t('record.iterations')">

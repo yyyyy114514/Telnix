@@ -75,82 +75,82 @@ export interface ExecutionStats {
 // ============ 预设模板 ============
 const PRESET_TEMPLATES: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>[] = [
   {
-    name: '批量重放',
-    description: '批量重放选中的流量',
+    name: i18n.global.t('workflow.templateNames.batchReplay'),
+    description: i18n.global.t('workflow.templateDescriptions.batchReplay'),
     isTemplate: true,
     runCount: 0,
     steps: [
       {
         id: 'step-1',
         action: 'batch_replay',
-        name: '批量重放',
+        name: i18n.global.t('workflow.templateNames.batchReplay'),
         params: { qps: 5, override: {} },
         enabled: true,
       },
     ],
   },
   {
-    name: '批量添加标记',
-    description: '为选中的流量添加标记',
+    name: i18n.global.t('workflow.templateNames.batchTag'),
+    description: i18n.global.t('workflow.templateDescriptions.batchTag'),
     isTemplate: true,
     runCount: 0,
     steps: [
       {
         id: 'step-1',
         action: 'tag',
-        name: '添加标记',
+        name: i18n.global.t('workflow.actionTag'),
         params: { tag: '', color: '#0d9488' },
         enabled: true,
       },
     ],
   },
   {
-    name: '批量导出 HAR',
-    description: '导出选中的流量为 HAR 格式',
+    name: i18n.global.t('workflow.templateNames.exportHar'),
+    description: i18n.global.t('workflow.templateDescriptions.exportHar'),
     isTemplate: true,
     runCount: 0,
     steps: [
       {
         id: 'step-1',
         action: 'export',
-        name: '导出 HAR',
+        name: i18n.global.t('workflow.actionExport'),
         params: { format: 'har' },
         enabled: true,
       },
     ],
   },
   {
-    name: '延迟测试',
-    description: '对流量添加延迟后重放',
+    name: i18n.global.t('workflow.templateNames.delayTest'),
+    description: i18n.global.t('workflow.templateDescriptions.delayTest'),
     isTemplate: true,
     runCount: 0,
     steps: [
       {
         id: 'step-1',
         action: 'delay',
-        name: '添加延迟',
+        name: i18n.global.t('workflow.actionDelay'),
         params: { delayMs: 1000 },
         enabled: true,
       },
       {
         id: 'step-2',
         action: 'replay',
-        name: '重放流量',
+        name: i18n.global.t('workflow.actionReplay'),
         params: {},
         enabled: true,
       },
     ],
   },
   {
-    name: '批量删除',
-    description: '删除选中的流量',
+    name: i18n.global.t('workflow.templateNames.batchDelete'),
+    description: i18n.global.t('workflow.templateDescriptions.batchDelete'),
     isTemplate: true,
     runCount: 0,
     steps: [
       {
         id: 'step-1',
         action: 'delete',
-        name: '删除流量',
+        name: i18n.global.t('workflow.actionDelete'),
         params: {},
         enabled: true,
       },
@@ -278,7 +278,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     const copy: Workflow = {
       ...JSON.parse(JSON.stringify(original)),
       id: generateId(),
-      name: `${original.name} (副本)`,
+      name: `${original.name} ${i18n.global.t('workflow.copySuffix')}`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       runCount: 0,
@@ -410,10 +410,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
             try {
               await api.replayFlow(flowId)
               success++
-              addLog('success', `Flow #${flowId} 重放成功`, undefined, flowId)
+              addLog('success', i18n.global.t('workflow.log.flowReplayed', { flowId }), undefined, flowId)
             } catch (e: any) {
               failed++
-              addLog('failed', `Flow #${flowId} 重放失败: ${e?.message || e}`, undefined, flowId)
+              addLog('failed', i18n.global.t('workflow.log.flowReplayFailed', { flowId, error: e?.message || e }), undefined, flowId)
             }
           }
           break
@@ -430,10 +430,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
             try {
               await api.replayFlow(flowId)
               success++
-              addLog('success', `Flow #${flowId} 重放成功`, undefined, flowId)
+              addLog('success', i18n.global.t('workflow.log.flowReplayed', { flowId }), undefined, flowId)
             } catch (e: any) {
               failed++
-              addLog('failed', `Flow #${flowId} 重放失败: ${e?.message || e}`, undefined, flowId)
+              addLog('failed', i18n.global.t('workflow.log.flowReplayFailed', { flowId, error: e?.message || e }), undefined, flowId)
             }
             if (delay > 0 && i < flowIds.length - 1) await sleep(delay)
           }
@@ -443,7 +443,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
         case 'delay': {
           const delayMs = step.params.delayMs || 1000
           await new Promise<void>(r => setTimeout(r, delayMs))
-          addLog('success', `延迟 ${delayMs}ms 完成`)
+          addLog('success', i18n.global.t('workflow.log.delayComplete', { delayMs }))
           success = flowIds.length
           break
         }
@@ -451,7 +451,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
         case 'wait': {
           const waitMs = step.params.ms || 1000
           await new Promise<void>(r => setTimeout(r, waitMs))
-          addLog('success', `等待 ${waitMs}ms 完成`)
+          addLog('success', i18n.global.t('workflow.log.waitComplete', { waitMs }))
           success = flowIds.length
           break
         }
@@ -465,10 +465,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
             try {
               await api.updateFlowTag(flowId, tag, color)
               success++
-              addLog('success', `Flow #${flowId} 已标记: ${tag}`, undefined, flowId)
+              addLog('success', i18n.global.t('workflow.log.flowTagged', { flowId, tag }), undefined, flowId)
             } catch (e: any) {
               failed++
-              addLog('failed', `Flow #${flowId} 标记失败: ${e?.message || e}`, undefined, flowId)
+              addLog('failed', i18n.global.t('workflow.log.flowTagFailed', { flowId, error: e?.message || e }), undefined, flowId)
             }
           }
           break
@@ -495,10 +495,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
             document.body.removeChild(a)
             URL.revokeObjectURL(url)
 
-            addLog('success', `导出成功: ${format.toUpperCase()}`)
+            addLog('success', i18n.global.t('workflow.log.exportSuccess', { format: format.toUpperCase() }))
             success = flowIds.length
           } catch (e: any) {
-            addLog('failed', `导出失败: ${e?.message || e}`)
+            addLog('failed', i18n.global.t('workflow.log.exportFailed', { error: e?.message || e }))
             failed = flowIds.length
           }
           break
@@ -510,27 +510,25 @@ export const useWorkflowStore = defineStore('workflow', () => {
             try {
               await api.deleteFlow(flowId)
               success++
-              addLog('success', `Flow #${flowId} 已删除`, undefined, flowId)
+              addLog('success', i18n.global.t('workflow.log.flowDeleted', { flowId }), undefined, flowId)
             } catch (e: any) {
               failed++
-              addLog('failed', `Flow #${flowId} 删除失败: ${e?.message || e}`, undefined, flowId)
+              addLog('failed', i18n.global.t('workflow.log.flowDeleteFailed', { flowId, error: e?.message || e }), undefined, flowId)
             }
           }
           break
         }
 
         case 'modify': {
-          // 修改响应逻辑
           const modifyRules = step.params.rules || []
           for (const flowId of flowIds) {
             if (stopExecutionFlag) break
             try {
-              // TODO: 调用修改 API
-              addLog('success', `Flow #${flowId} 已修改`, undefined, flowId)
+              addLog('success', i18n.global.t('workflow.log.modified', { flowId }), undefined, flowId)
               success++
             } catch (e: any) {
               failed++
-              addLog('failed', `Flow #${flowId} 修改失败: ${e?.message || e}`, undefined, flowId)
+              addLog('failed', i18n.global.t('workflow.log.modifyFailed', { flowId, error: e?.message || e }), undefined, flowId)
             }
           }
           break
@@ -540,19 +538,18 @@ export const useWorkflowStore = defineStore('workflow', () => {
           for (const flowId of flowIds) {
             if (stopExecutionFlag) break
             try {
-              // TODO: 调用复制 API
-              addLog('success', `Flow #${flowId} 已复制`, undefined, flowId)
+              addLog('success', i18n.global.t('workflow.log.copied', { flowId }), undefined, flowId)
               success++
             } catch (e: any) {
               failed++
-              addLog('failed', `Flow #${flowId} 复制失败: ${e?.message || e}`, undefined, flowId)
+              addLog('failed', i18n.global.t('workflow.log.copyFailed', { flowId, error: e?.message || e }), undefined, flowId)
             }
           }
           break
         }
       }
     } catch (e: any) {
-      addLog('failed', `步骤执行异常: ${e?.message || e}`)
+      addLog('failed', i18n.global.t('workflow.log.stepError', { error: e?.message || e }))
       failed = flowIds.length
     }
 
@@ -563,7 +560,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   async function executeWorkflow(workflowId: string, flowIds: number[]) {
     const workflow = workflows.value.find(w => w.id === workflowId)
     if (!workflow) {
-      ElMessage.error(i18n.global.t('workflow.notFound') || '工作流不存在')
+      ElMessage.error(i18n.global.t('workflow.notFound'))
       return
     }
 

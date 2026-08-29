@@ -27,6 +27,23 @@ if (-not (Test-Path $webDir) -and -not (Test-Path $uiDist)) {
     Write-Host ""
 }
 
+# ---------- 杀掉所有 Telnix 相关进程 ----------
+Write-Host "[INFO] 正在清理 Telnix 相关进程..." -ForegroundColor Gray
+
+$telnixProcPatterns = @("python%", "node%")
+foreach ($pattern in $telnixProcPatterns) {
+    Get-CimInstance Win32_Process -Filter "Name LIKE '$pattern'" | Where-Object {
+        $cmdline = $_.CommandLine
+        if ([string]::IsNullOrEmpty($cmdline)) { return $false }
+        $cmdline -match "telnix|mcp_server|mitmproxy"
+    } | ForEach-Object {
+        try {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Host "[OK] 已终止进程: $($_.Name) (PID $($_.ProcessId))" -ForegroundColor Gray
+        } catch { }
+    }
+}
+
 # ---------- 关闭残留进程（占用 18901 / 8888 端口）----------
 foreach ($port in @(18901, 8888)) {
     try {
@@ -44,6 +61,9 @@ foreach ($port in @(18901, 8888)) {
         }
     } catch { }
 }
+
+# 等待端口释放
+Start-Sleep -Milliseconds 500
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan

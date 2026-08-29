@@ -14,10 +14,11 @@ import RepeatResultsDialog from '../components/RepeatResultsDialog.vue'
 import ImportButton from '../components/ImportButton.vue'
 import RuleEditor from '../components/RuleEditor.vue'
 import QuickExec from '../components/QuickExec.vue'
-import { useSettingsStore } from '../stores/settings'
+import { useRouter } from 'vue-router'
 
 const capture = useCaptureStore()
 const flows = useFlowsStore()
+const router = useRouter()
 const { t } = useI18n()
 
 const processes = ref<ProcessInfo[]>([])
@@ -898,19 +899,19 @@ function closeSlide() {
                 <el-option label="Process" value="process" />
               </el-select>
               <el-select v-model="cond.op" size="small" style="width: 100px" placeholder="op">
-                <el-option label="包含" value="contains" />
-                <el-option label="等于" value="equals" />
-                <el-option label="开头是" value="startsWith" />
-                <el-option label="正则" value="regex" />
+                <el-option :label="t('capture.filterOp.contains')" value="contains" />
+                <el-option :label="t('capture.filterOp.equals')" value="equals" />
+                <el-option :label="t('capture.filterOp.startsWith')" value="startsWith" />
+                <el-option :label="t('capture.filterOp.regex')" value="regex" />
               </el-select>
-              <el-input v-model="cond.value" size="small" clearable style="flex: 1" placeholder="值" />
+              <el-input v-model="cond.value" size="small" clearable style="flex: 1" :placeholder="t('common.value')" />
               <el-button size="small" text type="danger" style="color: white" @click="removeTriggerCondition(idx)">
                 <el-icon><Close /></el-icon>
               </el-button>
             </div>
           </div>
           <el-button size="small" text type="primary" style="color: white; margin: 4px 0 8px" @click="addTriggerCondition">
-            <el-icon><Plus /></el-icon>&nbsp;添加条件
+            <el-icon><Plus /></el-icon>&nbsp;{{ t('capture.addCondition') }}
           </el-button>
           <div class="trigger-dsl-preview" v-if="triggerConditions.some(c => c.value)">
             <span style="font-size: 11px; color: var(--on-text-muted)">DSL: </span>

@@ -36,6 +36,14 @@ watch(
     bodyStr.value = props.flow.response_body || ''
   }
 )
+// 额外监听 props.flow 的引用变化：确保 flow 对象替换时（而非属性更新时）也能刷新
+watch(
+  () => props.flow,
+  () => {
+    headersStr.value = props.flow.response_headers || ''
+    bodyStr.value = props.flow.response_body || ''
+  }
+)
 
 function onHeaders(v: string) {
   headersStr.value = v

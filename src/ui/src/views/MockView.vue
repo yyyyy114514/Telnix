@@ -667,7 +667,7 @@ onUnmounted(() => {
         <el-table-column :label="t('mock.statusCode')" prop="status_code" width="90" />
         <el-table-column :label="t('mock.contentType')" prop="content_type" width="150" show-overflow-tooltip />
         <el-table-column :label="t('mock.delayMs')" width="90">
-          <template #default="{ row }">{{ row.delay_ms }} ms</template>
+          <template #default="{ row }">{{ row.delay_ms }} {{ t('common.ms') }}</template>
         </el-table-column>
         <el-table-column :label="t('mock.note')" min-width="100">
           <template #default="{ row }">
@@ -876,11 +876,11 @@ onUnmounted(() => {
             <div v-for="(v, idx) in templateForm.variables" :key="idx" class="variable-item">
               <el-input v-model="v.name" :placeholder="t('mock.varName')" style="width: 100px" />
               <el-select v-model="v.type" style="width: 90px">
-                <el-option label="string" value="string" />
-                <el-option label="number" value="number" />
-                <el-option label="boolean" value="boolean" />
-                <el-option label="json" value="json" />
-                <el-option label="regex" value="regex" />
+                <el-option :label="t('mock.varTypeString')" value="string" />
+                <el-option :label="t('mock.varTypeNumber')" value="number" />
+                <el-option :label="t('mock.varTypeBoolean')" value="boolean" />
+                <el-option :label="t('mock.varTypeJson')" value="json" />
+                <el-option :label="t('mock.varTypeRegex')" value="regex" />
               </el-select>
               <el-input v-model="v.default_value" :placeholder="t('mock.varDefault')" style="width: 100px" />
               <el-input v-model="v.extraction_pattern" :placeholder="t('mock.varExtract')" style="width: 120px" />
@@ -955,23 +955,23 @@ onUnmounted(() => {
         <div class="conditions-list">
           <div v-for="(cond, idx) in multiMatchForm.conditions" :key="idx" class="condition-item">
             <el-select v-model="cond.field" style="width: 120px">
-              <el-option label="method" value="method" />
-              <el-option label="path" value="path" />
-              <el-option label="host" value="host" />
-              <el-option label="header" value="header" />
-              <el-option label="body" value="body" />
-              <el-option label="query" value="query" />
-              <el-option label="status" value="status" />
+              <el-option :label="t('mock.condFieldMethod')" value="method" />
+              <el-option :label="t('mock.condFieldPath')" value="path" />
+              <el-option :label="t('mock.condFieldHost')" value="host" />
+              <el-option :label="t('mock.condFieldHeader')" value="header" />
+              <el-option :label="t('mock.condFieldBody')" value="body" />
+              <el-option :label="t('mock.condFieldQuery')" value="query" />
+              <el-option :label="t('mock.condFieldStatus')" value="status" />
             </el-select>
             <el-input v-if="cond.field === 'header'" v-model="cond.header_name" :placeholder="t('mock.headerName')" style="width: 100px" />
             <el-select v-model="cond.operator" style="width: 100px">
-              <el-option label="equals" value="equals" />
-              <el-option label="contains" value="contains" />
-              <el-option label="startsWith" value="startsWith" />
-              <el-option label="endsWith" value="endsWith" />
-              <el-option label="regex" value="regex" />
-              <el-option label="exists" value="exists" />
-              <el-option label="notExists" value="notExists" />
+              <el-option :label="t('mock.condOpEquals')" value="equals" />
+              <el-option :label="t('mock.condOpContains')" value="contains" />
+              <el-option :label="t('mock.condOpStartsWith')" value="startsWith" />
+              <el-option :label="t('mock.condOpEndsWith')" value="endsWith" />
+              <el-option :label="t('mock.condOpRegex')" value="regex" />
+              <el-option :label="t('mock.condOpExists')" value="exists" />
+              <el-option :label="t('mock.condOpNotExists')" value="notExists" />
             </el-select>
             <el-input v-if="!['exists', 'notExists'].includes(cond.operator)" v-model="cond.value" :placeholder="t('mock.condValue')" style="flex: 1" />
             <el-button link type="danger" size="small" @click="removeMultiMatchCondition(idx)">{{ t('mock.delete') }}</el-button>

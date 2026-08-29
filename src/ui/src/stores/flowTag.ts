@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import i18n from '../i18n'
 
 export interface FlowTag {
   id: string
@@ -55,9 +56,9 @@ export const useFlowTagStore = defineStore('flowTag', () => {
       } else {
         // 默认标记
         tags.value = [
-          { id: 'important', name: '重要', color: '#f43f5e', created_at: new Date().toISOString() },
-          { id: 'reviewed', name: '已审查', color: '#22c55e', created_at: new Date().toISOString() },
-          { id: 'bug', name: 'Bug', color: '#f97316', created_at: new Date().toISOString() },
+          { id: 'important', name: i18n.global.t('flowTag.importantTagName'), color: '#f43f5e', created_at: new Date().toISOString() },
+          { id: 'reviewed', name: i18n.global.t('flowTag.reviewedTagName'), color: '#22c55e', created_at: new Date().toISOString() },
+          { id: 'bug', name: i18n.global.t('flowTag.bugTagName'), color: '#f97316', created_at: new Date().toISOString() },
         ]
       }
       const savedRules = localStorage.getItem(AUTO_RULES_KEY)

@@ -119,7 +119,6 @@ async function startHijack() {
     // 从分组规则生成劫持规则
     await api.applyDnsGroupRules()
     ElMessage.success(t('dns.started'))
-    await refresh({ syncRules: true })
   } catch (e: any) {
     ElMessage.error(t('dns.startFailed', { msg: e?.message || String(e) }))
   } finally {

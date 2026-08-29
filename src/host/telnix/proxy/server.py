@@ -570,7 +570,7 @@ def _is_streaming_content(headers: Headers, status_code: int) -> bool:
     - Content-Type 为 video/ audio/ application/octet-stream
       application/vnd.apple.mpegurl application/x-mpegURL
     - Transfer-Encoding 为 chunked 且无 Content-Length
-    - 存在 Accept-Ranges 头（支持 Range 请求，通常是可拖动的媒体）
+    - Content-Type 为流式媒体且存在 Accept-Ranges 头（支持 Range 请求的可拖动媒体）
     """
     # HEAD/204/304/1xx 无 body，无需流式
     if status_code is not None and (
@@ -582,7 +582,9 @@ def _is_streaming_content(headers: Headers, status_code: int) -> bool:
     te = (headers.get("Transfer-Encoding") or "").lower()
     if "chunked" in te and headers.get("Content-Length") is None:
         return True
-    if headers.has("Accept-Ranges"):
+    # Accept-Ranges 需结合 Content-Type 判断，否则普通响应（带 Accept-Ranges: bytes）
+    # 也会被误判为流式，导致 body 无法记录
+    if headers.has("Accept-Ranges") and ct.startswith(_STREAMING_CONTENT_TYPE_PREFIXES):
         return True
     return False
 
@@ -2390,7 +2392,7 @@ class ProxyServer:
             if record and flow_id:
                 db.update_flow_response_async(flow_id, 502, "{}", "", 0, 0)
                 # 实时出包：推送 502 状态的 SSE 更新（预入库 flow 补齐失败状态）
-                self._notify_flow_update(flow_id, 502, Headers(), 0, int((time.time() - start) * 1000))
+                self._notify_flow_update(flow_id, 502, Headers(), b"", int((time.time() - start) * 1000))
             elif record:
                 self._update_or_insert_response(
                     flow_id, pid, proc_name, method, orig_url, scheme, host,
@@ -2447,7 +2449,8 @@ class ProxyServer:
                         except Exception:  # noqa: BLE001
                             pass
                     # 实时出包：推送 SSE 更新补齐预入库 flow 的响应字段
-                    self._notify_flow_update(flow_id, status, resp_headers, 0, duration)
+                    # WebSocket 流式转发，body 已转发不入库，传空 bytes
+                    self._notify_flow_update(flow_id, status, resp_headers, b"", duration)
                     # 录制 hook（流式响应 body 已转发，仅录制 flow_id；被动扫描跳过无 body）
                     try:
                         from ..api.record_replay import add_flow_to_recording as _add_to_recording
@@ -2664,8 +2667,8 @@ class ProxyServer:
                     except Exception:  # noqa: BLE001
                         pass
                 # 实时出包：响应完成后推送 SSE 更新，让前端补齐预入库 flow 的响应字段
-                # （请求阶段已推送 status=null 的 lite flow，这里推送带 status/headers/size 的更新）
-                self._notify_flow_update(flow_id, status, resp_headers, len(resp_body), duration)
+                # （请求阶段已推送 status=null 的 lite flow，这里推送带 status/headers/body 的更新）
+                self._notify_flow_update(flow_id, status, resp_headers, resp_body, duration)
                 # 录制 / 被动扫描 hook（正常响应路径）
                 self._run_post_record_hooks(flow_id, orig_url, method, scheme, host,
                                             path, headers, status, resp_headers, resp_body)
@@ -3506,11 +3509,11 @@ class ProxyServer:
             state["done"].set()
 
     def _notify_flow_update(self, flow_id, status_code, resp_headers: Headers,
-                            resp_body_size: int, duration_ms: int):
+                            resp_body, duration_ms: int):
         """响应完成后推送 SSE 更新，让前端补齐预入库 flow 的响应字段。
 
         与 _insert_flow 的请求阶段 SSE 推送配合：请求阶段推送 lite flow（status=null），
-        响应完成后再推送一次（带 status/headers/size/duration + _is_update 标记）。
+        响应完成后再推送一次（带 status/headers/body/duration + _is_update 标记）。
         前端根据 _is_update 标记判断：
         - 绝不当成新 flow 插入（避免产生只有 id/status/size 的空行）
         - 若对应 id 的预入库 flow 尚未到达（时序竞态），暂存 pendingUpdates，等预入库到达后合并
@@ -3521,7 +3524,7 @@ class ProxyServer:
                 "id": flow_id,
                 "status_code": status_code,
                 "response_headers": json.dumps(resp_headers.to_dict()) if resp_headers else "{}",
-                "size": resp_body_size,
+                "response_body": resp_body,
                 "duration_ms": duration_ms,
                 "_is_update": True,
             }

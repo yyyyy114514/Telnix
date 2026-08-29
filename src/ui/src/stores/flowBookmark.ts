@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import i18n from '../i18n'
 
 export interface BookmarkGroup {
   id: string
@@ -42,8 +43,8 @@ export const useFlowBookmarkStore = defineStore('flowBookmark', () => {
       } else {
         // 默认组
         groups.value = [
-          { id: 'default', name: '默认', color: '#3b82f6', created_at: new Date().toISOString() },
-          { id: 'important', name: '重要', color: '#f43f5e', created_at: new Date().toISOString() },
+          { id: 'default', name: i18n.global.t('flowBookmark.defaultGroupName'), color: '#3b82f6', created_at: new Date().toISOString() },
+          { id: 'important', name: i18n.global.t('flowBookmark.importantGroupName'), color: '#f43f5e', created_at: new Date().toISOString() },
         ]
       }
       const savedBookmarks = localStorage.getItem(BOOKMARKS_KEY)

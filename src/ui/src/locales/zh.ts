@@ -13,11 +13,6 @@ export default {
     copyFailed: '复制失败',
     copied: '已复制',
     export: '导出',
-    failed: '操作失败',
-    copy: '复制',
-    copied: '已复制',
-    copyFailed: '复制失败',
-    export: '导出',
     import: '导入',
     clear: '清空',
     search: '搜索',
@@ -57,6 +52,7 @@ export default {
     copySuccess: '已复制到剪贴板',
     noData: '暂无数据',
     back: '返回',
+    ms: '毫秒',
   },
   nav: {
     capture: '抓包',
@@ -178,6 +174,13 @@ export default {
     triggerSave: '保存条件',
     triggerClear: '清除条件',
     triggerReset: '重置触发',
+    filterOp: {
+      contains: '包含',
+      equals: '等于',
+      startsWith: '开头是',
+      regex: '正则',
+    },
+    addCondition: '添加条件',
   },
   analyze: {
     statsLoadFailed: '统计加载失败：',
@@ -776,9 +779,21 @@ export default {
     historyApplied: '已应用历史搜索条件',
     historyCleared: '已清空搜索历史',
     clearHistory: '清空全部',
+    // 搜索历史前缀标签
+    prefixRegex: '正则:',
+    prefixHex: 'Hex:',
+    prefixHost: 'Host:',
+    prefixMethod: 'Method:',
+    prefixStatus: 'Status:',
+    prefixStatusRange: 'Status',
+    prefixProcess: 'Process:',
+    prefixHeader: 'Header:',
+    prefixPid: 'PID:',
+    emptyCondition: '(空条件)',
     // 正则模板
     regexTemplates: '常用正则模板',
     invalidRegex: '无效的正则表达式：{field}',
+    invalidRegexSimple: '无效的正则表达式',
     bodyRegex: '正文正则',
     headerRegexLabel: '头部正则',
     // 匹配高亮
@@ -1320,6 +1335,8 @@ export default {
     autoSwitchTabHint: '选中流量时自动切换到预览标签',
     multiSelectBarDelay: '多选工具栏延迟',
     multiSelectDelayHint: '滚动停止后多选工具栏重新显示的延迟（秒）',
+    triggerCaptureEnabled: '触发式捕获',
+    triggerCaptureEnabledHint: '按预设条件触发抓包',
     transparentProxy: '透明代理',
     transparentProxyMode: '透明代理模式',
     transparentStarted: '透明代理已启动',
@@ -1759,6 +1776,8 @@ export default {
     delayResponsePhase: '响应阶段延迟',
     addToMock: '添加到 Mock',
     addToRecording: '添加到录制',
+    expandExtraBar: '展开更多工具',
+    collapseExtraBar: '收起更多工具',
   },
   breakpointBar: {
     label: '断点：',
@@ -2123,6 +2142,8 @@ export default {
     noDiff: '完全相同',
     diff: '有差异',
     same: '相同',
+    compareMode: '对比模式',
+    compareSelected: '对比选中项',
   },
 
   // 流量标记系统
@@ -2680,6 +2701,12 @@ export default {
     condValue: '条件值',
     multiMatchEmpty: '暂无多条件规则，点击「新增规则」创建',
     multiMatchNamePlaceholder: '规则名称',
+    // 模板变量类型
+    varTypeString: '字符串',
+    varTypeNumber: '数字',
+    varTypeBoolean: '布尔',
+    varTypeJson: 'JSON',
+    varTypeRegex: '正则',
   },
 
   // 工作流
@@ -2699,6 +2726,47 @@ export default {
     lastRun: '上次运行',
     runs: '次运行',
     useTemplate: '使用模板',
+    // 预设模板名称和描述
+    templateNames: {
+      batchReplay: '批量重放',
+      batchTag: '批量添加标记',
+      exportHar: '批量导出 HAR',
+      delayTest: '延迟测试',
+      batchDelete: '批量删除',
+    },
+    templateDescriptions: {
+      batchReplay: '批量重放选中的流量',
+      batchTag: '为选中的流量添加标记',
+      exportHar: '导出选中的流量为 HAR 格式',
+      delayTest: '对流量添加延迟后重放',
+      batchDelete: '删除选中的流量',
+    },
+    // 副本后缀
+    copySuffix: '(副本)',
+    // 日志消息
+    log: {
+      replaySuccess: '重放成功',
+      replayFailed: '重放失败: {error}',
+      delayComplete: '延迟 {delayMs}ms 完成',
+      waitComplete: '等待 {waitMs}ms 完成',
+      tagged: '已标记: {tag}',
+      tagFailed: '标记失败: {error}',
+      exportSuccess: '导出成功: {format}',
+      exportFailed: '导出失败: {error}',
+      deleted: '已删除',
+      deleteFailed: '删除失败: {error}',
+      modified: '已修改',
+      modifyFailed: '修改失败: {error}',
+      copied: '已复制',
+      copyFailed: '复制失败: {error}',
+      stepError: '步骤执行异常: {error}',
+      flowReplayed: 'Flow #{flowId} 重放成功',
+      flowReplayFailed: 'Flow #{flowId} 重放失败: {error}',
+      flowTagged: 'Flow #{flowId} 已标记: {tag}',
+      flowTagFailed: 'Flow #{flowId} 标记失败: {error}',
+      flowDeleted: 'Flow #{flowId} 已删除',
+      flowDeleteFailed: 'Flow #{flowId} 删除失败: {error}',
+    },
     // 设计器
     actions: '操作步骤',
     dragHint: '拖拽到画布添加',

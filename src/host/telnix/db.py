@@ -196,6 +196,8 @@ CREATE INDEX IF NOT EXISTS idx_flows_status ON flows(status_code);
 
 # 默认设置项
 DEFAULT_SETTINGS = {
+    # 代理监听地址：默认 127.0.0.1（仅本机），设为 0.0.0.0 可被局域网设备连接
+    "proxy_listen_host": "127.0.0.1",
     "ai_service": "deepseek",
     "deepseek_api_key": "",
     "deepseek_model": "deepseek-v4-flash",
@@ -1064,7 +1066,7 @@ def _flow_writer_loop():
     conn.row_factory = sqlite3.Row
     _apply_pragmas(conn)
     batch: list[dict] = []
-    BATCH_SIZE = 200
+    BATCH_SIZE = 50  # 降低批次大小，从 200 降到 50，减少低流量场景延迟
 
     while True:
         # 阻塞等待第一条（无超时，立即响应）
@@ -1420,8 +1422,8 @@ def _update_writer_loop():
     conn.row_factory = sqlite3.Row
     _apply_pragmas(conn)
     batch: list[dict] = []
-    BATCH_SIZE = 50
-    FLUSH_TIMEOUT = 0.02  # 20ms（与 insert 对齐，响应字段更新更及时）
+    BATCH_SIZE = 20  # 降低批次大小，减少等待
+    FLUSH_TIMEOUT = 0.005  # 5ms（从 20ms 降低，减少响应字段入库延迟）
 
     while True:
         try:

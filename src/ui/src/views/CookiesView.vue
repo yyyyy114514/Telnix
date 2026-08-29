@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Delete, Search, Edit, Copy, Download, Warning, Check, Clock } from '@element-plus/icons-vue'
+import { Refresh, Delete, Search, Edit, DocumentCopy, Download, Warning, Check, Clock } from '@element-plus/icons-vue'
 import { api } from '../api/client'
 
 const { t } = useI18n()
@@ -434,7 +434,7 @@ onMounted(() => {
                         <el-icon><Edit /></el-icon>
                       </el-button>
                       <el-button size="small" circle @click="copyCookie(cookie)" :title="t('cookies.copyFull')">
-                        <el-icon><Copy /></el-icon>
+                        <el-icon><DocumentCopy /></el-icon>
                       </el-button>
                       <el-button size="small" circle @click="sendToComposer(cookie)" :title="t('cookies.toComposer')">
                         <el-icon><Download /></el-icon>
@@ -451,7 +451,7 @@ onMounted(() => {
 
     <!-- 编辑对话框 -->
     <el-dialog
-      v-model="editingCookie !== null"
+      :model-value="editingCookie !== null"
       :title="t('cookies.editCookie')"
       width="600px"
       @close="cancelEdit"

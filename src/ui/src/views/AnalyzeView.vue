@@ -64,6 +64,10 @@ const anomalyResult = ref<AnomalyResult | null>(null)
 const anomalyLoading = ref(false)
 const anomaliesExpanded = ref(true)
 
+// 过滤条件（必须在 loadLatencyStats 等函数之前定义）
+const filterHost = ref('')
+const filterProcess = ref('')
+
 // 加载高级分析数据
 async function loadLatencyStats() {
   latencyLoading.value = true
@@ -598,10 +602,6 @@ const currentPage = ref(1)
 const pageSize = ref(5000)
 const clearLoading = ref(false)
 
-// 过滤条件
-const filterHost = ref('')
-const filterProcess = ref('')
-
 // 展开的分组 key 集合
 const expandedGroups = ref<Set<string>>(new Set())
 // 分组展开时每组初始渲染的最大行数（避免单个大分组展开瞬间创建数千 DOM 导致卡顿）。
@@ -897,8 +897,8 @@ async function loadFlowDetail(id: number) {
 watch(selectedFlowId, (id) => {
   if (id == null) return
   const f = allFlows.value.find(x => x.id === id)
-  // lite 模式下 response_headers 字段不存在或为 undefined，触发详情加载
-  if (f && f.response_headers === undefined) {
+  // lite 模式下 response_body 为空，触发详情加载
+  if (f && (!f.response_body || f.response_body === '')) {
     loadFlowDetail(id)
   }
 })
@@ -1510,7 +1510,7 @@ onBeforeUnmount(() => {
           <span class="legend-item"><span class="legend-dot" style="background: var(--on-success)"></span>{{ t('analyze.topoHost') }}</span>
           <span class="text-dim" style="font-size: 12px; margin-left: 16px">{{ t('analyze.topoSummary', { nodes: topoData.nodes.length, edges: topoData.edges.length }) }}</span>
         </div>
-        <svg class="topology-svg" :viewBox="`0 0 900 ${Math.max(600, Math.max(processes.length, ips.length, hosts.length) * 50 + 120)}`" preserveAspectRatio="xMidYMid meet">
+        <svg class="topology-svg" :viewBox="`0 0 900 ${Math.max(600, topoData.nodes.length * 50 + 120)}`" preserveAspectRatio="xMidYMid meet">
           <!-- 边（贝塞尔曲线连线，比直线更清晰） -->
           <path v-for="(e, i) in topoData.edges" :key="'te-' + i"
                 :d="edgePath(e)"

@@ -752,7 +752,7 @@ watch(() => status.value?.reachable, (reachable) => {
               </el-icon>
               <el-button
                 v-else-if="group.type !== 'URLTest'"
-                size="tiny"
+                size="small"
                 circle
                 @click.stop="debouncedTestDelay(nodeName)"
                 :title="t('clash.testDelay')"
@@ -803,7 +803,7 @@ watch(() => status.value?.reachable, (reachable) => {
           </el-icon>
           <el-button
             v-else
-            size="tiny"
+            size="small"
             circle
             @click="debouncedTestDelay(node.name)"
             :title="t('clash.testDelay')"
@@ -910,7 +910,7 @@ watch(() => status.value?.reachable, (reachable) => {
           </span>
           <span class="conn-col action">
             <el-button
-              size="tiny"
+              size="small"
               type="danger"
               plain
               circle

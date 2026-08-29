@@ -7,7 +7,7 @@ import CodeEditor from './CodeEditor.vue'
 // 原始报文标签页：请求行+头+空行+体 / 状态行+头+空行+体
 const props = defineProps<{
   flow: Flow
-  type: 'request' | 'response'
+  type: 'request' | 'response' | 'ws'
   editableBody?: string
 }>()
 const emit = defineEmits<{ 'update:editableBody': [string] }>()

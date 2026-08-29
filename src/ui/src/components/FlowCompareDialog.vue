@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useFlowsStore } from '../stores/flows'
 import { type Flow } from '../api/client'
-import { diffJson, Operation } from 'fast-json-patch'
+import { compare } from 'fast-json-patch'
 
 const props = defineProps<{
   modelValue: boolean
@@ -57,7 +57,7 @@ const requestHeaderDiff = computed(() => {
   try {
     const a = JSON.parse(flowAComplete.value.request_headers)
     const b = JSON.parse(flowBComplete.value.request_headers)
-    const patches = diffJson(a, b)
+    const patches = compare(a, b)
     return patches.length > 0 ? patches : null
   } catch { return null }
 })
@@ -68,7 +68,7 @@ const responseHeaderDiff = computed(() => {
   try {
     const a = JSON.parse(flowAComplete.value.response_headers)
     const b = JSON.parse(flowBComplete.value.response_headers)
-    const patches = diffJson(a, b)
+    const patches = compare(a, b)
     return patches.length > 0 ? patches : null
   } catch { return null }
 })
@@ -80,7 +80,7 @@ const requestBodyDiff = computed(() => {
     const a = flowAComplete.value?.request_body ? JSON.parse(flowAComplete.value.request_body) : null
     const b = flowBComplete.value?.request_body ? JSON.parse(flowBComplete.value.request_body) : null
     if (!a && !b) return null
-    const patches = diffJson(a || {}, b || {})
+    const patches = compare(a || {}, b || {})
     return patches.length > 0 ? patches : null
   } catch { return null }
 })
@@ -92,13 +92,13 @@ const responseBodyDiff = computed(() => {
     const a = flowAComplete.value?.response_body ? JSON.parse(flowAComplete.value.response_body) : null
     const b = flowBComplete.value?.response_body ? JSON.parse(flowBComplete.value.response_body) : null
     if (!a && !b) return null
-    const patches = diffJson(a || {}, b || {})
+    const patches = compare(a || {}, b || {})
     return patches.length > 0 ? patches : null
   } catch { return null }
 })
 
 // 通用 diff 渲染
-function renderDiffLine(patch: Operation, type: 'request' | 'response', field: 'headers' | 'body'): string {
+function renderDiffLine(patch: any, type: 'request' | 'response', field: 'headers' | 'body'): string {
   const { op, path, value, oldValue } = patch
   let result = ''
   if (op === 'add' || op === 'replace') {

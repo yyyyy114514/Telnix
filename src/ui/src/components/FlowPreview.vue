@@ -105,15 +105,12 @@ const jsonPreview = computed(() => {
 
 // 图片预览 URL
 const imageUrl = computed(() => {
-  if (!props.flow?.response_body) return ''
-  // 假设 response_body 是 base64 编码的图片
+  const body = props.flow?.response_body || ''
+  if (!body.startsWith('base64:')) return ''
+  const b64 = body.slice(7)
   const ct = contentType.value || 'image/png'
   const mime = ct.split(';')[0]
-  // 检查是否为 base64
-  if (props.flow.response_body.length > 100 && !props.flow.response_body.includes('<')) {
-    return `data:${mime};base64,${props.flow.response_body}`
-  }
-  return ''
+  return `data:${mime};base64,${b64}`
 })
 
 // 文本预览（HTML/纯文本）

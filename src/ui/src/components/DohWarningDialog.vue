@@ -54,34 +54,34 @@ const providerNames: Record<string, string> = {
 }
 
 // 浏览器对应的禁用 DoH 教程链接
-const disableDohGuides: Record<string, { url: string; label: string }> = {
+const disableDohGuides: Record<string, { url: string; labelKey: string }> = {
   chrome: {
     url: 'https://chrome.google.com/search?channel=nrower&q=disable+doh+chrome',
-    label: 'Chrome 禁用 DoH 教程',
+    labelKey: 'doh.guideChrome',
   },
   edge: {
     url: 'https://support.microsoft.com/en-us/microsoft-edge/security-privacy-and-dns-in-microsoft-edge-2d7e8ed9-b714-6c77-0cbf-8c91c6c6fe8c',
-    label: 'Edge 禁用 Secure DNS 教程',
+    labelKey: 'doh.guideEdge',
   },
   firefox: {
     url: 'https://support.mozilla.org/en-US/kb/doh-privacy-enhanced-dns-firefox',
-    label: 'Firefox 禁用 DoH 教程',
+    labelKey: 'doh.guideFirefox',
   },
   safari: {
     url: 'https://support.apple.com/en-us/102103',
-    label: 'Safari DNS 设置（macOS）',
+    labelKey: 'doh.guideSafari',
   },
   brave: {
     url: 'https://brave.com/help/dns-over-https/',
-    label: 'Brave 禁用 DoH 教程',
+    labelKey: 'doh.guideBrave',
   },
   opera: {
     url: 'https://help.opera.com/en/latest/security-privacy/#dns-over-https',
-    label: 'Opera 禁用 DoH 教程',
+    labelKey: 'doh.guideOpera',
   },
   default: {
     url: 'https://www.google.com/search?q=how+to+disable+dns+over+https+in+browser',
-    label: '禁用浏览器 DoH 教程',
+    labelKey: 'doh.guideDefault',
   },
 }
 
@@ -244,10 +244,10 @@ const totalCount = computed(() => {
                 type="primary"
                 @click="openDisableGuide(suggestedBrowser)"
               >
-                {{ t('doh.openGuide') }} ({{ disableDohGuides[suggestedBrowser]?.label }})
+                {{ t('doh.openGuide') }} ({{ t(disableDohGuides[suggestedBrowser]?.labelKey) }})
               </el-button>
               <el-button size="small" @click="openDisableGuide('default')">
-                {{ disableDohGuides.default.label }}
+                {{ t(disableDohGuides.default.labelKey) }}
               </el-button>
             </div>
           </div>
