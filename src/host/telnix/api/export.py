@@ -2,7 +2,6 @@
 
 import csv
 import io
-import json
 import os
 import socket
 import struct
@@ -12,6 +11,14 @@ from datetime import datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+
+# 性能优化：优先使用 orjson（比标准 json 快 5-10 倍）
+try:
+    import orjson
+    _HAS_ORJSON = True
+except ImportError:
+    import json
+    _HAS_ORJSON = False
 
 from .. import db
 from ..logger import _capture_log
@@ -29,7 +36,10 @@ def _parse_headers(raw: str | None) -> list:
     if not raw:
         return []
     try:
-        obj = json.loads(raw)
+        if _HAS_ORJSON:
+            obj = orjson.loads(raw)
+        else:
+            obj = json.loads(raw)
         if isinstance(obj, dict):
             return [{"name": k, "value": str(v)} for k, v in obj.items()]
         return obj
@@ -42,7 +52,10 @@ def _headers_dict(raw: str | None) -> dict:
     if not raw:
         return {}
     try:
-        obj = json.loads(raw)
+        if _HAS_ORJSON:
+            obj = orjson.loads(raw)
+        else:
+            obj = json.loads(raw)
         return obj if isinstance(obj, dict) else {}
     except Exception as e:  # noqa: BLE001
         _capture_log("error", "API exception in export.py", extra={"exc": repr(e)})
