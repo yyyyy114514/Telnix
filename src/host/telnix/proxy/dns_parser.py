@@ -1,11 +1,11 @@
-"""DNS 协议解析（无外部依赖，自己解析 RFC 1035）。
+"""DNS protocol parsing (no external dependencies, parses RFC 1035 itself).
 
-支持解析 DNS 查询/响应包，提取：
-- 域名、查询类型（A/AAAA/CNAME/MX/TXT/NS 等）
-- 响应码（NOERROR/NXDOMAIN 等）
-- 应答记录（A=IP、CNAME=域名、AAAA=IPv6 等）
+Supports parsing DNS query/response packets, extracting:
+- Domain name, query type (A/AAAA/CNAME/MX/TXT/NS etc.)
+- Response code (NOERROR/NXDOMAIN etc.)
+- Answer records (A=IP, CNAME=domain, AAAA=IPv6 etc.)
 
-仅解析，不发包。供 raw_capture 调用：抓到 UDP 53 端口包时调用 parse_dns() 解析。
+Parse only, no sending. Called by raw_capture: when capturing UDP port 53 packets, call parse_dns() to parse.
 """
 import struct
 from typing import Tuple
@@ -35,16 +35,16 @@ RCODE_NAMES = {
 
 
 def parse_dns(data: bytes) -> dict | None:
-    """解析 DNS 包。
+    """Parse DNS packet.
 
-    返回 dict：
-    - is_response: bool（True=响应，False=查询）
-    - id: int（事务 ID）
-    - rcode: int（响应码，仅响应有意义）
+    Returns dict:
+    - is_response: bool (True=response, False=query)
+    - id: int (transaction ID)
+    - rcode: int (response code, only meaningful for responses)
     - rcode_name: str
-    - questions: list[dict]（查询段，每条含 qname, qtype, qtype_name）
-    - answers: list[dict]（应答段，每条含 name, type, type_name, ttl, rdata 解析后值）
-    返回 None 表示不是合法 DNS 包（长度不足/格式错误）。
+    - questions: list[dict] (question section, each contains qname, qtype, qtype_name)
+    - answers: list[dict] (answer section, each contains name, type, type_name, ttl, parsed rdata value)
+    Returns None if not a valid DNS packet (insufficient length/format error).
     """
     if not data or len(data) < 12:
         return None
@@ -107,12 +107,12 @@ def parse_dns(data: bytes) -> dict | None:
 
 
 def _read_name(data: bytes, offset: int) -> Tuple[str, int]:
-    """读取 DNS 名字（支持压缩指针）。
+    """Read DNS name (supports compression pointers).
 
-    返回 (名字, 下一个 offset)。名字格式 example.com（点分隔）。
+    Returns (name, next offset). Name format example.com (dot-separated).
 
-    安全：限制总迭代次数（含压缩指针跳转），防止恶意压缩指针循环导致死循环。
-    RFC 1035 §4.1.4 规定压缩指针只能向后指，但恶意包可不遵守。
+    Security: limit total iteration count (including compression pointer jumps), to prevent malicious compression pointer loops causing infinite loops.
+    RFC 1035 §4.1.4 specifies compression pointers can only point backward, but malicious packets may not comply.
     """
     labels = []
     jumped = False
@@ -152,7 +152,7 @@ def _read_name(data: bytes, offset: int) -> Tuple[str, int]:
 
 def _parse_rdata(rr_type: int, rdata: bytes, full_data: bytes,
                  rdata_offset: int) -> str:
-    """解析 rdata 为可读字符串。"""
+    """Parse rdata into human-readable string."""
     try:
         if rr_type == TYPE_A and len(rdata) == 4:
             # A 记录：4 字节 IPv4

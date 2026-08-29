@@ -1,22 +1,27 @@
-"""Export API (HAR/JSON/python-requests/postman/curl/csv). Adapted to new flows table structure."""
+"""Export API (HAR/JSON/python-requests/postman/curl/csv/pcap). Adapted to new flows table structure."""
 
 import csv
 import io
 import json
 import os
+import socket
+import struct
 import sys
+import time
+from datetime import datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from . import err, ok
 
 router = APIRouter()
 
 
 class ExportRequest(BaseModel):
-    format: str = "json"  # json | har | python-requests | postman | curl | csv
+    format: str = "json"  # json | har | python-requests | postman | curl | csv | pcap
 
 
 def _parse_headers(raw: str | None) -> list:
@@ -28,7 +33,8 @@ def _parse_headers(raw: str | None) -> list:
         if isinstance(obj, dict):
             return [{"name": k, "value": str(v)} for k, v in obj.items()]
         return obj
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in export.py", extra={"exc": repr(e)})
         return []
 
 
@@ -38,14 +44,27 @@ def _headers_dict(raw: str | None) -> dict:
     try:
         obj = json.loads(raw)
         return obj if isinstance(obj, dict) else {}
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in export.py", extra={"exc": repr(e)})
         return {}
 
 
 def _build_har(session: dict, flows: list[dict]) -> dict:
     """Build HAR 1.2 structure from flow records."""
+    # 安全修复：敏感头过滤
+    SENSITIVE_HEADERS = frozenset({
+        "authorization", "cookie", "proxy-authorization",
+        "x-api-token", "x-auth-token", "x-access-token",
+        "set-cookie",  # 响应头中的敏感 cookie
+    })
     entries = []
     for f in flows:
+        # 过滤请求头敏感信息
+        req_headers = _parse_headers(f.get("request_headers"))
+        req_headers = [h for h in req_headers if h["name"].lower() not in SENSITIVE_HEADERS]
+        # 过滤响应头敏感信息
+        resp_headers = _parse_headers(f.get("response_headers"))
+        resp_headers = [h for h in resp_headers if h["name"].lower() not in SENSITIVE_HEADERS]
         entry = {
             "startedDateTime": f.get("timestamp"),
             "time": f.get("duration_ms") or 0,
@@ -54,7 +73,7 @@ def _build_har(session: dict, flows: list[dict]) -> dict:
                 "url": f.get("url") or "",
                 "httpVersion": "HTTP/1.1",
                 "cookies": [],
-                "headers": _parse_headers(f.get("request_headers")),
+                "headers": req_headers,
                 "queryString": [],
                 "headersSize": -1,
                 "bodySize": len(f.get("request_body") or ""),
@@ -64,7 +83,7 @@ def _build_har(session: dict, flows: list[dict]) -> dict:
                 "statusText": "",
                 "httpVersion": "HTTP/1.1",
                 "cookies": [],
-                "headers": _parse_headers(f.get("response_headers")),
+                "headers": resp_headers,
                 "content": {
                     "size": f.get("size") or 0,
                     "mimeType": "text/plain",
@@ -132,7 +151,10 @@ def _build_python_requests(flows: list[dict]) -> str:
                         raw = _b64.b64decode(b64)
                         with open(bin_path, "wb") as bf:
                             bf.write(raw)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+
+                        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
                         pass
                     lines.append(f"    with open({bin_path!r}, 'rb') as _f:  # binary body read from external file")
                     lines.append(f"        data = _f.read()")
@@ -145,7 +167,8 @@ def _build_python_requests(flows: list[dict]) -> str:
                     parsed = json.loads(body)
                     lines.append(f"    json_body = {_py_repr(parsed)}")
                     lines.append(f"    resp = requests.{method}(url, headers=headers, json=json_body, verify=False, timeout=30)")
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    _capture_log("error", "API exception in export.py", extra={"exc": repr(e)})
                     lines.append(f"    data = {_py_str(body)}")
                     lines.append(f"    resp = requests.{method}(url, headers=headers, data=data, verify=False, timeout=30)")
         else:
@@ -195,7 +218,10 @@ def _build_postman(flows: list[dict]) -> dict:
                         raw = _b64.b64decode(body[7:])
                         with open(bin_path, "wb") as bf:
                             bf.write(raw)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:
+
+                        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
                         pass
                     item["request"]["body"] = {
                         "mode": "file",
@@ -303,6 +329,253 @@ def _py_repr(obj) -> str:
     return repr(obj)
 
 
+# ---------------------------------------------------------------------------
+# pcap 导出（HTTP 重建版，非真实网络捕获）
+# ---------------------------------------------------------------------------
+
+# pcap 全局头（24 字节）：魔数 + 版本 + 时区 + 精度 + 抓包长度 + 链路层类型
+# 链路层类型 1 = LINKTYPE_ETHERNET（我们在每包前构造假的 Ethernet/IP/TCP 头）
+_PCAP_GLOBAL_HEADER = struct.pack(
+    "<IHHiIII",
+    0xA1B2C3D4,   # 魔数（微秒精度）
+    2, 4,          # 主版本.次版本
+    0,             # 时区偏移
+    0,             # 时间戳精度
+    65535,         # 抓包长度
+    1,             # 链路层类型：Ethernet
+)
+
+
+def _ip_to_int(ip: str) -> int:
+    """将点分十进制 IPv4 转为 32 位整数。失败返回 0。"""
+    try:
+        return struct.unpack("!I", socket.inet_aton(ip))[0]
+    except (OSError, struct.error):
+        return 0
+
+
+def _resolve_host_ip(host: str) -> str:
+    """将 host 解析为 IPv4。失败返回 127.0.0.1（保证 pcap 可写）。"""
+    if not host:
+        return "127.0.0.1"
+    # 已经是 IP 直接返回
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    try:
+        # 只解析 A 记录，阻塞但导出场景可接受
+        return socket.gethostbyname(host)
+    except OSError:
+        return "127.0.0.1"
+
+
+def _parse_iso_timestamp(ts: str) -> tuple[int, int]:
+    """解析 ISO 8601 时间戳为 (秒, 微秒)。失败返回当前时间。"""
+    if not ts:
+        now = time.time()
+        return int(now), int((now - int(now)) * 1_000_000)
+    try:
+        # 兼容形如 "2026-08-03T12:34:56.789" 或带时区
+        # Python 3.11+ fromisoformat 支持带时区的 'Z'，这里手动兼容旧版
+        s = ts.rstrip("Z")
+        dt = datetime.fromisoformat(s)
+        epoch = dt.timestamp()
+        return int(epoch), int((epoch - int(epoch)) * 1_000_000)
+    except (ValueError, TypeError):
+        now = time.time()
+        return int(now), int((now - int(now)) * 1_000_000)
+
+
+def _ip_checksum(header: bytes) -> int:
+    """计算 IP 头校验和（16 位反码求和）。"""
+    if len(header) % 2:
+        header += b"\x00"
+    total = 0
+    for i in range(0, len(header), 2):
+        total += (header[i] << 8) + header[i + 1]
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def _build_tcp_header(src_port: int, dst_port: int, seq: int, ack: int,
+                      flags: int, payload_len: int) -> bytes:
+    """构造 TCP 头（20 字节，无选项）。校验和置 0（Wireshark 会标记但能解析）。"""
+    data_offset = 5  # 20 字节 / 4
+    window = 65535
+    checksum = 0
+    urgent = 0
+    return struct.pack(
+        "!HHIIHHH",
+        src_port, dst_port,
+        seq, ack,
+        (data_offset << 12) | flags,
+        window,
+        checksum,
+    ) + struct.pack("!H", urgent)
+
+
+def _build_ip_header(src_ip: str, dst_ip: str, protocol: int, payload_len: int) -> bytes:
+    """构造 IPv4 头（20 字节，无选项）。"""
+    version_ihl = (4 << 4) | 5
+    tos = 0
+    total_length = 20 + payload_len
+    identification = 0
+    flags_fragment = 0x4000  # Don't Fragment
+    ttl = 64
+    src = _ip_to_int(src_ip)
+    dst = _ip_to_int(dst_ip)
+    # 先填校验和为 0 再计算
+    header = struct.pack(
+        "!BBHHHBBHII",
+        version_ihl, tos, total_length,
+        identification, flags_fragment,
+        ttl, protocol, 0,  # checksum=0
+        src, dst,
+    )
+    cs = _ip_checksum(header)
+    header = header[:10] + struct.pack("!H", cs) + header[12:]
+    return header
+
+
+def _build_ethernet_header() -> bytes:
+    """构造 Ethernet 头（14 字节）。src/dst MAC 用占位值。"""
+    dst_mac = b"\x00\x00\x00\x00\x00\x00"
+    src_mac = b"\x00\x00\x00\x00\x00\x00"
+    ethertype = 0x0800  # IPv4
+    return dst_mac + src_mac + struct.pack("!H", ethertype)
+
+
+def _build_pcap_packet(ts_sec: int, ts_usec: int, packet_data: bytes) -> bytes:
+    """构造一个 pcap 记录头（16 字节）+ 数据。"""
+    caplen = len(packet_data)
+    origlen = caplen
+    record_header = struct.pack(
+        "<IIII",
+        ts_sec, ts_usec,
+        caplen, origlen,
+    )
+    return record_header + packet_data
+
+
+def _body_to_bytes(body: str | None) -> bytes:
+    """将 flows 表中的 body 字段转为原始字节。
+
+    body 可能是纯文本、JSON 字符串，或 "base64:..." 前缀的二进制。
+    """
+    if not body:
+        return b""
+    if body.startswith("base64:"):
+        import base64
+        try:
+            return base64.b64decode(body[7:])
+        except Exception:  # noqa: BLE001
+            return b""
+    return body.encode("utf-8", errors="replace")
+
+
+def _headers_to_bytes(headers_raw: str | None, body: bytes) -> bytes:
+    """将 headers（JSON 文本）+ body 拼成 HTTP 报文字节流。"""
+    lines: list[str] = []
+    if headers_raw:
+        try:
+            obj = json.loads(headers_raw)
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    lines.append(f"{k}: {v}")
+        except Exception:  # noqa: BLE001
+            pass
+    # 追加 Content-Length（若缺失）
+    has_cl = any(l.lower().startswith("content-length:") for l in lines)
+    if not has_cl and body:
+        lines.append(f"Content-Length: {len(body)}")
+    headers_text = "\r\n".join(lines)
+    if headers_text:
+        headers_text += "\r\n"
+    headers_text += "\r\n"
+    return headers_text.encode("utf-8", errors="replace") + body
+
+
+def _build_pcap(flows: list[dict]) -> bytes:
+    """将 flows 列表重建为 pcap 字节流。
+
+    说明：这是 "HTTP 重建版" pcap，非真实网络捕获。
+    每个流被重建为一对 TCP 包（请求 + 响应），构造假的
+    Ethernet/IPv4/TCP 头，Wireshark 可用其 HTTP Dissector 解析。
+    """
+    buf = bytearray()
+    buf += _PCAP_GLOBAL_HEADER
+
+    # 用一个递增的伪端口区分不同流
+    base_port = 40000
+    base_seq = 1000
+
+    for i, f in enumerate(flows):
+        host = f.get("host") or "127.0.0.1"
+        method = f.get("method") or "GET"
+        path = f.get("path") or "/"
+        url = f.get("url") or ""
+        scheme = f.get("scheme") or "https"
+        status_code = f.get("status_code") or 0
+        req_headers = f.get("request_headers")
+        resp_headers = f.get("response_headers")
+        req_body = _body_to_bytes(f.get("request_body"))
+        resp_body = _body_to_bytes(f.get("response_body"))
+        timestamp = f.get("timestamp") or ""
+
+        dst_ip = _resolve_host_ip(host)
+        src_ip = "127.0.0.1"
+
+        # ---- 请求包 ----
+        # 构造 HTTP 请求行 + headers + body
+        req_line = f"{method} {path} HTTP/1.1\r\n"
+        req_headers_obj = _headers_dict(req_headers)
+        # 确保有 Host 头
+        if not any(k.lower() == "host" for k in req_headers_obj):
+            req_headers_obj["Host"] = host
+        req_headers_str = "\r\n".join(f"{k}: {v}" for k, v in req_headers_obj.items())
+        if req_headers_str:
+            req_headers_str += "\r\n"
+        req_headers_str += "\r\n"
+        http_request = req_line.encode("utf-8", errors="replace") + req_headers_str.encode("utf-8", errors="replace") + req_body
+
+        src_port = base_port + (i % 20000)
+        dst_port = 443 if scheme == "https" else 80
+
+        tcp_req = _build_tcp_header(src_port, dst_port, base_seq, 0, 0x18, len(http_request))  # PSH+ACK
+        ip_req = _build_ip_header(src_ip, dst_ip, 6, 20 + len(tcp_req) + len(http_request))
+        eth_req = _build_ethernet_header()
+        pkt_req = eth_req + ip_req + tcp_req + http_request
+
+        sec, usec = _parse_iso_timestamp(timestamp)
+        buf += _build_pcap_packet(sec, usec, pkt_req)
+
+        # ---- 响应包（同秒 +1 微秒） ----
+        if status_code or resp_body or resp_headers:
+            status_text = {
+                200: "OK", 201: "Created", 204: "No Content",
+                301: "Moved Permanently", 302: "Found", 304: "Not Modified",
+                400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+                404: "Not Found", 500: "Internal Server Error", 502: "Bad Gateway",
+                503: "Service Unavailable",
+            }.get(status_code, "OK")
+            resp_line = f"HTTP/1.1 {status_code} {status_text}\r\n"
+            resp_payload = _headers_to_bytes(resp_headers, resp_body)
+            http_response = resp_line.encode("utf-8", errors="replace") + resp_payload
+
+            tcp_resp = _build_tcp_header(dst_port, src_port, base_seq + len(http_request), base_seq, 0x18, len(http_response))
+            ip_resp = _build_ip_header(dst_ip, src_ip, 6, 20 + len(tcp_resp) + len(http_response))
+            eth_resp = _build_ethernet_header()
+            pkt_resp = eth_resp + ip_resp + tcp_resp + http_response
+            buf += _build_pcap_packet(sec, usec + 1, pkt_resp)
+
+        base_seq += 10000 + len(http_request)
+
+    return bytes(buf)
+
+
 @router.post("/export/{session_id}")
 async def export_session(session_id: int, body: ExportRequest):
     """Export session data (HAR/JSON/python-requests/postman/curl)."""
@@ -323,4 +596,10 @@ async def export_session(session_id: int, body: ExportRequest):
         return ok({"format": "curl", "content": _build_curl(flows)})
     if body.format == "csv":
         return ok({"format": "csv", "content": _build_csv(flows)})
+    if body.format == "pcap":
+        # pcap 是二进制格式，base64 编码后通过 JSON 通道返回，前端解码为 Blob
+        import base64
+        pcap_bytes = _build_pcap(flows)
+        encoded = base64.b64encode(pcap_bytes).decode("ascii")
+        return ok({"format": "pcap", "content": encoded, "encoding": "base64"})
     return err("Unsupported export format")

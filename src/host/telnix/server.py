@@ -1,4 +1,4 @@
-"""FastAPI app + 挂载前端静态文件 + 全局状态管理。"""
+"""FastAPI app + mount frontend static files + global state management."""
 
 import os
 from contextlib import asynccontextmanager
@@ -6,6 +6,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+# 性能优化：orjson 比标准库 json 快 3-10x
+# FastAPI 自动使用已安装的 orjson，无需额外配置
+try:
+    import orjson
+    def _orjson_dumps(obj, **kwargs):
+        # orjson.dumps 返回 bytes，需包装为 str
+        return orjson.dumps(obj).decode('utf-8')
+    # 注册为默认 JSON 编码器（FastAPI 会自动使用）
+    FastAPI.json_encoder = orjson
+except ImportError:
+    _orjson_dumps = None  # 未安装 orjson，降级到标准 json
 
 from . import db
 from .api import auth
@@ -15,18 +27,24 @@ from .api import (
     breakpoint as breakpoint_api,
     capture,
     clash,
+    cookies as cookies_api,
     decode as decode_api,
+    delay as delay_api,
+    flows_advanced as flows_advanced_api,
     dns_hijack,
     export,
     focus,
     groups as groups_api,
     import_flows,
     logs,
+    mock_server as mock_server_api,
     processes,
+    proxy_tools as proxy_tools_api,
     raw,
-    replay,
+    record_replay as record_replay_api,
     search,
     send,
+    site_map,
     sessions,
     settings as settings_api,
     snapshot as snapshot_api,
@@ -41,7 +59,7 @@ from .proxy.server import ProxyServer
 
 
 class AppState:
-    """全局运行时状态。"""
+    """Global runtime state."""
 
     def __init__(self):
         self.proxy: ProxyServer | None = None
@@ -49,6 +67,14 @@ class AppState:
         # 后端启动时间戳（秒），前端用于检测后端重启并清理本地缓存
         import time as _time
         self.started_at: float = _time.time()
+        # 实际使用的 API 端口 / 代理端口（由 __main__.py 在启动时确定，
+        # 可能与 settings.json 中的设置不同：随机端口模式或端口被占用自动切换）
+        self.api_port: int | None = None
+        self.proxy_port: int | None = None
+        # 端口冲突信息：手动设置的端口被占用时记录原端口与新端口，前端轮询 /status 时弹出提示
+        # 形如 {"api": {"old": 18901, "new": 18902}, "proxy": {"old": 8888, "new": 8889}}
+        # MCP 模式下端口冲突直接 sys.exit，不会写入此字段
+        self.port_conflict: dict | None = None
 
 
 def create_app(state: AppState | None = None) -> FastAPI:
@@ -58,6 +84,12 @@ def create_app(state: AppState | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.telnix = state
+        # 预热数据库连接：避免首个 HTTP 请求才触发 sqlite3.connect() 导致明显延迟
+        try:
+            db.get_setting("preload_conn", "")
+            db.get_rules()
+        except Exception:  # noqa: BLE001
+            pass
         # 从 DB 恢复断点开关 + 超时
         if state.proxy:
             bp_timeout = float(db.get_setting("breakpoint_timeout", "0") or "0")
@@ -115,7 +147,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
     app.include_router(groups_api.router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")
     app.include_router(breakpoint_api.router, prefix="/api")
-    app.include_router(replay.router, prefix="/api")
+    app.include_router(record_replay_api.router, prefix="/api")
     app.include_router(send.router, prefix="/api")
     app.include_router(processes.router, prefix="/api")
     app.include_router(ai.router, prefix="/api")
@@ -127,6 +159,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
     app.include_router(logs.router, prefix="/api")
     app.include_router(system_api.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
+    # Site Map（站点地图：树形展示所有访问过的 URL）
+    app.include_router(site_map.router, prefix="/api")
     app.include_router(raw.router, prefix="/api")
     app.include_router(decode_api.router, prefix="/api")
     # §3.15 规则模板库 / §3.16 环境快照
@@ -141,6 +175,14 @@ def create_app(state: AppState | None = None) -> FastAPI:
     app.include_router(tech_fingerprint_api.router, prefix="/api")
     # 透明代理模式
     app.include_router(transparent_proxy_api.router, prefix="/api")
+    # 代理工具（No Caching / Force CORS / Block List / Allow List）
+    app.include_router(proxy_tools_api.router, prefix="/api")
+    # Cookie 管理器（集中查看/清理各 host 的 Cookie）
+    app.include_router(cookies_api.router, prefix="/api")
+    app.include_router(delay_api.router, prefix="/api")
+    app.include_router(flows_advanced_api.router, prefix="/api")
+    app.include_router(record_replay_api.router, prefix="/api")
+    app.include_router(mock_server_api.router, prefix="/api")
 
     # 挂载文档目录（CLASH_SET.md 教程图片等资源）
     # 必须在 SPA catch-all 路由之前注册，否则 /docs/clash/1.png 会被回退到 index.html
@@ -195,7 +237,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         async def _no_ui():
             return JSONResponse(
                 {"code": 0, "data": {"ui_built": False},
-                 "msg": "前端未构建，请先构建 src/ui"}
+                 "msg": "Frontend not built, please build src/ui first"}
             )
 
     return app

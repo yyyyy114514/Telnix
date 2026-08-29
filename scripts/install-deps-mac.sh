@@ -23,7 +23,7 @@ echo ""
 
 # 检查 Python3（macOS 自带的 python3 可能版本较旧，推荐用 Homebrew 安装）
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "[错误] 未找到 python3，请先安装 Python 3.9+"
+    echo "[错误] 未找到 python3，请先安装 Python 3.10+"
     echo "  推荐用 Homebrew 安装："
     echo "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
     echo "    brew install python"
@@ -31,7 +31,12 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
+# 显式校验 Python 版本 >= 3.10（与 pyproject.toml requires-python 一致）
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+if ! python3 -c 'import sys; assert sys.version_info >= (3,10)' 2>/dev/null; then
+    echo "[错误] Python 版本过低，需要 3.10+（当前: $PYTHON_VERSION）"
+    exit 1
+fi
 echo "[信息] Python 版本: $PYTHON_VERSION"
 
 # 检查 pip

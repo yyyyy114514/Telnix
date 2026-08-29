@@ -1,25 +1,27 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useCaptureStore } from '../stores/capture'
 
 // 证书未安装提示条
+const { t } = useI18n()
 const capture = useCaptureStore()
 
 async function install() {
   try {
     await ElMessageBox.confirm(
-      '将向系统证书存储安装 Telnix 根证书以启用 HTTPS 解密（SSL bump）。继续？',
-      '安装证书',
-      { confirmButtonText: '安装', cancelButtonText: '取消', type: 'warning' }
+      t('cert.installConfirmMsg'),
+      t('cert.installTitle'),
+      { confirmButtonText: t('cert.installButton'), cancelButtonText: t('common.cancel'), type: 'warning' }
     )
   } catch {
     return
   }
   try {
     await capture.installCert()
-    ElMessage.success('证书安装请求已提交')
+    ElMessage.success(t('cert.installSubmitted'))
   } catch (e: any) {
-    ElMessage.error('证书安装失败：' + (e?.message || e))
+    ElMessage.error(t('cert.installFailed') + (e?.message || e))
   }
 }
 </script>
@@ -27,8 +29,8 @@ async function install() {
 <template>
   <div v-if="!capture.status.cert_installed" class="cert-banner">
     <el-icon class="banner-icon"><WarningFilled /></el-icon>
-    <span class="banner-text">HTTPS 解密未启用 — 未安装根证书</span>
-    <el-button size="small" type="primary" @click="install">点击安装证书</el-button>
+    <span class="banner-text">{{ t('cert.bannerText') }}</span>
+    <el-button size="small" type="primary" @click="install">{{ t('cert.installCertButton') }}</el-button>
   </div>
 </template>
 

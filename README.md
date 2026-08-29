@@ -237,7 +237,6 @@ python -m telnix.cli system windivert-warning-ack       # 永久确认（不再�
 | **会话管理 / 导出 HAR/curl** | ✅ | ✅ | ✅ | |
 | **WebSocket 抓包** | ✅ | ✅ | ✅ | |
 | **HTTP/2 转发（ALPN h2）** | ✅ | ✅ | ✅ | |
-| **进程伪装名** | ✅ | ⚠️ | ⚠️ | macOS/Linux 无注册表，固定用默认名 `SystemMetrics.exe` |
 | **根证书自动安装** | ✅ | ✅ | ⚠️ | Linux 需手动 `update-ca-certificates` |
 | **系统代理自动配置** | ✅ | ✅ | ✅ | Windows 用 winreg，macOS 用 `networksetup`，Linux GNOME 用 `gsettings`，KDE 用 `kwriteconfig5` |
 | **系统代理状态监控** | ✅ | ✅ | ✅ | 各平台读取实际代理状态 |
@@ -252,24 +251,6 @@ python -m telnix.cli system windivert-warning-ack       # 永久确认（不再�
 > **总结**：macOS / Linux 上 **全部功能可用**。网络层功能（TCP/UDP 抓包、透明代理、DNS 劫持）各平台使用不同后端（WinDivert / AF_PACKET+BPF / iptables+pf），系统代理自动配置支持 macOS（networksetup）/ Linux GNOME（gsettings）/ KDE（kwriteconfig5），提权支持 UAC / osascript / pkexec。仅 `system firewall-allow`（netsh）和 Inno Setup 安装包为 Windows 专属。
 
 ---
-
-### 可选：安装 mitmproxy 引擎
-
-Telnix 默认使用内置线程代理引擎（零依赖、稳定）。如需更强的 HTTPS 拦截能力，可切换到 mitmproxy 引擎：
-
-**方式一：设置页一键安装**
-
-打开设置页 → 抓包行为 → 代理引擎，mitmproxy 未安装时旁边会显示「安装 mitmproxy」按钮，点击即可在线安装（约 50MB）。安装完成后点侧边栏底部「重启服务」让新引擎生效。
-
-**方式二：命令行手动安装**
-
-```powershell
-pip install mitmproxy
-```
-
-安装完成后在设置页将代理引擎切换为 mitmproxy，重启后端即可生效。未安装 mitmproxy 时代码自动回退到内置线程引擎，不影响正常使用。
-
-------
 
 ## 项目特色
 
@@ -379,7 +360,6 @@ telnix/
 │   │   │   ├── proxy/         # 代理服务器核心
 │   │   │   │   ├── server.py        # HTTP/HTTPS 抓包代理（builtin 线程引擎，默认）
 │   │   │   │   ├── async_proxy.py   # asyncio 代理引擎（G 方案，实验性）
-│   │   │   │   ├── mitmproxy_engine.py # mitmproxy 引擎（H 方案，可选依赖）
 │   │   │   │   ├── raw_capture.py   # TCP/UDP 原始抓包（WinDivert，Windows）
 │   │   │   │   ├── raw_capture_unix.py # TCP/UDP 原始抓包（AF_PACKET/BPF，macOS/Linux）
 │   │   │   │   ├── transparent_proxy.py  # 透明代理（WinDivert NAT，Windows）
@@ -443,7 +423,7 @@ Telnix 在性能上做了大量优化，确保高并发场景下不卡顿：
 
 ## 技术栈
 
-**后端**：Python 3.10+ / FastAPI / Uvicorn / SQLite (WAL) / psutil / cryptography / WinDivert+pydivert（Windows）/ AF_PACKET+BPF（macOS/Linux 抓包）/ iptables+pf（macOS/Linux 透明代理&DNS 劫持）/ h2（HTTP/2）/ mitmproxy（可选引擎）
+**后端**：Python 3.10+ / FastAPI / Uvicorn / SQLite (WAL) / psutil / cryptography / WinDivert+pydivert（Windows）/ AF_PACKET+BPF（macOS/Linux 抓包）/ iptables+pf（macOS/Linux 透明代理&DNS 劫持）/ h2（HTTP/2）
 
 **前端**：Vue 3 / Vite 5 / Element Plus / Pinia / CodeMirror 6 / highlight.js / axios
 

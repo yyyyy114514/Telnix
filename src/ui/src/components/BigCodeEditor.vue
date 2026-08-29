@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount, shallowRef, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { EditorState, Compartment } from '@codemirror/state'
 import { EditorView, lineNumbers, highlightActiveLine, highlightActiveLineGutter, keymap, drawSelection } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -9,6 +10,8 @@ import { linter, lintGutter } from '@codemirror/lint'
 import { json, jsonParseLinter } from '@codemirror/lang-json'
 import { xml } from '@codemirror/lang-xml'
 import { oneDark } from '@codemirror/theme-one-dark'
+
+const { t } = useI18n()
 
 // 亮色主题（自定义，匹配项目亮色主题）
 const lightTheme = EditorView.theme({
@@ -231,7 +234,7 @@ function formatJson() {
 <template>
   <el-dialog
     v-model="visible"
-    :title="title || '代码编辑'"
+    :title="title || t('bigCodeEditor.defaultTitle')"
     :fullscreen="true"
     :close-on-click-modal="false"
     class="big-code-dialog"
@@ -239,13 +242,13 @@ function formatJson() {
   >
     <template #header>
       <div class="bc-header">
-        <span class="bc-title">{{ title || '代码编辑' }}</span>
+        <span class="bc-title">{{ title || t('bigCodeEditor.defaultTitle') }}</span>
         <div class="bc-actions">
           <span class="bc-lang text-dim">{{ language || 'plaintext' }}</span>
           <el-button v-if="language === 'json'" size="small" @click="formatJson">
-            格式化 JSON
+            {{ t('bigCodeEditor.formatJson') }}
           </el-button>
-          <span class="bc-hint text-dim">Esc 关闭</span>
+          <span class="bc-hint text-dim">{{ t('bigCodeEditor.escClose') }}</span>
         </div>
       </div>
     </template>

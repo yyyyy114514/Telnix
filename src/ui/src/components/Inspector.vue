@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { Flow } from '../api/client'
 import RequestInspector from './RequestInspector.vue'
 import ResponseInspector from './ResponseInspector.vue'
-import { ElMessage } from 'element-plus'
 
 // 检查器：上下分栏，断点流量显示放行/丢弃按钮
+const { t } = useI18n()
 const props = defineProps<{
   flow: Flow | null
   enabledTabs: string[]
@@ -38,9 +39,9 @@ const isBreakpoint = computed(
 )
 const bpLabel = computed(() => {
   const s = props.flow?.breakpoint_status
-  if (s === 'pending_request') return '请求已拦截'
-  if (s === 'pending_response') return '响应已拦截'
-  return '已拦截'
+  if (s === 'pending_request') return t('inspector.requestIntercepted')
+  if (s === 'pending_response') return t('inspector.responseIntercepted')
+  return t('inspector.intercepted')
 })
 
 // 拖拽分隔
@@ -78,11 +79,7 @@ onBeforeUnmount(() => {
 function release(action: 'release' | 'drop') {
   const payload = action === 'release' && Object.keys(modified.value).length ? { ...modified.value } : {}
   emit('release', action, payload)
-  if (action === 'release') {
-    ElMessage.success(Object.keys(payload).length ? '已修改并放行' : '已放行')
-  } else {
-    ElMessage.info('已丢弃')
-  }
+  // 不在此处显示成功消息，由父组件 CaptureView 的 onRelease 在 API 成功后提示
 }
 </script>
 
@@ -91,7 +88,7 @@ function release(action: 'release' | 'drop') {
     <div v-if="!flow" class="empty-inspector full flex items-center justify-center">
       <div class="text-dim">
         <el-icon :size="36"><Document /></el-icon>
-        <div style="margin-top: 10px">选择左侧会话以查看详情</div>
+        <div style="margin-top: 10px">{{ t('inspector.selectSessionHint') }}</div>
       </div>
     </div>
 
@@ -99,13 +96,13 @@ function release(action: 'release' | 'drop') {
       <!-- 断点控制条 -->
       <div v-if="isBreakpoint" class="bp-control-bar">
         <el-icon class="bp-icon"><VideoPause /></el-icon>
-        <span class="bp-text">{{ bpLabel }} — 可编辑后放行</span>
+        <span class="bp-text">{{ bpLabel }}{{ t('inspector.bpEditableHint') }}</span>
         <div class="flex-1"></div>
         <el-button type="primary" size="small" @click="release('release')">
-          <el-icon><Check /></el-icon>&nbsp;放行
+          <el-icon><Check /></el-icon>&nbsp;{{ t('inspector.releaseBtn') }}
         </el-button>
         <el-button type="danger" size="small" @click="release('drop')">
-          <el-icon><Close /></el-icon>&nbsp;丢弃
+          <el-icon><Close /></el-icon>&nbsp;{{ t('inspector.dropBtn') }}
         </el-button>
       </div>
 
@@ -139,7 +136,7 @@ function release(action: 'release' | 'drop') {
 </template>
 
 <style scoped>
-.inspector { background: var(--on-bg-elevated); }
+.inspector { background: var(--on-bg-elevated); max-width: 100%; overflow: hidden; }
 .empty-inspector { color: var(--on-text-dim); }
 .bp-control-bar {
   display: flex; align-items: center; gap: 10px;

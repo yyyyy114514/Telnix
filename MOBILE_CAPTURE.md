@@ -19,7 +19,7 @@ Telnix 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charles
 
 开关会写 `proxy_listen_host=0.0.0.0`，需要**重启后端**生效：
 - 侧边栏底部点「重启服务」，或
-- CLI：`python -m Telnix.cli system restart`
+- CLI：`python -m telnix.cli system restart`
 
 > 默认 127.0.0.1 只允许本机连，开启后手机才能连上代理。
 
@@ -28,14 +28,14 @@ Telnix 通过 HTTP 代理 + SSL Bump 抓取安卓 App 流量，原理与 Charles
 Windows 防火墙默认会拦外部连接。以管理员身份执行：
 
 ```powershell
-python -m Telnix.cli system firewall-allow
+python -m telnix.cli system firewall-allow
 ```
 
 会添加两条入站规则：
 - `Telnix-Proxy-8888`（代理端口 8888）
 - `Telnix-API-18901`（API 端口 18901，证书下载用）
 
-查询状态：`python -m Telnix.cli system firewall-status`
+查询状态：`python -m telnix.cli system firewall-status`
 
 ## 步骤 3：手机配 WiFi 代理
 

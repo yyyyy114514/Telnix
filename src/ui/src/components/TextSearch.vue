@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted, inject, shallowRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 // 可选注入 hljs 实例（由 main.ts provide），用于代码语法高亮
 const hljs: any = inject('hljs', null)
+const { t } = useI18n()
 
 // 通用文本搜索组件：右上角放大镜图标 + 悬浮搜索窗 + 高亮 + 上一个/下一个 + Ctrl+F
 // 右键选中文本可解码（Base64/URL/Hex 等），结果在独立悬浮窗显示
@@ -41,13 +43,13 @@ function escapeHtml(s: string): string {
 // 截断提示
 function truncNoticeHtml(rawLen: number): string {
   if (rawLen <= PLAIN_LIMIT) return ''
-  return `<div class="ts-truncated">（内容过大，已截断显示前 ${PLAIN_LIMIT} 字符，共 ${rawLen} 字符。如需完整内容请用搜索功能定位）</div>`
+  return `<div class="ts-truncated">${t('textSearch.truncated', { shown: PLAIN_LIMIT, total: rawLen })}</div>`
 }
 
 // 阶段1：纯转义 HTML（无搜索高亮）—— 立即同步计算
 const escapedHtml = computed(() => {
   const raw = props.text || ''
-  if (!raw) return '<span class="ts-empty">（无内容）</span>'
+  if (!raw) return `<span class="ts-empty">${t('textSearch.empty')}</span>`
   const truncated = raw.length > PLAIN_LIMIT
   const text = truncated ? raw.slice(0, PLAIN_LIMIT) : raw
   return escapeHtml(text) + truncNoticeHtml(raw.length)
@@ -328,12 +330,12 @@ function closeMenu() {
 }
 
 const decodeOptions = computed<DecodeOption[]>(() => [
-  { label: 'Base64 解码', action: decodeBase64 },
-  { label: 'URL 解码', action: decodeUrl },
-  { label: 'Hex 转 ASCII', action: decodeHex },
-  { label: 'HTML 反转义', action: decodeHtmlEntity },
-  { label: 'Unicode 解码 (\\uXXXX)', action: decodeUnicode },
-  { label: 'JSON 格式化', action: formatJson },
+  { label: t('textSearch.decodeBase64'), action: decodeBase64 },
+  { label: t('textSearch.decodeUrl'), action: decodeUrl },
+  { label: t('textSearch.decodeHex'), action: decodeHex },
+  { label: t('textSearch.decodeHtmlEntity'), action: decodeHtmlEntity },
+  { label: t('textSearch.decodeUnicode'), action: decodeUnicode },
+  { label: t('textSearch.formatJson'), action: formatJson },
 ])
 
 function showResult(title: string, result: string, lang = '') {
@@ -352,17 +354,17 @@ function decodeBase64() {
     const bytes = new Uint8Array(bin.length)
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
     const result = new TextDecoder('utf-8').decode(bytes)
-    showResult('Base64 解码', result)
+    showResult(t('textSearch.decodeBase64'), result)
   } catch {
-    showResult('Base64 解码', '（解码失败：不是有效的 Base64 字符串）')
+    showResult(t('textSearch.decodeBase64'), t('textSearch.decodeFailedBase64'))
   }
 }
 
 function decodeUrl() {
   try {
-    showResult('URL 解码', decodeURIComponent(selectedText.value))
+    showResult(t('textSearch.decodeUrl'), decodeURIComponent(selectedText.value))
   } catch {
-    showResult('URL 解码', '（解码失败：不是有效的 URL 编码字符串）')
+    showResult(t('textSearch.decodeUrl'), t('textSearch.decodeFailedUrl'))
   }
 }
 
@@ -370,7 +372,7 @@ function decodeHex() {
   try {
     const hex = selectedText.value.replace(/0x/gi, '').replace(/[\s,]/g, '')
     if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
-      showResult('Hex 转 ASCII', '（解码失败：不是有效的十六进制字符串）')
+      showResult(t('textSearch.decodeHex'), t('textSearch.decodeFailedHex'))
       return
     }
     let result = ''
@@ -378,34 +380,34 @@ function decodeHex() {
       const code = parseInt(hex.slice(i, i + 2), 16)
       result += String.fromCharCode(code)
     }
-    showResult('Hex 转 ASCII', result)
+    showResult(t('textSearch.decodeHex'), result)
   } catch {
-    showResult('Hex 转 ASCII', '（解码失败）')
+    showResult(t('textSearch.decodeHex'), t('textSearch.decodeFailed'))
   }
 }
 
 function decodeHtmlEntity() {
   const txt = document.createElement('textarea')
   txt.innerHTML = selectedText.value
-  showResult('HTML 反转义', txt.value)
+  showResult(t('textSearch.decodeHtmlEntity'), txt.value)
 }
 
 function decodeUnicode() {
   try {
     // \uXXXX 形式
     const result = selectedText.value.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    showResult('Unicode 解码', result)
+    showResult(t('textSearch.decodeUnicode'), result)
   } catch {
-    showResult('Unicode 解码', '（解码失败）')
+    showResult(t('textSearch.decodeUnicode'), t('textSearch.decodeFailed'))
   }
 }
 
 function formatJson() {
   try {
     const obj = JSON.parse(selectedText.value)
-    showResult('JSON 格式化', JSON.stringify(obj, null, 2), 'json')
+    showResult(t('textSearch.formatJson'), JSON.stringify(obj, null, 2), 'json')
   } catch {
-    showResult('JSON 格式化', '（解析失败：不是有效的 JSON）')
+    showResult(t('textSearch.formatJson'), t('textSearch.parseFailedJson'))
   }
 }
 
@@ -458,7 +460,7 @@ const decodeHighlighted = computed(() => {
     <button
       v-if="searchable !== false && !showSearchBar"
       class="ts-fab"
-      title="搜索 (Ctrl+F)"
+      :title="t('textSearch.searchTitle')"
       @click="openSearch"
     >
       <el-icon><Search /></el-icon>
@@ -470,7 +472,7 @@ const decodeHighlighted = computed(() => {
           ref="searchInputRef"
           v-model="searchQuery"
           size="small"
-          placeholder="搜索..."
+          :placeholder="t('textSearch.searchPlaceholder')"
           clearable
           @keydown="onSearchKeydown"
           style="width: 220px"
@@ -480,13 +482,13 @@ const decodeHighlighted = computed(() => {
         <span class="ts-count" v-if="searchQuery">
           {{ matchCount ? `${currentMatch}/${matchCountDisplay}` : '0/0' }}
         </span>
-        <el-button size="small" circle @click="prevMatch" :disabled="!matchCount" title="上一个 (Shift+Enter)">
+        <el-button size="small" circle @click="prevMatch" :disabled="!matchCount" :title="t('textSearch.prevTitle')">
           <el-icon><ArrowUp /></el-icon>
         </el-button>
-        <el-button size="small" circle @click="nextMatch" :disabled="!matchCount" title="下一个 (Enter)">
+        <el-button size="small" circle @click="nextMatch" :disabled="!matchCount" :title="t('textSearch.nextTitle')">
           <el-icon><ArrowDown /></el-icon>
         </el-button>
-        <el-button size="small" circle @click="closeSearch" title="关闭 (Esc)">
+        <el-button size="small" circle @click="closeSearch" :title="t('textSearch.closeTitle')">
           <el-icon><Close /></el-icon>
         </el-button>
       </div>
@@ -508,15 +510,15 @@ const decodeHighlighted = computed(() => {
       >
         <!-- 搜索选项：始终显示（除非 searchable=false） -->
         <template v-if="searchable !== false">
-          <div class="ts-menu-header">搜索</div>
+          <div class="ts-menu-header">{{ t('textSearch.searchHeader') }}</div>
           <div class="ts-menu-item" @click.stop="searchFromMenu">
             <el-icon class="ts-menu-icon"><Search /></el-icon>
-            <span>{{ selectedText ? `搜索 "${truncateText(selectedText)}"` : '搜索...' }}</span>
+            <span>{{ selectedText ? t('textSearch.searchSelected', { text: truncateText(selectedText) }) : t('textSearch.searchDots') }}</span>
           </div>
         </template>
         <!-- 解码选项：仅选中文字时显示 -->
         <template v-if="selectedText">
-          <div class="ts-menu-header">解码选中文字</div>
+          <div class="ts-menu-header">{{ t('textSearch.decodeHeader') }}</div>
           <div
             v-for="(opt, i) in decodeOptions"
             :key="i"
@@ -534,10 +536,10 @@ const decodeHighlighted = computed(() => {
           <div class="decode-header">
             <span class="decode-title">{{ decodeTitle }}</span>
             <div class="decode-actions">
-              <el-button size="small" @click="copyResult" title="复制结果">
-                <el-icon><DocumentCopy /></el-icon>&nbsp;复制
+              <el-button size="small" @click="copyResult" :title="t('textSearch.copyResultTitle')">
+                <el-icon><DocumentCopy /></el-icon>&nbsp;{{ t('common.copy') }}
               </el-button>
-              <el-button size="small" circle @click="closeDecode" title="关闭">
+              <el-button size="small" circle @click="closeDecode" :title="t('textSearch.closeTitle')">
                 <el-icon><Close /></el-icon>
               </el-button>
             </div>

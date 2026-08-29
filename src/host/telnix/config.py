@@ -1,9 +1,11 @@
-"""配置管理：端口、路径、进程名伪装。
+"""Configuration management: ports, paths, process name masquerade.
 
-进程伪装名从注册表 HKCU\\Software\\Telnix\\MasqueradeName 读取
-（安装时由 Inno Setup 写入），读不到则用默认名。非 Windows 平台直接返回默认名。
-向后兼容：若新键 Software\\Telnix 不存在，回退读取旧键 Software\\OpenNet
-（旧版本安装写入的值），保证升级后伪装名不丢失。
+The process masquerade name is read from the registry HKCU\\Software\\Telnix\\MasqueradeName
+(written by Inno Setup at install time); if it cannot be read, the default name is used.
+On non-Windows platforms the default name is returned directly.
+Backward compatibility: if the new key Software\\Telnix does not exist, falls back to
+reading the legacy key Software\\OpenNet (written by older installer versions) to ensure
+the masquerade name is not lost after upgrade.
 """
 
 import os
@@ -36,11 +38,12 @@ LEGACY_REG_KEY = r"Software\OpenNet"
 
 
 def get_masquerade_name() -> str:
-    """从注册表读取进程伪装名，读不到用默认名。
+    """Read the process masquerade name from the registry, falling back to the default name.
 
-    非 Windows 平台：直接返回默认名（无注册表）。
-    向后兼容：先读新键 Software\\Telnix，读不到再回退读旧键 Software\\OpenNet
-    （旧版本安装写入的值），保证升级后伪装名不丢失。
+    Non-Windows platforms: returns the default name directly (no registry).
+    Backward compatibility: reads the new key Software\\Telnix first, then falls back to
+    the legacy key Software\\OpenNet (written by older installer versions) to ensure the
+    masquerade name is not lost after upgrade.
     """
     if not IS_WINDOWS:
         return DEFAULT_MASQUERADE_NAME
@@ -60,15 +63,33 @@ def get_masquerade_name() -> str:
 
 
 def get_port() -> int:
-    """Web 后端端口（可由环境变量 TELNIX_PORT 覆盖）。"""
-    return int(os.environ.get("TELNIX_PORT", DEFAULT_PORT))
+    """Web backend (API) port.
+
+    Priority:
+    1. TELNIX_PORT environment variable (highest, used by --mcp mode and overrides)
+    2. settings.json `api_port` (set via settings page)
+    3. DEFAULT_PORT (18901)
+    """
+    env = os.environ.get("TELNIX_PORT")
+    if env:
+        return int(env)
+    try:
+        # 延迟导入避免循环依赖
+        from . import settings_store
+        v = settings_store.get_setting("api_port")
+        if v and int(v) > 0:
+            return int(v)
+    except Exception:  # noqa: BLE001
+        pass
+    return DEFAULT_PORT
 
 
 def get_host() -> str:
-    """Web 监听地址。
+    """Web listen address.
 
-    跟随"允许局域网设备连接"开关：开启后返回 0.0.0.0，手机/局域网设备可访问
-    API（扫码下载证书、安装证书等），否则仅本机访问。
+    Follows the "allow LAN devices to connect" toggle: when enabled returns 0.0.0.0 so
+    that phones/LAN devices can access the API (scan to download certificate, install
+    certificate, etc.); otherwise only localhost access is allowed.
     """
     # 与代理监听地址联动：开启局域网访问时 API 也监听 0.0.0.0
     env = os.environ.get("TELNIX_HOST", "").strip()
@@ -85,12 +106,13 @@ def get_host() -> str:
 
 
 def get_proxy_host() -> str:
-    """代理监听地址。
+    """Proxy listen address.
 
-    从 settings.json 读 proxy_listen_host（设置页"允许局域网设备连接"开关控制）：
-    - "0.0.0.0"：监听所有网卡，手机/局域网设备可连（安卓抓包必备）
-    - "127.0.0.1"：仅本机（默认，安全）
-    读不到则用环境变量 TELNIX_PROXY_HOST，再退回 127.0.0.1。
+    Reads proxy_listen_host from settings.json (controlled by the "allow LAN devices
+    to connect" toggle on the settings page):
+    - "0.0.0.0": listen on all NICs, phones/LAN devices can connect (required for Android capture)
+    - "127.0.0.1": localhost only (default, secure)
+    Falls back to the TELNIX_PROXY_HOST environment variable, then to 127.0.0.1.
     """
     env = os.environ.get("TELNIX_PROXY_HOST", "").strip()
     if env:
@@ -107,24 +129,42 @@ def get_proxy_host() -> str:
 
 
 def get_proxy_port() -> int:
-    return int(os.environ.get("TELNIX_PROXY_PORT", PROXY_PORT))
+    """Proxy server port.
+
+    Priority:
+    1. TELNIX_PROXY_PORT environment variable (highest, used by --mcp mode and overrides)
+    2. settings.json `proxy_port` (set via settings page)
+    3. PROXY_PORT (8888)
+    """
+    env = os.environ.get("TELNIX_PROXY_PORT")
+    if env:
+        return int(env)
+    try:
+        # 延迟导入避免循环依赖
+        from . import settings_store
+        v = settings_store.get_setting("proxy_port")
+        if v and int(v) > 0:
+            return int(v)
+    except Exception:  # noqa: BLE001
+        pass
+    return PROXY_PORT
 
 
 def _project_root() -> str:
-    """开发环境下定位项目根目录（src 的上一级）。"""
+    """Locate the project root directory in the dev environment (parent of src)."""
     here = os.path.dirname(os.path.abspath(__file__))
     # telnix/config.py -> telnix -> host -> src -> 项目根
     return os.path.abspath(os.path.join(here, "..", "..", ".."))
 
 
 def get_data_dir() -> str:
-    """数据目录（SQLite + 证书存放位置）。
+    """Data directory (SQLite + certificate storage location).
 
-    优先级：
-    1. 环境变量 TELNIX_DATA_DIR（方便 Linux/WSL 用户把数据放到 ext4 分区，
-       避免 /mnt/* 跨文件系统 SQLite I/O 错误）
-    2. 打包后：%APPDATA%/Telnix（Windows）或 ~/.telnix（其他平台）
-    3. 开发环境：<project_root>/data
+    Priority:
+    1. Environment variable TELNIX_DATA_DIR (convenient for Linux/WSL users to put data
+       on an ext4 partition, avoiding cross-filesystem SQLite I/O errors on /mnt/*)
+    2. Packaged: %APPDATA%/Telnix (Windows) or ~/.telnix (other platforms)
+    3. Dev environment: <project_root>/data
     """
     env_dir = os.environ.get("TELNIX_DATA_DIR", "").strip()
     if env_dir:
@@ -144,19 +184,19 @@ def get_data_dir() -> str:
 
 
 def get_db_path() -> str:
-    """SQLite 数据库文件路径。"""
+    """SQLite database file path."""
     return os.path.join(get_data_dir(), "telnix.db")
 
 
 def get_cert_dir() -> str:
-    """证书目录（根证书 + 动态签发的域名证书）。"""
+    """Certificate directory (root certificate + dynamically issued domain certificates)."""
     cert_dir = os.path.join(get_data_dir(), "certs")
     os.makedirs(cert_dir, exist_ok=True)
     return cert_dir
 
 
 def get_ui_dist_dir() -> str:
-    """前端静态文件目录。打包后在 _internal/ui/dist，开发时在 src/ui/dist。"""
+    """Frontend static files directory. Packaged at _internal/ui/dist, dev at src/ui/dist."""
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.dirname(sys.executable), "_internal", "ui", "dist")
     here = os.path.dirname(os.path.abspath(__file__))
@@ -165,21 +205,22 @@ def get_ui_dist_dir() -> str:
 
 
 def get_project_root() -> str:
-    """项目根目录。打包后为 exe 同级目录，开发时为 src 的上一级。"""
+    """Project root directory. Packaged: same directory as the exe; dev: parent of src."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return _project_root()
 
 
 def get_docs_dir() -> str:
-    """文档目录（CLASH_SET.md 引用的图片等资源）。打包后在 _internal/docs，开发时在项目根/docs。"""
+    """Docs directory (images and other resources referenced by CLASH_SET.md).
+    Packaged at _internal/docs, dev at project root/docs."""
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.dirname(sys.executable), "_internal", "docs")
     return os.path.join(_project_root(), "docs")
 
 
 def get_tutorial_md_path() -> str:
-    """Clash 教程 markdown 文件路径。打包后在 _internal/CLASH_SET.md，开发时在项目根/CLASH_SET.md。"""
+    """Clash tutorial markdown file path. Packaged at _internal/CLASH_SET.md, dev at project root/CLASH_SET.md."""
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.dirname(sys.executable), "_internal", "CLASH_SET.md")
     return os.path.join(_project_root(), "CLASH_SET.md")

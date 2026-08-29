@@ -1,10 +1,11 @@
-"""透明代理模式 API。"""
+"""Transparent proxy mode API."""
 
 from fastapi import APIRouter
 
 from ..proxy.transparent_proxy import (
     start_transparent_proxy, stop_transparent_proxy, transparent_proxy_status,
 )
+from ..logger import _capture_log
 from . import err, ok
 from .system import check_windivert_ack_or_block
 
@@ -13,15 +14,15 @@ router = APIRouter()
 
 @router.get("/transparent-proxy/status")
 async def status():
-    """透明代理状态。"""
+    """Transparent proxy status."""
     return ok(transparent_proxy_status())
 
 
 @router.post("/transparent-proxy/start")
 async def start():
-    """启动透明代理。需管理员权限。
+    """Start transparent proxy. Requires administrator privileges.
 
-    首次启用前必须确认 WinDivert 风险提示（Windows 平台），未确认时返回 403 + need_ack=true。
+    WinDivert risk warning must be acknowledged before first enable (Windows platform), returns 403 + need_ack=true if not acknowledged.
     """
     # WinDivert 风险提示检查（仅 Windows + 未确认时拦截）
     block = check_windivert_ack_or_block()
@@ -35,7 +36,7 @@ async def start():
 
 @router.post("/transparent-proxy/stop")
 async def stop():
-    """停止透明代理。"""
+    """Stop transparent proxy."""
     success, msg = stop_transparent_proxy()
     if success:
         return ok({"running": False, "msg": msg})

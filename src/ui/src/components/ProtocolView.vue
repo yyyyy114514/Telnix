@@ -1,7 +1,10 @@
 <script setup lang="ts">
 // 协议深度解析视图：展示后端 /flows/{id}/decode 返回的结构化字段
 import { ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { api } from '../api/client'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   flowId: number | null
@@ -50,14 +53,14 @@ watch(() => [props.flowId, props.field], load, { immediate: true })
   <div class="proto-view">
     <div v-if="loading" class="text-dim proto-loading">
       <el-icon class="is-loading"><Loading /></el-icon>
-      &nbsp;解析中...
+      &nbsp;{{ t('protocolView.parsing') }}
     </div>
     <template v-else-if="result">
       <div v-if="result.error" class="proto-error">
         <el-icon><WarningFilled /></el-icon>&nbsp;{{ result.error }}
       </div>
       <div v-else-if="!result.fields?.length" class="empty-text text-dim proto-empty">
-        （无数据）
+        {{ t('protocolView.noData') }}
       </div>
       <template v-else>
         <div v-if="result.summary" class="proto-summary">
@@ -72,12 +75,12 @@ watch(() => [props.flowId, props.field], load, { immediate: true })
             :class="f.color ? `clr-${f.color}` : ''"
           >
             <div class="proto-label">{{ f.label }}</div>
-            <pre class="proto-value mono">{{ f.value || '(空)' }}</pre>
+            <pre class="proto-value mono">{{ f.value || t('protocolView.empty') }}</pre>
           </div>
         </div>
       </template>
     </template>
-    <div v-else class="empty-text text-dim proto-empty">（无数据）</div>
+    <div v-else class="empty-text text-dim proto-empty">{{ t('protocolView.noData') }}</div>
   </div>
 </template>
 

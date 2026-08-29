@@ -1,16 +1,17 @@
-"""TLS 证书信息解析模块。
+"""TLS certificate info parser module.
 
-在 HTTPS 转发时获取对端证书 DER，解析为结构化信息存入 flow。
-用 cryptography 库解析（已是项目依赖）。
+Obtains the peer certificate DER during HTTPS forwarding and parses it into
+structured info stored in the flow. Uses the cryptography library (already a
+project dependency).
 
-解析字段：
-- subject: 主题（CN/O/OU/C 等）
-- issuer: 颁发者
-- not_before: 生效时间
-- not_after: 过期时间
-- san: Subject Alternative Names（域名列表）
-- serial_number: 序列号
-- fingerprint_sha256: SHA256 指纹
+Parsed fields:
+- subject: subject (CN/O/OU/C etc.)
+- issuer: issuer
+- not_before: validity start time
+- not_after: expiration time
+- san: Subject Alternative Names (domain list)
+- serial_number: serial number
+- fingerprint_sha256: SHA256 fingerprint
 """
 from __future__ import annotations
 
@@ -19,13 +20,13 @@ from typing import Optional
 
 
 def get_cert_info(cert_der: bytes) -> Optional[dict]:
-    """解析 DER 编码的证书，返回结构化信息。
+    """Parse a DER-encoded certificate and return structured info.
 
-    参数：
-        cert_der: DER 编码的证书字节（从 sock.getpeercert(binary_form=True) 获取）
+    Parameters:
+        cert_der: DER-encoded certificate bytes (obtained from sock.getpeercert(binary_form=True))
 
-    返回：
-        dict 或 None（解析失败返回 None）
+    Returns:
+        dict or None (returns None on parse failure)
         {
             "subject": "CN=example.com, O=Org",
             "issuer": "CN=DigiCert, O=DigiCert Inc",
@@ -53,7 +54,7 @@ def get_cert_info(cert_der: bytes) -> Optional[dict]:
         return None
 
     def _format_name(name) -> str:
-        """格式化 X509 Name 为 'CN=xxx, O=yyy' 形式。"""
+        """Format an X509 Name into the 'CN=xxx, O=yyy' form."""
         try:
             parts = []
             for attr in name:

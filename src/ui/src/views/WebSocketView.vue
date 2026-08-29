@@ -8,6 +8,7 @@ import { api, type Flow } from '../api/client'
 import { useCaptureStore } from '../stores/capture'
 import { useFlowsStore } from '../stores/flows'
 import HexView from '../components/HexView.vue'
+import RawView from '../components/RawView.vue'
 
 const capture = useCaptureStore()
 const flowsStore = useFlowsStore()
@@ -111,15 +112,40 @@ function onPopupHeaderDown(e: MouseEvent) {
 }
 function onPopupDragMove(e: MouseEvent) {
   if (!isDraggingPopup) return
-  popupPos.value = {
-    left: popupStartLeft + (e.clientX - dragStartX),
-    top: popupStartTop + (e.clientY - dragStartY),
-  }
+  // clamp 到视口范围内，确保悬浮窗 header 始终可见可拖回
+  const maxLeft = Math.max(0, window.innerWidth - 120)
+  const maxTop = Math.max(0, window.innerHeight - 60)
+  const left = Math.min(Math.max(0, popupStartLeft + (e.clientX - dragStartX)), maxLeft)
+  const top = Math.min(Math.max(0, popupStartTop + (e.clientY - dragStartY)), maxTop)
+  popupPos.value = { left, top }
 }
 function onPopupDragUp() {
   isDraggingPopup = false
   window.removeEventListener('mousemove', onPopupDragMove)
   window.removeEventListener('mouseup', onPopupDragUp)
+}
+
+// ---------- 分隔线拖拽 ----------
+const leftRatio = ref(0.4)
+const dragging = ref(false)
+const wsBodyRef = ref<HTMLElement | null>(null)
+function onSplitDown(e: MouseEvent) {
+  e.preventDefault()
+  dragging.value = true
+  window.addEventListener('mousemove', onSplitMove)
+  window.addEventListener('mouseup', onSplitUp)
+}
+function onSplitMove(e: MouseEvent) {
+  const el = wsBodyRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const r = (e.clientX - rect.left) / rect.width
+  leftRatio.value = Math.min(0.7, Math.max(0.25, r))
+}
+function onSplitUp() {
+  dragging.value = false
+  window.removeEventListener('mousemove', onSplitMove)
+  window.removeEventListener('mouseup', onSplitUp)
 }
 
 // ---------- 多选模式 ----------
@@ -315,6 +341,16 @@ const ctxMenu = ref<{ visible: boolean; x: number; y: number; flow: Flow | null 
   visible: false, x: 0, y: 0, flow: null,
 })
 const ctxMenuRef = ref<HTMLElement | null>(null)
+const showCopySubmenu = ref(false)
+const showIgnoreSubmenu = ref(false)
+
+function onSubmenuEnter(type: 'copy' | 'ignore') {
+  if (type === 'copy') { showCopySubmenu.value = true; showIgnoreSubmenu.value = false }
+  else { showCopySubmenu.value = false; showIgnoreSubmenu.value = true }
+}
+function onSubmenuLeave() {
+  showCopySubmenu.value = false; showIgnoreSubmenu.value = false
+}
 
 const COPY_FIELDS = computed(() => [
   { key: 'id', label: 'ID', field: 'id' },
@@ -326,6 +362,12 @@ const COPY_FIELDS = computed(() => [
   { key: 'size', label: t('ws.size'), field: 'size' },
   { key: 'time', label: t('ws.time'), field: 'timestamp' },
 ])
+
+function buildWsCurl(f: any): string {
+  const url = `ws://${f.host}${f.path}`
+  let curl = `curl --include --no-buffer \\\n  --upgrade \\\n  -H 'Upgrade: websocket' \\\n  -H 'Connection: Upgrade' \\\n  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \\\n  -H 'Sec-WebSocket-Version: 13' \\\n  '${url}'`
+  return curl
+}
 
 function onContextMenu(e: MouseEvent, flow: Flow) {
   e.preventDefault()
@@ -350,6 +392,8 @@ function closeCtxMenu() {
 }
 
 function getFieldValue(f: any, field: string): string {
+  if (field === '_curl') return buildWsCurl(f)
+  if (field === '_url') return `ws://${f.host}${f.path}`
   const v = f[field]
   return v === null || v === undefined ? '' : String(v)
 }
@@ -360,6 +404,90 @@ function copyField(field: string) {
   const text = getFieldValue(f, field)
   navigator.clipboard.writeText(text).catch(() => {})
   ElMessage.success(t('ws.copied', { text: text.length > 40 ? text.slice(0, 40) + '...' : text }))
+  closeCtxMenu()
+}
+
+function ctxCopyUrl() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const url = `ws://${f.host}${f.path}`
+  navigator.clipboard.writeText(url).catch(() => {})
+  ElMessage.success(t('ws.copied', { text: url.length > 40 ? url.slice(0, 40) + '...' : url }))
+  closeCtxMenu()
+}
+
+function ctxCopyCurl() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const curl = buildWsCurl(f)
+  navigator.clipboard.writeText(curl).catch(() => {})
+  ElMessage.success(t('ws.copied', { text: 'cURL' }))
+  closeCtxMenu()
+}
+
+function ctxCopyRequest() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const body = f.request_body || ''
+  navigator.clipboard.writeText(body).catch(() => {})
+  ElMessage.success(t('ws.copied', { text: body.length > 40 ? body.slice(0, 40) + '...' : body }))
+  closeCtxMenu()
+}
+
+function ctxCopyResponse() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const body = f.response_body || ''
+  navigator.clipboard.writeText(body).catch(() => {})
+  ElMessage.success(t('ws.copied', { text: body.length > 40 ? body.slice(0, 40) + '...' : body }))
+  closeCtxMenu()
+}
+
+async function ctxIgnoreProcess() {
+  const f = ctxMenu.value.flow
+  if (!f || !f.process_name) {
+    ElMessage.warning(t('ws.noProcessInfo'))
+    closeCtxMenu()
+    return
+  }
+  try {
+    await api.ignoreProcess({ pid: f.pid, name: f.process_name })
+    ElMessage.success(t('ws.ignoredProcess', { name: f.process_name }))
+  } catch (e: any) {
+    ElMessage.error(t('ws.ignoreFailed', { msg: e?.message || e }))
+  }
+  closeCtxMenu()
+}
+
+async function ctxIgnorePid() {
+  const f = ctxMenu.value.flow
+  if (!f || !f.pid) {
+    ElMessage.warning(t('ws.noPidInfo'))
+    closeCtxMenu()
+    return
+  }
+  try {
+    await api.ignoreProcess({ pid: f.pid, name: f.process_name || '' })
+    ElMessage.success(t('ws.ignoredPid', { pid: f.pid }))
+  } catch (e: any) {
+    ElMessage.error(t('ws.ignoreFailed', { msg: e?.message || e }))
+  }
+  closeCtxMenu()
+}
+
+async function ctxIgnoreHost() {
+  const f = ctxMenu.value.flow
+  if (!f || !f.host) {
+    ElMessage.warning(t('ws.noHostInfo'))
+    closeCtxMenu()
+    return
+  }
+  try {
+    await api.ignoreHost(f.host)
+    ElMessage.success(t('ws.ignoredHost', { host: f.host }))
+  } catch (e: any) {
+    ElMessage.error(t('ws.ignoreFailed', { msg: e?.message || e }))
+  }
   closeCtxMenu()
 }
 
@@ -408,6 +536,13 @@ function onFlowsCleared() {
 
 async function loadFlows() {
   let sid = capture.status.session_id
+  if (!sid) {
+    // 等待 capture.status 初始化（最多 2s）
+    for (let i = 0; i < 20 && !sid; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      sid = capture.status.session_id
+    }
+  }
   if (!sid) {
     try {
       const sessions: any = await api.getSessions()
@@ -524,9 +659,11 @@ function dirColor(method: string): string {
 onMounted(() => {
   loadFlows()
   // 增量轮询：用 since_id 只拉新流量，降低流量大时的开销
+  // 性能修复：页面不可见（切到其他标签/最小化）时跳过轮询，避免后台无谓请求
   pollTimer = window.setInterval(() => {
+    if (document.hidden) return
     pollNewFlows()
-  }, 2000)
+  }, 3000)
   document.addEventListener('click', onGlobalClick)
   window.addEventListener('telnix:flows-cache-cleared', onFlowsCleared)
 })
@@ -538,6 +675,8 @@ onUnmounted(() => {
   window.removeEventListener('telnix:flows-cache-cleared', onFlowsCleared)
   window.removeEventListener('mousemove', onPopupDragMove)
   window.removeEventListener('mouseup', onPopupDragUp)
+  // 重置拖动状态，避免组件销毁时正在拖动导致状态不一致
+  isDraggingPopup = false
 })
 </script>
 
@@ -545,12 +684,9 @@ onUnmounted(() => {
   <div class="ws-view-page full flex flex-col">
     <!-- 顶部工具栏 -->
     <div class="ws-toolbar">
-      <span class="ws-title">
+      <span class="ws-title no-select">
         <el-icon><Connection /></el-icon>&nbsp;{{ t('ws.title') }}
       </span>
-      <div class="ws-status-tags">
-        <el-tag size="small" type="info">{{ t('ws.messagesCount', { n: flows.length }) }}</el-tag>
-      </div>
       <div class="flex-1"></div>
       <span class="text-dim mono" style="font-size: 11px">
         {{ t('ws.aggregateHint') }}
@@ -698,17 +834,17 @@ onUnmounted(() => {
       </div>
     </transition>
 
-    <!-- 主体：左列表 + 右详情 -->
-    <div class="ws-body flex-1 flex overflow-hidden">
-      <div class="ws-list-pane">
-        <div class="wl-head mono" :style="{ gridTemplateColumns: gridCols }">
+    <!-- 主体：左列表 + 右详情 + 可拖拽分隔线 -->
+    <div class="ws-body flex-1 flex overflow-hidden" ref="wsBodyRef">
+      <div class="ws-list-pane" :style="{ width: `${leftRatio * 100}%` }">
+        <div class="wl-head mono no-select" :style="{ gridTemplateColumns: gridCols }">
           <div v-if="multiSelectMode" class="wl-check"></div>
           <div class="wl-id">#</div>
-          <div class="wl-dir">{{ t('ws.direction') }}</div>
-          <div class="wl-host">Host</div>
-          <div class="wl-path">Path</div>
-          <div class="wl-size">{{ t('ws.size') }}</div>
-          <div class="wl-time">{{ t('ws.time') }}</div>
+          <div class="wl-dir no-select">{{ t('ws.direction') }}</div>
+          <div class="wl-host no-select">Host</div>
+          <div class="wl-path no-select">Path</div>
+          <div class="wl-size no-select">{{ t('ws.size') }}</div>
+          <div class="wl-time no-select">{{ t('ws.time') }}</div>
         </div>
         <div ref="bodyRef" class="wl-body flex-1 overflow-auto" @scroll="onBodyScroll">
           <div :style="{ height: topPad + 'px' }"></div>
@@ -744,7 +880,7 @@ onUnmounted(() => {
             class="multi-float-bar"
             @mouseenter="showFloatBarNow"
           >
-            <span class="mfb-count">{{ t('ws.selectedN', { n: selectedCount }) }}</span>
+            <span class="mfb-count no-select">{{ t('ws.selectedN', { n: selectedCount }) }}</span>
             <el-button size="small" @click="selectAllFlows">{{ t('ws.selectAll') }}</el-button>
             <el-button size="small" @click="clearSelection" :disabled="!selectedCount">{{ t('ws.clear') }}</el-button>
             <el-button
@@ -773,7 +909,8 @@ onUnmounted(() => {
           </div>
         </transition>
       </div>
-      <div class="ws-detail-pane">
+      <div class="ws-splitter" :class="{ active: dragging }" @mousedown="onSplitDown"></div>
+      <div class="ws-detail-pane" :style="{ width: `${(1 - leftRatio) * 100}%` }">
         <div v-if="!selectedFlow" class="empty-detail text-dim">
           <el-icon :size="36"><Document /></el-icon>
           <div style="margin-top: 10px">{{ t('ws.selectToViewHex') }}</div>
@@ -793,9 +930,7 @@ onUnmounted(() => {
               <HexView :data="selectedHex" />
             </el-tab-pane>
             <el-tab-pane label="Raw" name="raw" lazy>
-              <div class="ws-raw-view mono overflow-auto">
-                <pre>{{ selectedRaw || t('ws.empty') }}</pre>
-              </div>
+              <RawView :flow="selectedFlow" type="ws" />
             </el-tab-pane>
           </el-tabs>
         </template>
@@ -813,12 +948,29 @@ onUnmounted(() => {
       >
         <div class="ctx-item" @click="onFlowDblClick(ctxMenu.flow!)"><el-icon><Aim /></el-icon>&nbsp;{{ t('ws.viewInCapture') }}</div>
         <div class="ctx-sep"></div>
-        <div class="ctx-item ctx-submenu">
+        <div class="ctx-item" @click="ctxCopyUrl"><el-icon><Link /></el-icon>&nbsp;{{ t('ws.copyUrl') }}</div>
+        <div class="ctx-item" @click="ctxCopyCurl"><el-icon><DocumentCopy /></el-icon>&nbsp;{{ t('ws.copyCurl') }}</div>
+        <div class="ctx-item" @click="ctxCopyRequest"><el-icon><Top /></el-icon>&nbsp;{{ t('ws.copyRequest') }}</div>
+        <div class="ctx-item" @click="ctxCopyResponse"><el-icon><Bottom /></el-icon>&nbsp;{{ t('ws.copyResponse') }}</div>
+        <div class="ctx-sep"></div>
+        <!-- 忽略：hover 子菜单 -->
+        <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter('ignore')" @mouseleave="onSubmenuLeave">
+          <el-icon><Filter /></el-icon>&nbsp;{{ t('ws.ignore') }}
+          <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
+          <div class="ctx-submenu-panel" :class="{ visible: showIgnoreSubmenu }">
+            <div class="ctx-item" @click="ctxIgnoreProcess"><el-icon><Link /></el-icon>&nbsp;{{ t('ws.ignoreByProcess') }}</div>
+            <div class="ctx-item" @click="ctxIgnorePid"><el-icon><Link /></el-icon>&nbsp;{{ t('ws.ignoreByPid') }}</div>
+            <div class="ctx-item" @click="ctxIgnoreHost"><el-icon><Link /></el-icon>&nbsp;{{ t('ws.ignoreByHost') }}</div>
+          </div>
+        </div>
+        <div class="ctx-sep"></div>
+        <!-- 复制：hover 子菜单 -->
+        <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter('copy')" @mouseleave="onSubmenuLeave">
           <el-icon><CopyDocument /></el-icon>&nbsp;{{ t('ws.copy') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
-        </div>
-        <div class="ctx-submenu-panel">
-          <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">{{ item.label }}</div>
+          <div class="ctx-submenu-panel" :class="{ visible: showCopySubmenu }">
+            <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">{{ item.label }}</div>
+          </div>
         </div>
         <div class="ctx-sep"></div>
         <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;{{ t('ws.delete') }}</div>
@@ -838,9 +990,8 @@ onUnmounted(() => {
 .ws-status-tags { display: flex; gap: 6px; align-items: center; }
 .ws-body { min-height: 0; }
 .ws-list-pane {
-  width: 50%; display: flex; flex-direction: column;
-  border-right: 1px solid var(--on-border-light); min-width: 0;
-  position: relative;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--on-border-light); min-width: 0; overflow: hidden;
 }
 .wl-head, .wl-row {
   display: grid;
@@ -875,7 +1026,12 @@ onUnmounted(() => {
 .wl-path-url:hover::-webkit-scrollbar-track { background: transparent; }
 .wl-check { display: flex; align-items: center; justify-content: center; }
 .empty-text { text-align: center; padding: 30px; color: var(--on-text-dim); }
-.ws-detail-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.ws-detail-pane { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.ws-splitter {
+  width: 4px; background: var(--on-border-light); cursor: col-resize; flex-shrink: 0;
+  transition: background 0.15s;
+}
+.ws-splitter:hover, .ws-splitter.active { background: var(--on-accent); }
 .empty-detail {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center;
@@ -920,20 +1076,22 @@ onUnmounted(() => {
   display: inline-block;
   width: 6px; height: 6px;
   border-radius: var(--on-radius-full);
-  background: var(--on-accent, #2dd4bf);
+  background: var(--on-accent);
   margin-left: 2px;
   vertical-align: middle;
 }
 
 /* 统一悬浮窗 */
+/* UX 修复：min-width 用 min() 钳位并限制 max-width，窄窗口下不溢出视口 */
 .popup-shell {
   position: absolute;
   z-index: 30;
-  min-width: 340px;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  min-width: min(340px, calc(100vw - 20px));
+  max-width: calc(100vw - 20px);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-lg);
-  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  box-shadow: var(--on-shadow-lg);
   font-size: 12.5px;
   overflow: hidden;
 }
@@ -941,13 +1099,13 @@ onUnmounted(() => {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px;
   cursor: move;
-  background: var(--on-bg-hover, #252535);
+  background: var(--on-bg-hover);
   border-bottom: 1px solid var(--on-border-light);
   user-select: none;
 }
 .popup-title { font-weight: 600; font-size: 12.5px; }
 .popup-close { cursor: pointer; opacity: .6; }
-.popup-close:hover { opacity: 1; color: var(--el-color-danger, #f56c6c); }
+.popup-close:hover { opacity: 1; color: var(--el-color-danger); }
 .popup-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 .popup-fade-enter-active, .popup-fade-leave-active {
   transition: opacity .15s ease, transform .15s ease;
@@ -1009,14 +1167,14 @@ onUnmounted(() => {
   z-index: 20;
   display: flex; align-items: center; gap: 6px;
   padding: 6px 10px;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-lg);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+  box-shadow: var(--on-shadow-md);
   font-size: 12px;
 }
 .mfb-count {
-  color: var(--on-accent, #2dd4bf);
+  color: var(--on-accent);
   font-weight: 600;
   padding-right: 4px;
 }
@@ -1033,10 +1191,10 @@ onUnmounted(() => {
   right: 0;
   margin-top: 6px;
   padding: 10px 12px;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-lg);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  box-shadow: var(--on-shadow-md);
   min-width: 220px;
   z-index: 21;
 }
@@ -1069,5 +1227,5 @@ onUnmounted(() => {
   border: 1px solid var(--on-border); border-radius: var(--on-radius-md);
   box-shadow: 0 4px 16px rgba(0,0,0,0.4); padding: 4px 0;
 }
-.ctx-submenu:hover .ctx-submenu-panel { display: block; }
+.ctx-submenu:hover .ctx-submenu-panel, .ctx-submenu-panel.visible { display: block; }
 </style>

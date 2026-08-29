@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { Flow, TechFingerprint } from '../api/client'
 import { api } from '../api/client'
 import HeaderView from './HeaderView.vue'
@@ -9,6 +10,7 @@ import HexView from './HexView.vue'
 import PreviewView from './PreviewView.vue'
 
 // 响应检查器：多标签页，断点时可编辑
+const { t } = useI18n()
 const props = defineProps<{
   flow: Flow
   editable: boolean
@@ -24,8 +26,11 @@ const headersStr = ref(props.flow.response_headers || '')
 const bodyStr = ref(props.flow.response_body || '')
 const activeTab = ref('preview')
 
+// 监听 flow 字段变化（不仅 id）：SSE 响应补齐 / select() 异步拉取完整数据后，
+// props.flow.response_body / response_headers 会被 Object.assign 原地更新，
+// 需同步刷新本地 ref，否则 Preview 会一直显示旧的空 body
 watch(
-  () => props.flow.id,
+  () => [props.flow.id, props.flow.response_body, props.flow.response_headers],
   () => {
     headersStr.value = props.flow.response_headers || ''
     bodyStr.value = props.flow.response_body || ''
@@ -94,7 +99,7 @@ const tabs = computed(() => {
 // - autoSwitch 开启时：HTTP→Preview，TCP/UDP→Hex
 // - autoSwitch 关闭时：保持当前 tab，如果当前 tab 在新流量中不存在则不选
 watch(
-  () => props.flow.id,
+  () => [props.flow.id, props.flow.protocol],
   () => {
     const proto = props.flow.protocol
     // WS/TCP/UDP 流量默认选中 Hex
@@ -190,16 +195,16 @@ const techGroups = computed(() => {
   return groups
 })
 
-const TECH_CATEGORY_LABEL: Record<string, string> = {
-  server: '服务器',
-  language: '语言 / 运行时',
-  framework: '后端框架',
-  frontend: '前端',
-  cms: 'CMS',
-  cdn_waf: 'CDN / WAF',
-  analytics: '统计',
-  build_tool: '构建工具',
-}
+const TECH_CATEGORY_LABEL = computed<Record<string, string>>(() => ({
+  server: t('inspector.techServer'),
+  language: t('inspector.techLanguage'),
+  framework: t('inspector.techFramework'),
+  frontend: t('inspector.techFrontend'),
+  cms: t('inspector.techCms'),
+  cdn_waf: t('inspector.techCdnWaf'),
+  analytics: t('inspector.techAnalytics'),
+  build_tool: t('inspector.techBuildTool'),
+}))
 
 function confidenceColor(c: string): 'success' | 'warning' | 'info' {
   if (c === 'high') return 'success'
@@ -207,9 +212,9 @@ function confidenceColor(c: string): 'success' | 'warning' | 'info' {
   return 'info'
 }
 function confidenceLabel(c: string): string {
-  if (c === 'high') return '高'
-  if (c === 'medium') return '中'
-  return '低'
+  if (c === 'high') return t('inspector.confidenceHigh')
+  if (c === 'medium') return t('inspector.confidenceMedium')
+  return t('inspector.confidenceLow')
 }
 </script>
 
@@ -249,13 +254,13 @@ function confidenceLabel(c: string): string {
         <el-tab-pane label="Tech" name="tech" lazy>
           <div class="tech-view">
             <div v-if="techLoading" class="tech-loading text-dim">
-              <el-icon class="is-loading"><Loading /></el-icon>&nbsp;识别中...
+              <el-icon class="is-loading"><Loading /></el-icon>&nbsp;{{ t('inspector.techLoading') }}
             </div>
             <div v-else-if="!techItems.length" class="tech-empty text-dim">
               <el-icon :size="28"><Cpu /></el-icon>
-              <div style="margin-top: 6px">未识别到明显技术栈特征</div>
+              <div style="margin-top: 6px">{{ t('inspector.techEmpty') }}</div>
               <div class="text-muted" style="font-size: 11px; margin-top: 4px">
-                可能是 HTTP 响应非 HTML/JSON 或无典型头/Cookie 特征
+                {{ t('inspector.techEmptyHint') }}
               </div>
             </div>
             <div v-else class="tech-groups">
@@ -277,12 +282,12 @@ function confidenceLabel(c: string): string {
         <el-tab-pane v-if="enabledTabs.includes('cache')" label="Cache" name="cache" lazy>
           <div class="cache-view overflow-auto">
             <table class="kv-table mono" v-if="cacheRows.length">
-              <thead><tr><th>名称</th><th>值</th></tr></thead>
+              <thead><tr><th>{{ t('common.name') }}</th><th>{{ t('common.value') }}</th></tr></thead>
               <tbody>
                 <tr v-for="(c, i) in cacheRows" :key="i"><td>{{ c.key }}</td><td>{{ c.value }}</td></tr>
               </tbody>
             </table>
-            <div v-else class="empty-text text-dim">（无缓存相关头）</div>
+            <div v-else class="empty-text text-dim">{{ t('inspector.noCacheHeaders') }}</div>
           </div>
         </el-tab-pane>
         <el-tab-pane v-if="enabledTabs.includes('xml')" label="XML" name="xml" lazy>

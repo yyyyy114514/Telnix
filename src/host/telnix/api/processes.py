@@ -1,9 +1,10 @@
-"""进程列表 API：用于筛选下拉 + 忽略进程管理。"""
+"""Process list API: used for filter dropdown + ignored process management."""
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from . import err, ok
 
 router = APIRouter()
@@ -11,10 +12,10 @@ router = APIRouter()
 
 @router.get("/processes")
 async def list_processes(request: Request):
-    """进程列表（有网络连接的进程，用于筛选下拉）。"""
+    """Process list (processes with network connections, for filter dropdown)."""
     proxy = request.app.state.telnix.proxy
     if proxy is None:
-        return err("代理未启动")
+        return err("Proxy not started")
     return ok(proxy.process_lookup.list_processes())
 
 
@@ -24,12 +25,12 @@ async def process_snapshot(request: Request,
                            tree: bool = False,
                            name: str = "",
                            include_listen: bool = False):
-    """进程快照（可选连接快照/进程树），用 psutil 直接读系统状态。
+    """Process snapshot (optional connection snapshot/process tree), reads system state directly with psutil.
 
-    - with_connections=true：附带每个进程的当前 TCP 连接（laddr/raddr/status）
-    - tree=true：按进程树输出，每个进程含 children 列表（找父子关系）
-    - name=x：按进程名过滤（大小写不敏感）
-    - include_listen=true：包含 LISTEN 状态连接（默认跳过，只看 ESTABLISHED）
+    - with_connections=true: includes each process's current TCP connections (laddr/raddr/status)
+    - tree=true: output as process tree, each process includes children list (find parent-child relationships)
+    - name=x: filter by process name (case-insensitive)
+    - include_listen=true: include LISTEN status connections (skipped by default, only ESTABLISHED shown)
     """
     try:
         import psutil
@@ -37,7 +38,7 @@ async def process_snapshot(request: Request,
         # 回退到普通 list_processes
         proxy = request.app.state.telnix.proxy
         if proxy is None:
-            return err("代理未启动")
+            return err("Proxy not started")
         return ok(proxy.process_lookup.list_processes())
 
     nl = name.lower() if name else ""
@@ -100,7 +101,7 @@ class IgnoreBody(BaseModel):
 
 @router.post("/processes/ignore")
 async def ignore_process(body: IgnoreBody, request: Request):
-    """忽略进程（该进程流量直连不抓）。pid 为空时按进程名忽略，可添加多个。"""
+    """Ignore process (this process's traffic goes direct without capture). When pid is empty, ignore by process name, can add multiple."""
     db.add_ignored_process(body.pid, body.name)
     proxy = request.app.state.telnix.proxy
     if proxy:
@@ -110,7 +111,7 @@ async def ignore_process(body: IgnoreBody, request: Request):
 
 @router.delete("/processes/ignore/{row_id}")
 async def unignore_process(row_id: int, request: Request):
-    """取消忽略进程（按行 id 删除）。"""
+    """Cancel ignore process (delete by row id)."""
     db.remove_ignored_process(row_id)
     proxy = request.app.state.telnix.proxy
     if proxy:
@@ -120,23 +121,23 @@ async def unignore_process(row_id: int, request: Request):
 
 @router.get("/processes/ignored")
 async def ignored_processes():
-    """已忽略进程列表。"""
+    """List of ignored processes."""
     return ok(db.get_ignored_processes())
 
 
-# ---------- 忽略 host 通配符 ----------
+# ---------- Ignore host wildcard ----------
 
 class IgnoreHostBody(BaseModel):
-    """添加忽略 host 通配符。支持 * ? 通配符，如 *.example.com。"""
+    """Add ignore host wildcard. Supports * ? wildcards, e.g. *.example.com."""
     host: str
 
 
 @router.post("/processes/ignore-host")
 async def ignore_host(body: IgnoreHostBody, request: Request):
-    """添加忽略 host（匹配的 host 流量直连不抓）。"""
+    """Add ignore host (matching host traffic goes direct without capture)."""
     pattern = (body.host or "").strip()
     if not pattern:
-        return err("host 不能为空")
+        return err("host cannot be empty")
     rec = db.add_ignored_host(pattern)
     proxy = request.app.state.telnix.proxy
     if proxy:
@@ -146,7 +147,7 @@ async def ignore_host(body: IgnoreHostBody, request: Request):
 
 @router.delete("/processes/ignore-host/{host_id}")
 async def unignore_host(host_id: int, request: Request):
-    """取消忽略 host。"""
+    """Cancel ignore host."""
     db.remove_ignored_host(host_id)
     proxy = request.app.state.telnix.proxy
     if proxy:
@@ -156,5 +157,5 @@ async def unignore_host(host_id: int, request: Request):
 
 @router.get("/processes/ignored-hosts")
 async def ignored_hosts():
-    """已忽略 host 列表。"""
+    """List of ignored hosts."""
     return ok(db.get_ignored_hosts())

@@ -4,10 +4,16 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useFlowsStore } from '../stores/flows'
 import { useCaptureStore } from '../stores/capture'
-import { api, type ProcessInfo } from '../api/client'
+import { useFlowTagStore } from '../stores/flowTag'
+import { useFlowBookmarkStore } from '../stores/flowBookmark'
+import { api, type ProcessInfo, type Flow } from '../api/client'
 import { syncPrefs } from '../stores/prefs'
 import { parseFlowFilter, matchFlow, type ParsedFilter } from '../utils/flowfilter'
 import { useVirtualList } from '../composables/useVirtualList'
+import FlowTagManager from './FlowTagManager.vue'
+import FlowBookmarkManager from './FlowBookmarkManager.vue'
+import FlowCompareDialog from './FlowCompareDialog.vue'
+import FlowPreview from './FlowPreview.vue'
 
 // 会话列表：表格 + 统一悬浮窗（筛选/专注） + 一键忽略 + 右键菜单
 const { t } = useI18n()
@@ -19,6 +25,8 @@ const props = defineProps<{
   multiSelectBarDelay?: number
   // 自动滚动+多选按钮靠右（仅抓包页启用，其他页保持默认左对齐）
   actionsRight?: boolean
+  // 窗口模式：紧凑模式下右键不选中行，避免触发流量详情滑窗
+  compactMode?: boolean
 }>()
 const emit = defineEmits<{
   'ignore-process': [proc: ProcessInfo]
@@ -31,12 +39,41 @@ const emit = defineEmits<{
   'flows-changed': []
   // 右键「自动修改」子菜单：mode='request' 基于请求预填，mode='response' 基于响应预填
   'auto-modify': [flow: any, mode: 'request' | 'response']
+  // 右键「添加延迟规则」：基于选中 flow 跳转到延迟规则页并预填
+  'add-delay-rule': [flow: any, phase: 'request' | 'response']
+  // 右键「添加到 Mock」：基于选中 flow 跳转到 Mock 页
+  'add-to-mock': [flow: any]
+  // 右键「添加到录制」：将 flow 添加到当前录制会话
+  'add-to-record': [flow: any]
 }>()
 
 const store = useFlowsStore()
 const capture = useCaptureStore()
+const tagStore = useFlowTagStore()
+const bookmarkStore = useFlowBookmarkStore()
 
-const bodyRef = ref<HTMLElement | null>(null)
+// 标记管理抽屉
+const showTagManager = ref(false)
+
+// 书签管理抽屉
+const showBookmarkManager = ref(false)
+
+// 标记筛选
+const activeTagFilter = ref<string | null>(null)
+
+// 对比相关
+const showCompareDialog = ref(false)
+const compareFlowA = ref<Flow | null>(null)
+const compareFlowB = ref<Flow | null>(null)
+const compareMode = ref(false) // 对比模式：第一个选中为 A，等待第二个为 B
+
+// 预览相关
+const previewVisible = ref(false)
+const previewFlow = ref<Flow | null>(null)
+const previewPosition = ref({ x: 0, y: 0 })
+
+// 标记相关的子菜单
+const showTagSubmenu = ref(false)
 
 // ---------- 多选模式 ----------
 const multiSelectMode = ref(false)
@@ -82,10 +119,14 @@ function batchReplay() {
   const ids = [...selectedFlowIds.value]
   if (!ids.length) return
   emit('replay-batch', ids)
+  // 与其他批量操作保持一致：清除多选状态
+  selectedFlowIds.value.clear()
+  multiSelectMode.value = false
 }
 
 // 批量删除：显示子悬浮窗确认（不弹页面中间框）
 const showDeleteConfirm = ref(false)
+
 function batchDeleteFlows() {
   if (!selectedFlowIds.value.size) return
   showDeleteConfirm.value = true
@@ -130,9 +171,17 @@ async function batchReleaseFlows(action: 'release' | 'drop' = 'release') {
   }
 }
 
+// 仅依赖选中的 ids 和 breakpointStatus，避免每次 store.flows 变化时都对全表 O(n) 扫描
+// （原实现 store.flows.some，SSE 16ms flush 下每秒最多 60 次全表扫描）
+// 改为只对 selectedFlowIds 中的 id 用 O(1) flowIndex 查询 + 单条 breakpoint_status 判断
 const hasPendingBreakpoint = computed(() => {
   const ids = selectedFlowIds.value
-  return store.flows.some(f => ids.has(f.id) && f.breakpoint_status)
+  if (ids.size === 0) return false
+  for (const id of ids) {
+    const f = store.getFlow(id)
+    if (f && f.breakpoint_status) return true
+  }
+  return false
 })
 
 // ---------- 多选悬浮工具栏 ----------
@@ -254,12 +303,17 @@ function onPopupDragUp() {
 onUnmounted(() => {
   window.removeEventListener('mousemove', onPopupDragMove)
   window.removeEventListener('mouseup', onPopupDragUp)
+  window.removeEventListener('telnix:set-flow-filter', onSetFlowFilter)
   // 清理自动滚动暂停定时器，避免组件卸载后回调仍触发访问已卸载的 store/refs
   if (scrollPauseTimer !== null) clearTimeout(scrollPauseTimer)
+  // 清理用户滚动重置定时器
+  if (userScrollResetTimer !== null) clearTimeout(userScrollResetTimer)
   // 清理多选工具栏显隐定时器
   if (floatBarTimer !== null) clearTimeout(floatBarTimer)
   // 清理 knownHosts/Methods/StatusCodes debounce 定时器
   if (knownDebounceTimer !== null) clearTimeout(knownDebounceTimer)
+  // 清理预览定时器
+  if (previewTimer !== null) clearTimeout(previewTimer)
 })
 
 // ---------- 专注模式 ----------
@@ -418,8 +472,14 @@ const COL_DEFS = computed<ColDef[]>(() => [
   { key: 'pid', label: 'flowList.colPid', width: '64px', cellClass: 'col-pid text-muted', text: (f) => String(f.pid ?? '-') },
   { key: 'proc', label: 'flowList.process', width: '1fr', always: true, cellClass: 'col-proc text-muted', text: (f) => f.process_name || '-' },
   { key: 'size', label: 'common.size', width: '70px', cellClass: 'col-size text-muted', text: (f) => formatSize(f.size) },
-  { key: 'duration', label: 'common.duration', width: '64px', cellClass: 'col-time text-muted', text: (f) => f.duration_ms !== null ? f.duration_ms + 'ms' : '' },
-  { key: 'ip_region', label: t('flowList.ipRegion'), width: '90px', cellClass: 'col-ip-region text-muted', text: (f) => (f.ip_region && !f.ip_region.startsWith('base64:')) ? f.ip_region : '-' },
+  { key: 'duration', label: 'common.duration', width: '64px', cellClass: 'col-time text-muted', text: (f) => {
+    const d = f.duration_ms
+    return d == null || d === 0 ? '-' : d + 'ms'
+  } },
+  { key: 'ip_region', label: t('flowList.ipRegion'), width: '90px', cellClass: 'col-ip-region text-muted', text: (f) => {
+    const r = f.ip_region
+    return r && !r.startsWith('base64:') ? r : '-'
+  } },
 ])
 const COL_ORDER_KEY = 'telnix_col_order'
 
@@ -467,6 +527,10 @@ const gridCols = computed(() => {
   for (const c of visibleCols.value) parts.push(c.width)
   return parts.join(' ')
 })
+
+// 性能修复(审计 P-#7)：v-memo 需要稳定的值用于比较，gridCols 是数组引用，
+// 每次 computed 重算都会生成新数组导致虚拟滚动失效。改为字符串形式传给 v-memo。
+const gridColsKey = computed(() => gridCols.value)
 
 // 列拖拽排序
 const dragColKey = ref<string | null>(null)
@@ -521,8 +585,10 @@ function extractContentType(flow: any): string {
       }
     } catch { /* ignore */ }
   }
-  // null/字符串均缓存（null 缓存为 ''）；仅 undefined（字段缺失）不缓存
-  if (raw !== undefined) {
+  // 仅在有真实 response_headers 时缓存（raw 为真值）
+  // lite flow（raw=null）不缓存，这样 SSE 响应补齐带 response_headers 后会被重新解析
+  // 修复：筛选后新来包不会更新列表（因为旧空值被缓存，新 response_headers 到达后仍读缓存）
+  if (raw) {
     if (_ctCache.size >= 5000) {
       const firstKey = _ctCache.keys().next().value
       if (firstKey !== undefined) _ctCache.delete(firstKey)
@@ -586,7 +652,15 @@ function select(flow: any) {
 // 性能优化：
 // 1. 去掉 [...store.flows].sort()（store 已保证降序，重复排序 O(n log n) 浪费）
 // 2. 合并 6 次链式 filter 为单次遍历，减少中间数组分配
+// 3. 无过滤时返回源数组引用（不 slice），用 _displayFlowsVersion 哨兵触发重算
+//    避免 5000 条每次 SSE flush 都 O(n) 拷贝
+const _displayFlowsVersion = ref(0)
+// 监听 store.flows 引用变化，递增哨兵触发 displayFlows 重算
+watch(() => store.flows, () => { _displayFlowsVersion.value++ }, { deep: false })
+
 const displayFlows = computed(() => {
+  // 依赖哨兵：store.flows 引用变化时递增，触发本 computed 重算
+  void _displayFlowsVersion.value
   const src = store.flows
   const focusOn = focusEnabled.value
   const fPids = focusPids.value
@@ -610,11 +684,11 @@ const displayFlows = computed(() => {
   const dslConditions = dslFilter.value.conditions
   const hasDsl = dslConditions.length > 0
 
-  // 无任何过滤条件：返回源数组的浅拷贝（确保新引用，触发下游 computed 重新计算）
-  // 修复实时出包：store.flows 是 shallowRef，flushSSEBatch/pollNewFlows 用 unshift 修改原数组
-  // 后 triggerRef 触发 displayFlows 重新计算，但若直接返回 src（同一引用），Object.is 比较
-  // 认为值未变，下游 useVirtualList 的 visibleItems 不会重新计算，导致新流量不渲染。
-  if (!focusOn && !hasFilterAny && !hasDsl) return src.slice()
+  // 无任何过滤条件：直接返回源数组引用（不 slice）。
+  // useVirtualList 的 visibleItems 缓存会检测引用变化并重新 slice，
+  // 所以这里返回同一引用不会导致虚拟滚动不更新。
+  // 哨兵 _displayFlowsVersion 确保本 computed 在 flows 变化时重算。
+  if (!focusOn && !hasFilterAny && !hasDsl) return src
 
   const result: any[] = []
   for (const f of src) {
@@ -836,6 +910,8 @@ const focusHostSelectRef = ref<any>(null)
 // ---------- 自动滚动 ----------
 let scrollPauseTimer: number | null = null
 let programmaticScroll = false
+const userScrolling = ref(false)
+let userScrollResetTimer: number | null = null
 
 function onBodyScroll(e: Event) {
   // 虚拟滚动：更新可视区 startIndex/endIndex
@@ -844,6 +920,13 @@ function onBodyScroll(e: Event) {
     programmaticScroll = false
     return
   }
+  // 用户手动滚动，设置标志位
+  userScrolling.value = true
+  if (userScrollResetTimer !== null) clearTimeout(userScrollResetTimer)
+  userScrollResetTimer = window.setTimeout(() => {
+    userScrolling.value = false
+    userScrollResetTimer = null
+  }, 3000)
   if (multiSelectMode.value) hideFloatBar()
   if (!store.autoScroll) return
   store.autoScrollPaused = true
@@ -885,10 +968,15 @@ watch(
 // 检查 selectedId 是否在视口内，不在则滚动到该行。
 // 解决：跨页跳转 → selectFlow 注入 flow → router.push → CaptureView onMounted
 // 调 loadAllFlows 覆盖列表 → selectedId 仍在但行未渲染 → 需要在 flows 变化后重新定位
+// 用户手动滚动或自动滚动暂停时跳过，避免弹回选中行
 watch(
   () => store.flows,
   async () => {
     if (store.selectedId == null) return
+    // 用户正在手动滚动，不干扰
+    if (userScrolling.value) return
+    // 自动滚动暂停中（用户刚手动滚过），不弹回
+    if (store.autoScrollPaused) return
     await nextTick()
     const el = bodyRef.value
     if (!el) return
@@ -931,10 +1019,12 @@ function scrollRowIntoView(row: HTMLElement) {
 }
 
 // selectedId 变化时滚动到选中行（跨页跳转后定位）
+// 只有在用户没有手动滚动时才自动滚动
 watch(
   () => store.selectedId,
   async (id) => {
     if (id == null) return
+    if (userScrolling.value) return
     await nextTick()
     const el = bodyRef.value
     if (!el) return
@@ -977,10 +1067,11 @@ const processOptions = computed(() => props.processes)
 const ctxMenu = ref<{ visible: boolean; x: number; y: number; flow: any }>({
   visible: false, x: 0, y: 0, flow: null,
 })
-// 二级菜单显示控制（复制 / 忽略 / 自动修改）
+// 二级菜单显示控制（复制 / 忽略 / 自动修改 / 延迟规则）
 const showCopySubmenu = ref(false)
 const showIgnoreSubmenu = ref(false)
 const showModifySubmenu = ref(false)
+const showDelaySubmenu = ref(false)
 // 子菜单对齐方向：right（向右展开）/ left（向左展开）
 const submenuAlign = ref<'left' | 'right'>('right')
 // 子菜单 fixed 定位（彻底解决屏幕外问题：用 position:fixed + JS 实时测量）
@@ -988,13 +1079,15 @@ const submenuPos = ref<{ left: number; top: number }>({ left: 0, top: 0 })
 const ctxMenuRef = ref<HTMLElement | null>(null)
 
 // 子菜单 hover：用主菜单 + 子菜单实际尺寸做双向水平 + 垂直边界检查
-function onSubmenuEnter(e: MouseEvent, which: 'ignore' | 'copy' | 'modify') {
+function onSubmenuEnter(e: MouseEvent, which: 'ignore' | 'copy' | 'modify' | 'delay' | 'tag') {
   const menuItem = e.currentTarget as HTMLElement
   const menu = menuItem.closest('.ctx-menu') as HTMLElement | null
   if (!menu) {
     if (which === 'ignore') showIgnoreSubmenu.value = true
     else if (which === 'copy') showCopySubmenu.value = true
-    else showModifySubmenu.value = true
+    else if (which === 'modify') showModifySubmenu.value = true
+    else if (which === 'delay') showDelaySubmenu.value = true
+    else if (which === 'tag') showTagSubmenu.value = true
     return
   }
 
@@ -1023,7 +1116,9 @@ function onSubmenuEnter(e: MouseEvent, which: 'ignore' | 'copy' | 'modify') {
   // 显示子菜单
   if (which === 'ignore') showIgnoreSubmenu.value = true
   else if (which === 'copy') showCopySubmenu.value = true
-  else showModifySubmenu.value = true
+  else if (which === 'modify') showModifySubmenu.value = true
+  else if (which === 'delay') showDelaySubmenu.value = true
+  else if (which === 'tag') showTagSubmenu.value = true
 
   // 第二阶段：DOM 渲染后用实际尺寸修正（确保不超出）
   nextTick(() => {
@@ -1056,15 +1151,27 @@ function onSubmenuEnter(e: MouseEvent, which: 'ignore' | 'copy' | 'modify') {
   })
 }
 
-function onSubmenuLeave(which: 'ignore' | 'copy' | 'modify') {
+function onSubmenuLeave(which: 'ignore' | 'copy' | 'modify' | 'delay' | 'tag') {
   if (which === 'ignore') showIgnoreSubmenu.value = false
   else if (which === 'copy') showCopySubmenu.value = false
-  else showModifySubmenu.value = false
+  else if (which === 'modify') showModifySubmenu.value = false
+  else if (which === 'delay') showDelaySubmenu.value = false
+  else if (which === 'tag') showTagSubmenu.value = false
 }
 
 function onContextMenu(e: MouseEvent, flow: any) {
   e.preventDefault()
-  store.select(flow.id)
+  // 窗口模式（compactMode）下不选中行，避免触发流量详情滑窗
+  if (!props.compactMode) {
+    store.select(flow.id)
+  }
+  // 右键菜单视为用户操作，暂停自动滚动到选中行
+  userScrolling.value = true
+  if (userScrollResetTimer !== null) clearTimeout(userScrollResetTimer)
+  userScrollResetTimer = window.setTimeout(() => {
+    userScrolling.value = false
+    userScrollResetTimer = null
+  }, 3000)
   // 先用点击位置定位，显示后 nextTick 测量菜单尺寸做边界回退
   ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY, flow }
   nextTick(() => {
@@ -1132,6 +1239,82 @@ function ctxIgnoreHost() {
 function ctxAutoModify(mode: 'request' | 'response') {
   const f = ctxMenu.value.flow
   if (f) emit('auto-modify', f, mode)
+  closeCtxMenu()
+}
+
+// 右键添加标记
+function ctxApplyTag(tagId: string) {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  // 标记存储在 flow 的 tags 字段（逗号分隔的 ID 列表）
+  const currentTags = f.tags ? f.tags.split(',').filter(Boolean) : []
+  if (!currentTags.includes(tagId)) {
+    currentTags.push(tagId)
+    f.tags = currentTags.join(',')
+    // 更新 store 中的 flow
+    store.patchFlows([f.id], (flow) => {
+      flow.tags = f.tags
+    })
+  }
+  closeCtxMenu()
+}
+
+function ctxManageTags() {
+  showTagManager.value = true
+  closeCtxMenu()
+}
+
+// 右键添加书签
+function ctxAddBookmark() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  // 打开书签管理，让用户输入书签名称
+  bookmarkStore.addBookmark(
+    `${f.method} ${f.host}${f.path}`,
+    f.id,
+    'default',
+    ''
+  )
+  ElMessage.success(t('flowBookmark.bookmarkAdded'))
+  closeCtxMenu()
+}
+
+function ctxManageBookmarks() {
+  showBookmarkManager.value = true
+  closeCtxMenu()
+}
+
+// 右键「添加延迟规则」：请求延迟 / 响应延迟
+function ctxAddDelayRule(mode: 'request' | 'response') {
+  const f = ctxMenu.value.flow
+  if (f) emit('add-delay-rule', f, mode)
+  closeCtxMenu()
+}
+
+// 右键「添加到 Mock」
+function ctxAddToMock() {
+  const f = ctxMenu.value.flow
+  if (f) emit('add-to-mock', f)
+  closeCtxMenu()
+}
+
+// 右键「添加到录制」
+function ctxAddToRecord() {
+  const f = ctxMenu.value.flow
+  if (f) emit('add-to-record', f)
+  closeCtxMenu()
+}
+
+// 右键切换书签
+function ctxToggleBookmark() {
+  const f = ctxMenu.value.flow
+  if (f) {
+    if (hasBookmark(f.id)) {
+      removeBookmark(f.id)
+    } else {
+      addBookmark(f)
+    }
+  }
   closeCtxMenu()
 }
 
@@ -1235,6 +1418,86 @@ function ctxMultiSelect() {
   closeCtxMenu()
 }
 
+// 行点击处理（多选/对比模式下特殊处理，否则选中）
+function handleRowClick(f: any) {
+  if (compareMode.value) {
+    // 对比模式下：选中要对比的流量
+    if (!compareFlowA.value) {
+      compareFlowA.value = f
+      ElMessage.info(t('compare.selectB'))
+    } else if (!compareFlowB.value) {
+      compareFlowB.value = f
+      showCompareDialog.value = true
+      compareMode.value = false
+    }
+    return
+  }
+  if (multiSelectMode.value) {
+    toggleFlowCheck(f.id)
+  } else {
+    select(f)
+  }
+}
+
+// 行 hover 事件（懒加载预览）
+function onRowMouseEnter(e: MouseEvent, f: any) {
+  if (multiSelectMode.value || compareMode.value) return
+  // 延迟 500ms 后显示预览，避免快速划过时闪烁
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(() => {
+    previewFlow.value = f
+    // 计算预览位置：在鼠标附近
+    const rect = (e.target as HTMLElement).getBoundingClientRect()
+    let x = rect.right + 10
+    let y = rect.top
+    // 边界检查
+    if (x + 560 > window.innerWidth) {
+      x = rect.left - 570
+    }
+    if (y + 400 > window.innerHeight) {
+      y = window.innerHeight - 410
+    }
+    previewPosition.value = { x, y }
+    previewVisible.value = true
+  }, 500)
+}
+
+function onRowMouseLeave() {
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
+  // 延迟隐藏，让鼠标有移动到预览区域的时间
+  setTimeout(() => {
+    previewVisible.value = false
+  }, 200)
+}
+
+// 书签跳转
+function jumpToBookmark(bookmark: any) {
+  store.select(bookmark.flow_id)
+  // 滚动到该行
+  nextTick(() => {
+    const el = document.querySelector(`[data-flow-id="${bookmark.flow_id}"]`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  })
+}
+
+// 对比模式
+function toggleCompareMode() {
+  compareMode.value = !compareMode.value
+  if (compareMode.value) {
+    compareFlowA.value = null
+    compareFlowB.value = null
+    ElMessage.info(t('compare.selectA'))
+  } else {
+    compareFlowA.value = null
+    compareFlowB.value = null
+  }
+}
+
 async function ctxDelete() {
   const f = ctxMenu.value.flow
   if (!f) return
@@ -1256,9 +1519,137 @@ async function ctxDelete() {
   closeCtxMenu()
 }
 
+// 跨页过滤事件处理（站点地图页点击叶子节点跳转过来时触发）
+function onSetFlowFilter(e: Event) {
+  const detail = (e as CustomEvent).detail
+  if (detail?.dsl) {
+    dslQuery.value = detail.dsl
+    applyDsl()
+  }
+}
+
+// ---------- 标记系统 ----------
+const activeBookmarkFilter = ref<string | null>(null)
+
+// 标记筛选
+function onTagFilterChange(tagId: string) {
+  if (tagId === '__manage__') {
+    showTagManager.value = true
+    return
+  }
+  activeTagFilter.value = tagId || null
+  closePopup()
+}
+
+// 书签筛选
+function onBookmarkFilterChange(value: string) {
+  if (value === '__manage__') {
+    showBookmarkManager.value = true
+    return
+  }
+  if (value.startsWith('group:')) {
+    activeBookmarkFilter.value = value.slice(6)
+  } else {
+    activeBookmarkFilter.value = null
+  }
+  closePopup()
+}
+
+// 交换对比 A/B
+function swapCompareAB() {
+  const temp = compareFlowA.value
+  compareFlowA.value = compareFlowB.value
+  compareFlowB.value = temp
+}
+
+// ---------- 预览系统 ----------
+// hover 预览（防抖）
+let previewTimer: number | null = null
+const hoveredFlow = ref<Flow | null>(null)
+const hoveredRow = ref<HTMLElement | null>(null)
+
+function onRowMouseEnter(e: MouseEvent, flow: any) {
+  if (multiSelectMode.value || compareMode.value) return
+  hoveredFlow.value = flow
+  hoveredRow.value = e.currentTarget as HTMLElement
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = window.setTimeout(() => {
+    if (hoveredFlow.value && hoveredRow.value) {
+      showPreview()
+    }
+  }, 600) // 600ms 后显示预览
+}
+
+function onRowMouseLeave() {
+  hoveredFlow.value = null
+  hoveredRow.value = null
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
+  previewVisible.value = false
+}
+
+function showPreview() {
+  if (!hoveredFlow.value || !hoveredRow.value) return
+  const rect = hoveredRow.value.getBoundingClientRect()
+  // 预览显示在行右侧
+  previewPosition.value = {
+    x: Math.min(rect.right + 10, window.innerWidth - 620),
+    y: Math.max(rect.top - 50, 10),
+  }
+  previewFlow.value = hoveredFlow.value
+  previewVisible.value = true
+}
+
+// 书签添加
+function addBookmark(flow: any) {
+  const name = `${flow.method} ${flow.path}`
+  bookmarkStore.addBookmark(name, flow.id, 'default')
+  ElMessage.success(t('flowBookmark.bookmarkSaved'))
+}
+
+// 移除书签
+function removeBookmark(flowId: number) {
+  const bookmark = bookmarkStore.bookmarks.find(b => b.flow_id === flowId)
+  if (bookmark) {
+    bookmarkStore.deleteBookmark(bookmark.id)
+    ElMessage.success(t('flowBookmark.bookmarkDeleted'))
+  }
+}
+
+// 跳转到书签
+function jumpToBookmark(flowId: number) {
+  store.select(flowId)
+  closeBookmarkManager()
+}
+
+// 书签管理
+function closeBookmarkManager() {
+  showBookmarkManager.value = false
+}
+
+// 检查 flow 是否有书签
+function hasBookmark(flowId: number): boolean {
+  return bookmarkStore.isFlowBookmarked(flowId)
+}
+
+// 获取 flow 的书签
+function getFlowBookmark(flowId: number) {
+  return bookmarkStore.bookmarks.find(b => b.flow_id === flowId)
+}
+
 onMounted(() => {
   loadFocus()
   scheduleUpdateKnowns()
+  // 消费跨页待应用的 DSL 过滤（站点地图页 onNodeClick 设置）
+  if (store.pendingDslFilter) {
+    dslQuery.value = store.pendingDslFilter
+    store.pendingDslFilter = ''
+    applyDsl()
+  }
+  // 监听跨页过滤事件（FlowList 已挂载时，如用户已在抓包页打开站点地图弹窗等场景）
+  window.addEventListener('telnix:set-flow-filter', onSetFlowFilter)
   // 跨页跳转后：如果 selectedId 有值，滚动到选中行
   if (store.selectedId != null) {
     nextTick(() => {
@@ -1283,6 +1674,93 @@ onMounted(() => {
   <div class="flow-list full flex flex-col" @click="closeCtxMenu">
     <!-- 筛选栏（精简：筛选按钮 + 忽略 + 专注 + 自动滚动 + 多选） -->
     <div class="filter-bar">
+      <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
+        <el-icon><Filter /></el-icon>&nbsp;{{ t('flowList.filterBtn') }}
+        <span v-if="hasActiveFilters" class="filter-badge"></span>
+      </el-button>
+      <!-- 标记筛选下拉 -->
+      <el-dropdown size="small" @command="onTagFilterChange">
+        <el-button size="small" :type="activeTagFilter ? 'primary' : 'default'">
+          <el-icon><PriceTag /></el-icon>&nbsp;{{ t('flowTag.filterByTag') }}
+          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="">{{ t('flowTag.allFlows') }}</el-dropdown-item>
+            <el-dropdown-item command="unmarked">{{ t('flowTag.unmarked') }}</el-dropdown-item>
+            <el-dropdown-item divided>
+              <el-dropdown trigger="click" @command="onTagFilterChange">
+                <span>{{ t('flowTag.byTag') }}&nbsp;<el-icon class="el-icon--right"><ArrowRight /></el-icon></span>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-for="tag in tagStore.tags" :key="tag.id" :command="tag.id">
+                      <span class="tag-dot-inline" :style="{ background: tag.color }"></span>
+                      {{ tag.name }}
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <!-- 书签下拉 -->
+      <el-dropdown size="small" @command="onBookmarkSelect">
+        <el-button size="small">
+          <el-icon><Star /></el-icon>&nbsp;{{ t('flowBookmark.bookmarks') }}
+          <el-badge v-if="bookmarkStore.bookmarkCount > 0" :value="bookmarkStore.bookmarkCount" :max="99" />
+          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item v-for="group in bookmarkStore.groups" :key="group.id">
+              <el-dropdown trigger="click">
+                <span>
+                  <span class="group-color-dot" :style="{ background: group.color }"></span>
+                  {{ group.name }} ({{ bookmarkStore.getGroupBookmarks(group.id).length }})
+                  <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+                </span>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item
+                      v-for="bookmark in bookmarkStore.getGroupBookmarks(group.id)"
+                      :key="bookmark.id"
+                      @click="jumpToBookmark(bookmark)"
+                    >
+                      {{ bookmark.name }}
+                    </el-dropdown-item>
+                    <el-dropdown-item v-if="bookmarkStore.getGroupBookmarks(group.id).length === 0">
+                      <span class="text-muted">{{ t('flowBookmark.noBookmarks') }}</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </el-dropdown-item>
+            <el-dropdown-item divided @click="showBookmarkManager = true">
+              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowBookmark.manage') }}
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <!-- 对比模式 -->
+      <el-button
+        v-if="actionsRight"
+        size="small"
+        :type="compareMode.value ? 'primary' : 'default'"
+        :disabled="compareMode.value ? false : selectedFlowIds.size < 2"
+        @click="toggleCompareMode"
+      >
+        <el-icon><Histogram /></el-icon>&nbsp;{{ t('compare.compareMode') }}
+        <el-badge v-if="compareMode.value" :value="selectedFlowIds.size" />
+      </el-button>
+      <el-button
+        v-if="actionsRight"
+        size="small"
+        :disabled="selectedFlowIds.size < 2"
+        @click="openCompareDialog"
+      >
+        <el-icon><Connection /></el-icon>&nbsp;{{ t('compare.compareSelected') }}
+      </el-button>
       <el-button size="small" :type="hasActiveFilters ? 'primary' : 'default'" @click="togglePopup('filter')">
         <el-icon><Filter /></el-icon>&nbsp;{{ t('flowList.filterBtn') }}
         <span v-if="hasActiveFilters" class="filter-badge"></span>
@@ -1340,6 +1818,61 @@ onMounted(() => {
         >
           <el-icon><Aim /></el-icon>&nbsp;{{ t('flowList.focusBtn') }}
           <span v-if="focusEnabled" class="filter-badge"></span>
+        </el-button>
+      </el-tooltip>
+      <!-- 标记筛选 -->
+      <el-dropdown size="small" @command="onTagFilterChange">
+        <el-button size="small" :type="activeTagFilter ? 'warning' : 'default'">
+          <el-icon><PriceTag /></el-icon>&nbsp;{{ t('flowTag.title') }}
+          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="">
+              {{ t('flowTag.allTags') }}
+            </el-dropdown-item>
+            <el-dropdown-item
+              v-for="tag in tagStore.tags"
+              :key="tag.id"
+              :command="tag.id"
+            >
+              <span class="tag-dot-inline" :style="{ background: tag.color }"></span>
+              {{ tag.name }}
+            </el-dropdown-item>
+            <el-dropdown-item command="__manage__" divided>
+              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowTag.manageTags') }}
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <!-- 书签筛选 -->
+      <el-dropdown size="small" @command="onBookmarkFilterChange">
+        <el-button size="small" :type="activeBookmarkFilter ? 'warning' : 'default'">
+          <el-icon><Star /></el-icon>&nbsp;{{ t('flowBookmark.title') }}
+          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="">
+              {{ t('flowBookmark.allBookmarks') }}
+            </el-dropdown-item>
+            <el-dropdown-item
+              v-for="group in bookmarkStore.groups"
+              :key="group.id"
+              :command="'group:' + group.id"
+            >
+              {{ group.name }}
+            </el-dropdown-item>
+            <el-dropdown-item command="__manage__" divided>
+              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowBookmark.manageBookmarks') }}
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <!-- 对比按钮 -->
+      <el-tooltip :content="t('compare.title')" placement="bottom">
+        <el-button size="small" :type="compareMode ? 'primary' : 'default'" @click="toggleCompareMode">
+          <el-icon><Operation /></el-icon>
         </el-button>
       </el-tooltip>
       <div v-if="actionsRight" class="flex-1"></div>
@@ -1478,7 +2011,7 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">Content-Type</label>
+              <label class="fp-label">{{ t('flowList.contentType') }}</label>
               <el-select
                 v-model="store.filterContentTypes"
                 multiple
@@ -1608,7 +2141,7 @@ onMounted(() => {
               </el-select>
             </div>
             <div class="fp-row">
-              <label class="fp-label">Content-Type</label>
+              <label class="fp-label">{{ t('flowList.contentType') }}</label>
               <el-select
                 v-model="focusContentTypes"
                 multiple
@@ -1754,13 +2287,15 @@ onMounted(() => {
       <div
         v-for="f in visibleItems"
         :key="f.id"
-        v-memo="[f.id, f.breakpoint_status, store.selectedId === f.id, selectedFlowIds.has(f.id), gridCols]"
+        v-memo="[f.id, f.method, f.host, f.path, f.status_code, f.size, f.duration_ms, f.process_name, f.protocol, f.breakpoint_status, f.tags, store.selectedId === f.id, selectedFlowIds.has(f.id), gridColsKey]"
         class="fl-row mono"
         :class="[rowClass(f), { selected: store.selectedId === f.id, checked: selectedFlowIds.has(f.id) }]"
         :style="{ gridTemplateColumns: gridCols }"
         :data-flow-id="f.id"
-        @click="multiSelectMode ? toggleFlowCheck(f.id) : select(f)"
+        @click="handleRowClick(f)"
         @contextmenu="onContextMenu($event, f)"
+        @mouseenter="onRowMouseEnter($event, f)"
+        @mouseleave="onRowMouseLeave"
       >
         <div v-if="multiSelectMode" class="col-check" @click.stop="toggleFlowCheck(f.id)">
           <el-checkbox :model-value="selectedFlowIds.has(f.id)" size="small" />
@@ -1789,6 +2324,30 @@ onMounted(() => {
         <div class="ctx-item" @click="ctxAI"><el-icon><MagicStick /></el-icon>&nbsp;{{ t('flowList.sendToAi') }}</div>
         <div class="ctx-item" @click="ctxViewInAnalyze"><el-icon><DataLine /></el-icon>&nbsp;{{ t('flowList.viewInAnalyze') }}</div>
         <div class="ctx-item" @click="ctxMultiSelect"><el-icon><CircleCheck /></el-icon>&nbsp;{{ t('flowList.multiSelectMode') }}</div>
+        <!-- 标记：hover 展开二级菜单 -->
+        <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'tag')" @mouseleave="onSubmenuLeave('tag')">
+          <el-icon><PriceTag /></el-icon>&nbsp;{{ t('flowTag.addTag') }}
+          <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
+          <div v-if="showTagSubmenu" class="ctx-submenu-panel" :class="{ 'ctx-submenu-left': submenuAlign === 'left' }" :style="{ left: submenuPos.left + 'px', top: submenuPos.top + 'px' }">
+            <div
+              v-for="tag in tagStore.tags"
+              :key="tag.id"
+              class="ctx-item"
+              @click="ctxApplyTag(tag.id)"
+            >
+              <span class="tag-dot-inline" :style="{ background: tag.color }"></span>
+              {{ tag.name }}
+            </div>
+            <div class="ctx-item ctx-separator"></div>
+            <div class="ctx-item" @click="ctxManageTags">
+              <el-icon><Setting /></el-icon>&nbsp;{{ t('flowTag.manageTags') }}
+            </div>
+          </div>
+        </div>
+        <!-- 书签 -->
+        <div class="ctx-item" @click="ctxToggleBookmark">
+          <el-icon><Star /></el-icon>&nbsp;{{ ctxMenu.flow && hasBookmark(ctxMenu.flow.id) ? t('flowBookmark.removeBookmark') : t('flowBookmark.addBookmark') }}
+        </div>
         <!-- 自动修改：hover 展开二级菜单（自动请求 / 自动响应） -->
         <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'modify')" @mouseleave="onSubmenuLeave('modify')">
           <el-icon><MagicStick /></el-icon>&nbsp;{{ t('flowList.autoModify') }}
@@ -1808,6 +2367,18 @@ onMounted(() => {
             <div class="ctx-item" @click="ctxIgnoreHost">{{ t('flowList.ignoreByHost') }}</div>
           </div>
         </div>
+        <!-- 延迟规则：hover 展开二级菜单（请求延迟 / 响应延迟） -->
+        <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'delay')" @mouseleave="onSubmenuLeave('delay')">
+          <el-icon><Timer /></el-icon>&nbsp;{{ t('flowList.addDelayRule') }}
+          <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
+          <div v-if="showDelaySubmenu" class="ctx-submenu-panel" :class="{ 'ctx-submenu-left': submenuAlign === 'left' }" :style="{ left: submenuPos.left + 'px', top: submenuPos.top + 'px' }">
+            <div class="ctx-item" @click="ctxAddDelayRule('request')">{{ t('flowList.delayRequestPhase') }}</div>
+            <div class="ctx-item" @click="ctxAddDelayRule('response')">{{ t('flowList.delayResponsePhase') }}</div>
+          </div>
+        </div>
+        <!-- Mock 规则 / 录制回放 -->
+        <div class="ctx-item" @click="ctxAddToMock"><el-icon><Collection /></el-icon>&nbsp;{{ t('flowList.addToMock') }}</div>
+        <div class="ctx-item" @click="ctxAddToRecord"><el-icon><VideoPlay /></el-icon>&nbsp;{{ t('flowList.addToRecording') }}</div>
         <div class="ctx-sep"></div>
         <!-- 复制：hover 展开二级菜单，含 url/curl 及启用的所有显示列 -->
         <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter($event, 'copy')" @mouseleave="onSubmenuLeave('copy')">
@@ -1827,6 +2398,28 @@ onMounted(() => {
         <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;{{ t('flowList.deleteFlow') }}</div>
       </div>
     </teleport>
+
+    <!-- 标记管理抽屉 -->
+    <FlowTagManager v-model="showTagManager" />
+
+    <!-- 书签管理抽屉 -->
+    <FlowBookmarkManager v-model="showBookmarkManager" />
+
+    <!-- 对比对话框 -->
+    <FlowCompareDialog
+      v-model="showCompareDialog"
+      :flow-a="compareFlowA"
+      :flow-b="compareFlowB"
+      @swap="swapCompareAB"
+    />
+
+    <!-- 流量预览浮层 -->
+    <FlowPreview
+      v-if="previewVisible"
+      :flow="previewFlow"
+      :position="previewPosition"
+      @close="previewVisible = false"
+    />
   </div>
 </template>
 
@@ -2047,11 +2640,11 @@ onMounted(() => {
   border-left: 2px solid transparent;
 }
 .fl-row:hover { background: var(--on-bg-hover); }
-.fl-row.selected { background: var(--on-accent-glow); border-left: 2px solid var(--on-accent); padding-left: 8px; }
+.fl-row.selected { background: var(--on-accent-glow); border-left: 2px solid var(--on-accent); }
 .fl-row.checked { background: rgba(45, 212, 191, 0.08); }
 
 .col-check { display: flex; align-items: center; justify-content: center; }
-.fl-row > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-row > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .col-url { color: var(--on-text-muted); }
 .empty-text { text-align: center; padding: 30px; color: var(--on-text-dim); }
 

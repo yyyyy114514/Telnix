@@ -112,6 +112,25 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "  py-ip2region skipped (optional, IP region will be empty)" -ForegroundColor DarkYellow
 }
 
+# 下载 ip2region 数据库文件
+Write-Host "  Downloading ip2region database..." -ForegroundColor Gray
+$geoipDir = Join-Path $projectRoot "data\geoip"
+$dbFile = Join-Path $geoipDir "ip2region_v4.xdb"
+if (-not (Test-Path $dbFile)) {
+    if (-not (Test-Path $geoipDir)) {
+        New-Item -ItemType Directory -Path $geoipDir -Force | Out-Null
+    }
+    $dbUrl = "https://gh-proxy.org/https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb"
+    try {
+        Invoke-WebRequest -Uri $dbUrl -OutFile $dbFile -TimeoutSec 60 -UseBasicParsing
+        Write-Host "  ip2region database downloaded" -ForegroundColor Green
+    } catch {
+        Write-Host "  ip2region database download failed (optional, IP region will be empty)" -ForegroundColor DarkYellow
+    }
+} else {
+    Write-Host "  ip2region database exists, skip" -ForegroundColor Gray
+}
+
 # ---------- 2. 安装前端依赖 ----------
 if (-not $SkipUi) {
     Write-Host ""

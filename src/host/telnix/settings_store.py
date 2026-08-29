@@ -5,19 +5,26 @@
 
 迁移：首次启动若 JSON 不存在但 SQLite settings 表有数据，自动迁移过来。
 
-性能优化：模块级内存缓存（_cache_data + _cache_mtime），避免每次 get_setting
-都读文件 + json.loads。代理热路径单次请求会调 4-6 次 get_setting（throttle、
-clash、规则查询等），高并发下文件 IO 是主要瓶颈。
+性能优化：
+- orjson（若可用）：比标准 json 快 5-10 倍
+- 模块级内存缓存（_cache_data + _cache_mtime），避免每次 get_setting 都读文件
+- 代理热路径单次请求会调 4-6 次 get_setting（throttle、clash、规则查询等）
 缓存通过 mtime 失效：set_setting 写入后会更新 mtime，下次 get 自动重读；
 外部直接编辑文件也会被 mtime 检测到。
 """
 
-import json
 import os
 import threading
 from typing import Any
 
 from .config import get_data_dir
+
+try:
+    import orjson
+    _HAS_ORJSON = True
+except ImportError:
+    import json as _json
+    _HAS_ORJSON = False
 
 _LOCK = threading.Lock()
 # 内存缓存：避免每次 get_setting 都 open+json.loads
@@ -34,25 +41,28 @@ def get_settings_path() -> str:
 
 
 def _load_uncached() -> dict:
-    """直接读磁盘，不查缓存。"""
+    """Read directly from disk, bypassing the cache."""
     path = get_settings_path()
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "rb") as f:
+            data = orjson.loads(f) if _HAS_ORJSON else _json.load(f)
             return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
 
 
 def _load() -> dict:
-    """读取 JSON 文件（带内存缓存，按 mtime 失效）。
+    """Read the JSON file (with in-memory cache, invalidated by mtime).
 
-    性能优化：
-    - 首次加载后缓存在内存，后续 get_setting 直接返回缓存
-    - 通过 os.stat().st_mtime 检测文件变更，写入或外部修改都能感知
-    - stat() 比 open+json.loads 快 100 倍（μs vs ms 级）
+    Performance optimizations:
+    - After the first load, data is cached in memory; subsequent get_setting
+      calls return the cache directly.
+    - File changes are detected via os.stat().st_mtime, picking up both writes
+      and external modifications.
+    - stat() is ~100x faster than open+json.loads (microseconds vs milliseconds).
+    - orjson 比标准 json 快 5-10 倍。
     """
     global _cache_data, _cache_mtime, _cache_loaded
     path = get_settings_path()
@@ -81,15 +91,20 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    """原子写入 JSON（先写临时文件再 rename，避免半截写入）。
+    """Atomically write JSON (write a temp file then rename, to avoid partial writes).
 
-    注意：调用方必须已持有 _LOCK（避免与 _load 慢路径竞争）。
+    Note: the caller must already hold _LOCK (to avoid racing with the _load slow path).
+    Uses orjson if available (5-10x faster than standard json).
     """
     global _cache_data, _cache_mtime, _cache_loaded
     path = get_settings_path()
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=False)
+    if _HAS_ORJSON:
+        with open(tmp, "wb") as f:
+            f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
+    else:
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=False)
     os.replace(tmp, path)
     # 写后立即更新缓存，避免下次 get 又读磁盘
     try:
@@ -101,11 +116,69 @@ def _save(data: dict) -> None:
     _cache_loaded = True
 
 
+# 默认性能配置值
+DEFAULT_PERFORMANCE_CONFIG = {
+    "max_body_size": 10 * 1024 * 1024,  # 10MB
+    "decompress_threshold": 1024,  # 1KB
+    "ssl_context_cache_size": 256,
+    "max_connections": 200,
+}
+
+# 性能预设方案
+PERFORMANCE_PRESETS = {
+    "light": {
+        "max_body_size": 5 * 1024 * 1024,
+        "decompress_threshold": 512,
+        "ssl_context_cache_size": 64,
+        "max_connections": 50,
+    },
+    "standard": {
+        "max_body_size": 10 * 1024 * 1024,
+        "decompress_threshold": 1024,
+        "ssl_context_cache_size": 256,
+        "max_connections": 200,
+    },
+    "high_performance": {
+        "max_body_size": 50 * 1024 * 1024,
+        "decompress_threshold": 4096,
+        "ssl_context_cache_size": 512,
+        "max_connections": 500,
+    },
+}
+
+# 默认 SSL/TLS 配置
+DEFAULT_SSL_CONFIG = {
+    "min_tls_version": "TLS 1.2",
+    "cipher_suites": "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305",
+    "sni_spoofing": False,
+    "cert_expiry_alert": True,
+}
+
+
 def get_setting(key: str, default: Any = "") -> Any:
-    """读取单个设置项。"""
+    """Read a single setting."""
     data = _load()
     v = data.get(key)
     return v if v is not None and v != "" else default
+
+
+def get_setting_int(key: str, default: int = 0) -> int:
+    """Read a setting as integer."""
+    v = get_setting(key, default)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def has_setting(key: str) -> bool:
+    """Check if a key exists in settings (distinguishes null/missing from explicit empty).
+
+    Returns True if the key exists in the JSON (even if value is None or ""),
+    False if the key is completely absent.
+    """
+    data = _load()
+    return key in data
 
 
 def set_setting(key: str, value: Any) -> None:
@@ -121,12 +194,12 @@ def set_setting(key: str, value: Any) -> None:
 
 
 def get_all_settings() -> dict:
-    """读取全部设置。"""
+    """Read all settings."""
     return _load()
 
 
 def set_all_settings(items: dict) -> None:
-    """批量写入（合并到现有设置，不删除其他键）。"""
+    """Batch write (merge into existing settings, does not remove other keys)."""
     data = _load()  # 自管锁
     data.update(items)
     with _LOCK:
@@ -134,10 +207,11 @@ def set_all_settings(items: dict) -> None:
 
 
 def migrate_from_sqlite_if_needed(sqlite_get_all_settings) -> None:
-    """首次启动迁移：JSON 不存在但 SQLite 有数据时，把 SQLite 的 settings 表迁过来。
+    """First-launch migration: when the JSON does not exist but SQLite has data,
+    migrate the SQLite settings table over.
 
-    参数 sqlite_get_all_settings 是一个返回 dict 的可调用对象，
-    通常传 db._sqlite_get_all_settings。
+    The sqlite_get_all_settings parameter is a callable returning a dict,
+    typically db._sqlite_get_all_settings.
     """
     path = get_settings_path()
     if os.path.exists(path):

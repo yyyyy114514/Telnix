@@ -2,6 +2,7 @@
 // 通用导入按钮组件：读取本地 JSON/HAR 文件，覆盖导入流量
 // 导入前询问是否保存当前会话（若当前有流量），导入时先清空所有流量再导入
 import { ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
 import { useFlowsStore } from '../stores/flows'
@@ -10,6 +11,7 @@ import { useCaptureStore } from '../stores/capture'
 const emit = defineEmits<{ (e: 'imported', r: { session_id: number; imported: number }): void }>()
 const flows = useFlowsStore()
 const capture = useCaptureStore()
+const { t } = useI18n()
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const importing = ref(false)
@@ -21,11 +23,11 @@ async function pickFile() {
   if (hasFlows) {
     try {
       await ElMessageBox.confirm(
-        '导入新流量将覆盖当前所有流量。是否先保存当前会话？',
-        '导入确认',
+        t('importButton.confirmMessage'),
+        t('importButton.confirmTitle'),
         {
-          confirmButtonText: '保存并导入',
-          cancelButtonText: '直接导入',
+          confirmButtonText: t('importButton.saveAndImport'),
+          cancelButtonText: t('importButton.directImport'),
           distinguishCancelAndClose: true,
           type: 'warning',
         }
@@ -45,7 +47,7 @@ async function pickFile() {
 async function saveCurrentSession() {
   const sid = capture.status.session_id
   if (!sid) {
-    ElMessage.warning('当前无活动会话，跳过保存')
+    ElMessage.warning(t('importButton.noActiveSession'))
     return
   }
   try {
@@ -64,9 +66,9 @@ async function saveCurrentSession() {
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
-    ElMessage.success(`已保存当前会话：${fname}`)
+    ElMessage.success(t('importButton.sessionSaved', { fname }))
   } catch (e: any) {
-    ElMessage.error('保存会话失败：' + (e?.message || e))
+    ElMessage.error(t('importButton.saveFailed', { error: e?.message || e }))
   }
 }
 
@@ -85,7 +87,7 @@ async function onFileChange(e: Event) {
   if (name.endsWith('.har')) format = 'har'
   else if (name.endsWith('.json')) format = 'json'
   else {
-    ElMessage.warning('请选择 .json 或 .har 文件')
+    ElMessage.warning(t('importButton.invalidFileType'))
     target.value = ''
     return
   }
@@ -98,13 +100,13 @@ async function onFileChange(e: Event) {
     // 前端立即清空列表，避免界面闪烁旧数据
     flows.clear()
     // 再导入新流量
-    const r = await api.importFlows({ format, content: text, session_name: `导入 ${file.name}` })
-    ElMessage.success(`已导入 ${r.imported} 条流量（覆盖原数据，会话 #${r.session_id}）`)
+    const r = await api.importFlows({ format, content: text, session_name: t('importButton.importSessionName', { name: file.name }) })
+    ElMessage.success(t('importButton.importSuccess', { count: r.imported, sid: r.session_id }))
     // 刷新流量列表
     await flows.loadAllFlows()
     emit('imported', { session_id: r.session_id, imported: r.imported })
   } catch (e: any) {
-    ElMessage.error('导入失败：' + (e?.message || e))
+    ElMessage.error(t('importButton.importFailed', { error: e?.message || e }))
     // 失败时也刷新一次，保证界面与后端一致
     await flows.loadAllFlows()
   } finally {
@@ -116,7 +118,7 @@ async function onFileChange(e: Event) {
 
 <template>
   <el-button size="small" :loading="importing" @click="pickFile">
-    <el-icon><Upload /></el-icon>&nbsp;导入
+    <el-icon><Upload /></el-icon>&nbsp;{{ t('importButton.buttonText') }}
   </el-button>
   <input
     ref="fileInput"

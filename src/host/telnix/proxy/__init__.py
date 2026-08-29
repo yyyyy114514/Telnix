@@ -1,1 +1,1 @@
-"""代理服务器模块：HTTP/HTTPS 抓包代理（线程模型）。"""
+"""Proxy server module: HTTP/HTTPS packet capture proxy (thread-based model)."""

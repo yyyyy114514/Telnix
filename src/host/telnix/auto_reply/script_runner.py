@@ -1,22 +1,22 @@
-"""Python 脚本自动修改 - 主进程管理器。
+"""Python script auto-modify - main process manager.
 
-管理 worker 子进程的生命周期：
-- 启动：把规则脚本写入临时文件，spawn `python -m telnix.auto_reply.script_worker <tmp>`
-- 调用：通过 stdin/stdout JSON 行协议同步调用 on_request/on_response
-- 超时：单次调用超过 TIMEOUT 秒，杀 worker 重启
-- 重启：worker 崩溃或退出后下次调用自动重启
-- 重新加载：规则脚本变更后调用 reload() 重启 worker
+Manages the lifecycle of worker subprocesses:
+- Start: writes the rule script to a temp file, spawns `python -m telnix.auto_reply.script_worker <tmp>`
+- Call: synchronously calls on_request/on_response via stdin/stdout JSON line protocol
+- Timeout: kills and restarts the worker if a single call exceeds TIMEOUT seconds
+- Restart: auto-restarts the worker after crash or exit on next call
+- Reload: restarts the worker to load the new script after rule changes via reload()
 
-设计要点：
-- 一个规则对应一个 ScriptRunner 实例（各自独立 worker，脚本互不影响）
-- 同步调用（proxy 在请求处理线程中直接 call，不并发）
-- worker stdout 严格逐行 JSON，stderr 写入日志文件供排查
+Design notes:
+- One rule corresponds to one ScriptRunner instance (independent workers, scripts do not affect each other)
+- Synchronous call (proxy calls directly in the request handling thread, no concurrency)
+- worker stdout is strictly line-by-line JSON; stderr is written to a log file for troubleshooting
 
-性能优化（v11，未抓包场景）：
-- worker 闲置超过 WORKER_IDLE_TIMEOUT（5 分钟）自动停止，释放内存
-- 后台守护线程每 60s 扫描所有 runner，停止闲置 worker
-- 下次有流量时 _call 会自动重启 worker（懒启动）
-- 避免用户曾经触发过脚本规则后 worker 永久常驻占内存（每个约 20-30MB）
+Performance optimization (v11, no-capture scenario):
+- worker auto-stops after being idle for WORKER_IDLE_TIMEOUT (5 minutes), releasing memory
+- A background daemon thread scans all runners every 60s, stopping idle workers
+- Next time there is traffic, _call auto-restarts the worker (lazy start)
+- Avoids workers staying resident forever after a user triggered a script rule (each ~20-30MB)
 """
 
 import base64
@@ -57,12 +57,12 @@ _WORKER_RLIMIT_NOFILE = 64
 
 
 def _apply_resource_limits():
-    """preexec_fn 回调：在子进程 fork 后、exec 前设置资源限制（POSIX only）。
+    """preexec_fn callback: set resource limits after fork but before exec in the child (POSIX only).
 
-    安全：在 fork 之后、exec 之前调用，仅影响子进程，不影响主进程。
-    同时调用 setsid 创建新会话/进程组，使主进程能通过 killpg
-    杀掉 worker 及其 spawn 的子进程（防止沙箱被绕过后孤儿进程残留）。
-    Windows 无 preexec_fn，靠 Job Object 实现等价能力。
+    Security: called between fork and exec, affecting only the child process, not the main process.
+    Also calls setsid to create a new session/process group so the main process can killpg
+    the worker and its spawned children (preventing orphan processes after sandbox bypass).
+    Windows has no preexec_fn; relies on Job Object for equivalent capability.
     """
     try:
         # 创建新会话/进程组：worker 成为组长，主进程可用 os.killpg 杀整个组
@@ -152,13 +152,13 @@ if _IS_WINDOWS:
         ]
 
     def _create_worker_job_object() -> Optional[int]:
-        """创建 Job Object 并设置资源限制，返回句柄（失败返回 None）。
+        """Create a Job Object with resource limits, returns the handle (None on failure).
 
-        设置：
-        - KILL_ON_JOB_CLOSE：主进程关闭句柄时杀掉 Job 内所有进程
-        - JOB_MEMORY：512MB（与 POSIX RLIMIT_AS 对齐）
-        - JOB_TIME：30s CPU（与 POSIX RLIMIT_CPU 对齐）
-        - BREAKAWAY_OK | SILENT_BREAKAWAY_OK：禁止子进程逃逸 Job
+        Settings:
+        - KILL_ON_JOB_CLOSE: kills all processes in the Job when the main process closes the handle
+        - JOB_MEMORY: 512MB (aligned with POSIX RLIMIT_AS)
+        - JOB_TIME: 30s CPU (aligned with POSIX RLIMIT_CPU)
+        - BREAKAWAY_OK | SILENT_BREAKAWAY_OK: forbid child processes from escaping the Job
         """
         try:
             handle = ctypes.windll.kernel32.CreateJobObjectW(None, None)
@@ -188,7 +188,7 @@ if _IS_WINDOWS:
             return None
 
     def _assign_process_to_job(job_handle: int, pid: int) -> bool:
-        """把进程加入 Job Object。返回是否成功。"""
+        """Add a process to a Job Object. Returns whether it succeeded."""
         try:
             proc_handle = ctypes.windll.kernel32.OpenProcess(
                 0x0400 | 0x0200,  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
@@ -205,7 +205,7 @@ if _IS_WINDOWS:
             return False
 
     def _close_job_handle(job_handle: int) -> None:
-        """关闭 Job Object 句柄，触发 KILL_ON_JOB_CLOSE 杀掉所有子进程。"""
+        """Close the Job Object handle, triggering KILL_ON_JOB_CLOSE to kill all child processes."""
         try:
             ctypes.windll.kernel32.CloseHandle(job_handle)
         except Exception:  # noqa: BLE001
@@ -213,11 +213,11 @@ if _IS_WINDOWS:
 
 
 def _build_sanitized_env() -> dict:
-    """构造精简的环境变量给 worker 子进程。
+    """Build a sanitized environment dict for the worker subprocess.
 
-    安全：移除可能包含敏感信息的环境变量（API key、token 等），
-    仅保留 worker 运行必需的变量（PATH、PYTHONPATH、HOME、SYSTEMROOT 等）。
-    防止用户脚本通过环境变量窃取主进程的凭据。
+    Security: removes environment variables that may contain sensitive info (API keys, tokens etc.),
+    keeping only the variables necessary for worker execution (PATH, PYTHONPATH, HOME, SYSTEMROOT etc.).
+    Prevents user scripts from stealing the main process's credentials via environment variables.
     """
     # 白名单：仅这些环境变量传递给子进程
     _ALLOWED_ENV_KEYS = frozenset({
@@ -264,12 +264,13 @@ _IDLE_SCAN_INTERVAL = 60.0
 
 
 class ScriptRunner:
-    """单条脚本规则的 worker 管理器。
+    """Worker manager for a single script rule.
 
-    一个 ScriptRunner 实例对应一条 action=script 的规则。
-    proxy 在匹配到该规则时，调用 run_request / run_response。
+    One ScriptRunner instance corresponds to one rule with action=script.
+    The proxy calls run_request / run_response when it matches the rule.
 
-    性能优化（v11）：记录 _last_call_ts，后台线程扫描闲置 worker 并停止。
+    Performance optimization (v11): records _last_call_ts; a background thread
+    scans for idle workers and stops them.
     """
 
     def __init__(self, rule_id: str, script: str):
@@ -292,30 +293,30 @@ class ScriptRunner:
         self._job_handle: Optional[int] = None
 
     def reload(self, script: str):
-        """更新脚本内容并重启 worker。"""
+        """Update the script content and restart the worker."""
         with self._lock:
             self.script = script
             self._kill_worker_locked()
             self._last_error = None
 
     def run_request(self, ctx: dict) -> Optional[dict]:
-        """调用 on_request。返回 worker 响应 dict 或 None（失败）。"""
+        """Call on_request. Returns the worker response dict or None (on failure)."""
         return self._call({"type": "request", "ctx": ctx})
 
     def run_response(self, ctx: dict) -> Optional[dict]:
-        """调用 on_response。返回 worker 响应 dict 或 None（失败）。"""
+        """Call on_response. Returns the worker response dict or None (on failure)."""
         return self._call({"type": "response", "ctx": ctx})
 
     def get_last_error(self) -> Optional[str]:
         return self._last_error
 
     def stop(self):
-        """停止 worker（规则删除/禁用时调用）。"""
+        """Stop the worker (called when the rule is deleted/disabled)."""
         with self._lock:
             self._kill_worker_locked()
 
     def is_idle(self, threshold: float = WORKER_IDLE_TIMEOUT) -> bool:
-        """是否闲置超过 threshold 秒（用于后台扫描）。"""
+        """Whether idle for more than threshold seconds (for background scanning)."""
         if self._proc is None:
             return False  # worker 已停止，无需再停
         if self._last_call_ts == 0.0:
@@ -324,9 +325,9 @@ class ScriptRunner:
         return (time.time() - self._last_call_ts) > threshold
 
     def stop_if_idle(self, threshold: float = WORKER_IDLE_TIMEOUT) -> bool:
-        """如果闲置超过 threshold，停止 worker。返回是否实际停止。
+        """Stop the worker if idle for more than threshold. Returns whether it was actually stopped.
 
-        供后台扫描线程调用。加锁后检查，避免与正在调用的线程冲突。
+        Called by the background scan thread. Checks after locking to avoid conflicting with a calling thread.
         """
         with self._lock:
             if self._proc is None:
@@ -345,7 +346,7 @@ class ScriptRunner:
             # 闲置超时，停止 worker
             logger.info(
                 "script",
-                f"[auto-reply] worker 闲置 {int(idle_secs)}s 超过 {int(threshold)}s，自动停止: rule={self.rule_id}",
+                f"[auto-reply] worker idle {int(idle_secs)}s exceeds {int(threshold)}s, auto-stopping: rule={self.rule_id}",
                 ""
             )
             self._kill_worker_locked()
@@ -354,7 +355,7 @@ class ScriptRunner:
     # ---------- 内部 ----------
 
     def _call(self, req: dict) -> Optional[dict]:
-        """同步调用 worker：写一行 JSON，读一行响应，超时控制。"""
+        """Synchronously call the worker: write one line of JSON, read one line of response, with timeout control."""
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
                 # worker 未启动或已退出，重启
@@ -371,7 +372,7 @@ class ScriptRunner:
                 self._proc.stdin.write(line)
                 self._proc.stdin.flush()
             except (BrokenPipeError, OSError) as e:
-                self._last_error = f"写入 worker 失败: {e}"
+                self._last_error = f"Write to worker failed: {e}"
                 self._kill_worker_locked()
                 return None
 
@@ -381,7 +382,7 @@ class ScriptRunner:
             return self._read_response_with_timeout()
 
     def _read_response_with_timeout(self) -> Optional[dict]:
-        """从 worker stdout 读一行 JSON，超时杀进程。"""
+        """Read one line of JSON from worker stdout, kill process on timeout."""
         assert self._proc is not None
         assert self._proc.stdout is not None
 
@@ -400,34 +401,34 @@ class ScriptRunner:
         t.start()
         if not done.wait(CALL_TIMEOUT):
             # 超时
-            self._last_error = f"脚本执行超过 {CALL_TIMEOUT}s 超时"
+            self._last_error = f"Script execution exceeded {CALL_TIMEOUT}s timeout"
             self._kill_worker_locked()
             return None
 
         line = result[0]
         if not line:
             # worker 已退出
-            self._last_error = "worker 进程意外退出"
+            self._last_error = "Worker process exited unexpectedly"
             self._kill_worker_locked()
             return None
 
         try:
             resp = json.loads(line)
         except json.JSONDecodeError as e:
-            self._last_error = f"worker 响应 JSON 解析失败: {e}"
+            self._last_error = f"Worker response JSON parse failed: {e}"
             self._kill_worker_locked()
             return None
 
         if resp.get("error"):
             self._last_error = resp["error"]
             logger.warning(
-                "script", f"脚本规则 {self.rule_id} 执行错误",
+                "script", f"Script rule {self.rule_id} execution error",
                 resp.get("error", "") + "\n" + resp.get("traceback", ""),
             )
         return resp
 
     def _start_worker_locked(self) -> bool:
-        """启动 worker 子进程。调用方需持锁。"""
+        """Start the worker subprocess. Caller must hold the lock."""
         # 写脚本到临时文件
         if self._script_path and os.path.exists(self._script_path):
             try:
@@ -444,7 +445,7 @@ class ScriptRunner:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(self.script)
         except OSError as e:
-            self._last_error = f"脚本写入失败: {e}"
+            self._last_error = f"Script write failed: {e}"
             return False
 
         # stderr 日志文件（追加，便于排查脚本崩溃）
@@ -485,10 +486,27 @@ class ScriptRunner:
             else:
                 # POSIX：在 fork 后 exec 前设置资源限制 + setsid
                 popen_kwargs["preexec_fn"] = _apply_resource_limits
-            self._proc = subprocess.Popen(
-                [sys.executable, "-m", "telnix.auto_reply.script_worker", self._script_path],
-                **popen_kwargs,
-            )
+            # 打包模式：sys.executable 是 exe（bootloader），不识别 `-m` 选项。
+            # 改用直接执行 script_worker.py 文件路径——launcher.py 检测 argv[1] 是 .py 后
+            # 用 runpy.run_path 执行（项目记忆允许 runpy.run_path，禁用 exec/exec_module）。
+            # script_worker.py 通过 spec 的 datas `('telnix', 'telnix')` 复制到
+            # _internal/telnix/auto_reply/script_worker.py
+            if getattr(sys, "frozen", False):
+                base = getattr(sys, "_MEIPASS", None)
+                if base is None:
+                    # 回退：exe 同级的 _internal 目录
+                    base = os.path.join(
+                        os.path.dirname(os.path.abspath(sys.executable)),
+                        "_internal",
+                    )
+                worker_path = os.path.join(
+                    base, "telnix", "auto_reply", "script_worker.py")
+                cmd = [sys.executable, worker_path, self._script_path]
+            else:
+                # 开发模式：用 python -m 启动模块
+                cmd = [sys.executable, "-m", "telnix.auto_reply.script_worker",
+                       self._script_path]
+            self._proc = subprocess.Popen(cmd, **popen_kwargs)
             # Windows：把 worker 加入 Job Object（失败不阻断，沙箱仍生效）
             if _IS_WINDOWS and self._job_handle is not None:
                 if not _assign_process_to_job(self._job_handle, self._proc.pid):
@@ -496,7 +514,7 @@ class ScriptRunner:
                     _close_job_handle(self._job_handle)
                     self._job_handle = None
         except OSError as e:
-            self._last_error = f"启动 worker 失败: {e}"
+            self._last_error = f"Failed to start worker: {e}"
             return False
 
         # 等待 ready 信号
@@ -505,7 +523,7 @@ class ScriptRunner:
         return True
 
     def _wait_ready(self) -> bool:
-        """等待 worker 启动信号 {"ready": true} 或错误。"""
+        """Wait for the worker startup signal {"ready": true} or an error."""
         assert self._proc is not None
         assert self._proc.stdout is not None
 
@@ -523,34 +541,34 @@ class ScriptRunner:
         t = threading.Thread(target=_reader, daemon=True)
         t.start()
         if not done.wait(STARTUP_TIMEOUT):
-            self._last_error = f"worker 启动超过 {STARTUP_TIMEOUT}s"
+            self._last_error = f"Worker startup exceeded {STARTUP_TIMEOUT}s"
             self._kill_worker_locked()
             return False
 
         line = result[0]
         if not line:
-            self._last_error = "worker 启动时退出（脚本加载失败？查看 stderr 日志）"
+            self._last_error = "Worker exited during startup (script load failed? Check stderr log)"
             self._kill_worker_locked()
             return False
 
         try:
             msg = json.loads(line)
         except json.JSONDecodeError as e:
-            self._last_error = f"worker 启动响应解析失败: {e}"
+            self._last_error = f"Worker startup response parse failed: {e}"
             self._kill_worker_locked()
             return False
 
         if msg.get("error"):
             self._last_error = msg["error"]
             logger.warning(
-                "script", f"脚本规则 {self.rule_id} 加载失败",
+                "script", f"Script rule {self.rule_id} load failed",
                 msg.get("error", "") + "\n" + msg.get("traceback", ""),
             )
             self._kill_worker_locked()
             return False
 
         if not msg.get("ready"):
-            self._last_error = f"worker 启动响应异常: {msg}"
+            self._last_error = f"Abnormal worker startup response: {msg}"
             self._kill_worker_locked()
             return False
 
@@ -558,16 +576,16 @@ class ScriptRunner:
         return True
 
     def _kill_worker_locked(self):
-        """杀掉 worker 进程并清理。调用方需持锁。
+        """Kill the worker process and clean up. Caller must hold the lock.
 
-        安全：连同 worker spawn 的子进程一起清理，防止沙箱被绕过后
-        worker 通过 os.fork/os.spawn/subprocess 创建的子进程成为孤儿
-        继续运行（消耗 CPU/内存、维持网络连接等）。
+        Security: also cleans up child processes spawned by the worker, preventing
+        orphans from continuing to run (consuming CPU/memory, maintaining network
+        connections etc.) after the worker is killed when the sandbox is bypassed.
 
-        - POSIX：preexec_fn 中已 setsid，worker 是进程组组长，
-          os.killpg(pgid, SIGTERM) 杀整个组
-        - Windows：关闭 Job Object 句柄触发 KILL_ON_JOB_CLOSE，
-          杀掉 Job 内所有进程
+        - POSIX: preexec_fn already called setsid; worker is the process group leader,
+          os.killpg(pgid, SIGTERM) kills the whole group
+        - Windows: closing the Job Object handle triggers KILL_ON_JOB_CLOSE,
+          killing all processes in the Job
         """
         if self._proc is not None:
             pid = self._proc.pid
@@ -617,9 +635,9 @@ _runners_lock = threading.Lock()
 
 
 def get_runner(rule_id: str, script: str) -> ScriptRunner:
-    """获取（或创建）某条脚本规则的 runner。
+    """Get (or create) a runner for a script rule.
 
-    如果已有 runner 但脚本内容变了，自动 reload。
+    If a runner already exists but the script content has changed, auto reloads.
     """
     with _runners_lock:
         r = _runners.get(rule_id)
@@ -634,7 +652,7 @@ def get_runner(rule_id: str, script: str) -> ScriptRunner:
 
 
 def remove_runner(rule_id: str):
-    """规则删除/禁用时调用，停止并清理 runner。"""
+    """Called when a rule is deleted/disabled; stops and cleans up the runner."""
     with _runners_lock:
         r = _runners.pop(rule_id, None)
     if r is not None:
@@ -642,7 +660,7 @@ def remove_runner(rule_id: str):
 
 
 def reload_runner(rule_id: str, script: str):
-    """规则更新时调用，重启 worker 加载新脚本。"""
+    """Called when a rule is updated; restarts the worker to load the new script."""
     with _runners_lock:
         r = _runners.get(rule_id)
         if r is None:
@@ -653,7 +671,7 @@ def reload_runner(rule_id: str, script: str):
 
 
 def stop_all():
-    """进程退出时调用，清理所有 worker。"""
+    """Called on process exit; cleans up all workers."""
     with _runners_lock:
         runners = list(_runners.values())
         _runners.clear()
@@ -676,7 +694,7 @@ _idle_scan_stop_event: threading.Event = threading.Event()
 
 
 def _idle_scan_loop():
-    """后台扫描线程：定期停止闲置 worker。"""
+    """Background scan thread: periodically stops idle workers."""
     while _idle_scan_running:
         try:
             # 拷贝 runner 列表（避免长时间持锁）
@@ -693,7 +711,7 @@ def _idle_scan_loop():
             if stopped_count > 0:
                 logger.info(
                     "script",
-                    f"[auto-reply] 闲置扫描：停止 {stopped_count} 个闲置 worker",
+                    f"[auto-reply] idle scan: stopped {stopped_count} idle worker(s)",
                     ""
                 )
         except Exception:  # noqa: BLE001
@@ -703,7 +721,7 @@ def _idle_scan_loop():
 
 
 def _ensure_idle_scan_started():
-    """启动后台扫描线程（懒启动，首次创建 runner 时触发）。"""
+    """Start the background scan thread (lazy start, triggered on first runner creation)."""
     global _idle_scan_running, _idle_scan_thread
     if _idle_scan_running and _idle_scan_thread is not None:
         return
@@ -714,7 +732,7 @@ def _ensure_idle_scan_started():
 
 
 def get_runner_error(rule_id: str) -> Optional[str]:
-    """获取某条脚本规则的最近错误（供 UI 展示）。"""
+    """Get the most recent error for a script rule (for UI display)."""
     with _runners_lock:
         r = _runners.get(rule_id)
         return r.get_last_error() if r else None
@@ -724,22 +742,22 @@ def get_runner_error(rule_id: str) -> Optional[str]:
 # proxy server 调用这两个函数即可，无需关心 runner 管理
 
 def call_script_request(rule_id: str, script: str, ctx: dict) -> Optional[dict]:
-    """请求阶段调用脚本。返回 worker 响应或 None（脚本不可用）。"""
+    """Call the script in the request phase. Returns the worker response or None (script unavailable)."""
     try:
         runner = get_runner(rule_id, script)
         return runner.run_request(ctx)
     except Exception as e:  # noqa: BLE001
-        logger.warning("script", f"调用脚本 on_request 异常 rule={rule_id}", str(e))
+        logger.warning("script", f"Exception calling script on_request rule={rule_id}", str(e))
         return None
 
 
 def call_script_response(rule_id: str, script: str, ctx: dict) -> Optional[dict]:
-    """响应阶段调用脚本。返回 worker 响应或 None。"""
+    """Call the script in the response phase. Returns the worker response or None."""
     try:
         runner = get_runner(rule_id, script)
         return runner.run_response(ctx)
     except Exception as e:  # noqa: BLE001
-        logger.warning("script", f"调用脚本 on_response 异常 rule={rule_id}", str(e))
+        logger.warning("script", f"Exception calling script on_response rule={rule_id}", str(e))
         return None
 
 
@@ -766,7 +784,7 @@ def build_ctx(
     response_headers: Optional[dict] = None,
     response_body: Optional[bytes] = None,
 ) -> dict:
-    """构造传给 worker 的 ctx dict。"""
+    """Build the ctx dict to pass to the worker."""
     ctx = {
         "host": host,
         "path": path,
@@ -787,9 +805,9 @@ def build_ctx(
 
 
 def apply_response(resp: dict, status, headers, body: bytes):
-    """把 worker 响应应用到响应数据。
+    """Apply the worker response to the response data.
 
-    返回 (new_status, new_headers, new_body)。
+    Returns (new_status, new_headers, new_body).
     """
     if not resp:
         return status, headers, body
@@ -815,9 +833,9 @@ def apply_response(resp: dict, status, headers, body: bytes):
 
 
 def apply_request(resp: dict, headers, body: bytes):
-    """把 worker 响应应用到请求数据。
+    """Apply the worker response to the request data.
 
-    返回 (new_headers, new_body)。
+    Returns (new_headers, new_body).
     """
     if not resp:
         return headers, body

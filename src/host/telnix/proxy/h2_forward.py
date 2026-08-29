@@ -1,11 +1,11 @@
-"""HTTP/2 转发模块（第二阶段：连接池复用 + stream 多路复用）。
+"""HTTP/2 forwarding module (phase 2: connection pool reuse + stream multiplexing).
 
-H2Client 封装一个到目标服务器的 h2 连接，内部有 reader 线程持续读取帧
-并按 stream_id 分发到对应请求。多个代理线程可同时调用 request()，
-共享同一个 TCP+TLS 连接，充分发挥 h2 多路复用优势。
+H2Client encapsulates an h2 connection to target server, with internal reader thread continuously reading frames
+and dispatching to corresponding requests by stream_id. Multiple proxy threads can simultaneously call request(),
+sharing the same TCP+TLS connection, fully leveraging h2 multiplexing advantages.
 
-H2ClientPool 按 (host, port, scheme) 缓存 H2Client，每个 key 最多 3 个
-（多连接分散单锁瓶颈，提升并发吞吐）。
+H2ClientPool caches H2Client by (host, port, scheme), up to 3 per key
+(multiple connections disperse single-lock bottleneck, improving concurrent throughput).
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ logger = logging.getLogger("telnix.h2")
 # ---------- 单个 stream 的状态 ----------
 
 class _H2Stream:
-    """单个 h2 stream 的异步状态。"""
+    """Async state of a single h2 stream."""
 
-    __slots__ = ("status", "headers", "trailers", "body", "done", "error", "flow_ready")
+    __slots__ = ("status", "headers", "trailers", "body", "done", "error",
+                 "flow_ready", "oversized")
 
     def __init__(self):
         self.status = 0
@@ -34,19 +35,26 @@ class _H2Stream:
         self.error: str | None = None
         # flow control：窗口更新时 set，发送方等待此事件重试 send_data
         self.flow_ready = threading.Event()
+        # 性能修复(审计 P-#2)：响应体超过阈值时标记，request() 抛 OSError
+        # 触发调用方回退到 HTTP/1.1 流式转发，避免 H2 全量缓冲导致内存暴涨
+        self.oversized = False
 
 
 # ---------- h2 连接封装（支持多路复用） ----------
 
 class H2Client:
-    """到目标服务器的 h2 连接，支持多路复用。
+    """h2 connection to target server, supports multiplexing.
 
-    一个 H2Client 对应一个 TCP+TLS 连接，可同时处理多个请求（stream）。
-    内部 reader 线程持续读取 h2 帧并分发到对应 stream 的 _H2Stream。
-    request() 方法线程安全，多个代理线程可并发调用。
+    One H2Client corresponds to one TCP+TLS connection, can handle multiple requests (streams) simultaneously.
+    Internal reader thread continuously reads h2 frames and dispatches to corresponding stream's _H2Stream.
+    request() method is thread-safe, multiple proxy threads can call concurrently.
     """
 
     _MAX_IDLE = 180.0  # 空闲超时（秒），超过后可被池清理（原 60s 过短导致频繁重握手）
+    # 性能修复(审计 P-#2)：H2 全量缓冲响应体的上限（8MB）。
+    # 超过此阈值标记 oversized，request() 抛 OSError，调用方捕获后回退到
+    # HTTP/1.1 流式转发（_forward 的 stream=True 路径），避免大响应内存暴涨。
+    _MAX_BUFFERED_BODY = 8 * 1024 * 1024
 
     def __init__(self, sock: socket.socket, host: str, port: int, scheme: str,
                  cert_info: str = ""):
@@ -68,7 +76,12 @@ class H2Client:
 
         self._conn = h2.connection.H2Connection(
             config=h2.config.H2Configuration(
-                client_side=True, header_encoding="utf-8"
+                # validate_inbound_headers=False：放宽 RFC 7540 header 校验，
+                # 容忍部分服务器（如 MSN 的 NEL 报告头）返回前后带空格的 header value。
+                # 作为抓包代理，严格校验会导致整条 h2 连接断开 + 所有并发 stream 失败，
+                # 降级到 HTTP/1.1 重试，影响抓包完整性和性能。
+                client_side=True, header_encoding="utf-8",
+                validate_inbound_headers=False,
             )
         )
         # _lock 保护 H2Connection 状态操作
@@ -101,32 +114,34 @@ class H2Client:
         self._reader.start()
 
     def _sendall(self, data: bytes):
-        """线程安全的 socket sendall。所有 sock.sendall 必须经过此处。"""
+        """Thread-safe socket sendall. All sock.sendall must go through here."""
         with self._send_lock:
             if self._closed:
                 raise OSError("h2 connection closed")
             self.sock.sendall(data)
 
     def _flush_locked(self):
-        """发送 conn 中待发的数据。调用方需持有 _lock。"""
+        """Send pending data in conn. Caller must hold _lock."""
         out = self._conn.data_to_send()
         if out:
             # 通过 _sendall 串行化，避免与 reader 线程的 sendall 竞态
             self._sendall(out)
 
     def _read_loop(self):
-        """后台线程：持续读取 h2 帧并分发到对应 stream。
+        """Background thread: continuously read h2 frames and dispatch to corresponding streams.
 
-        性能优化：缩小锁粒度——只在操作 H2Connection（非线程安全）时加锁，
-        事件处理（操作 stream 对象）在锁外执行，减少锁争用。
-        批量处理 acknowledge + data_to_send，减少锁获取次数。
+        Performance optimization: reduce lock granularity - only lock when operating on H2Connection (not thread-safe),
+        event handling (operating on stream objects) executes outside lock, reducing lock contention.
+        Batch process acknowledge + data_to_send, reducing lock acquisitions.
         """
         import h2.events
 
         try:
             while not self._closed:
                 try:
-                    data = self.sock.recv(65536)
+                    # 性能修复(审计 P-#7)：recv 缓冲从 64KB 提到 256KB，
+                    # 大流量场景下减少 syscall + 锁获取次数（下载 10MB 约 -75% recv 调用）
+                    data = self.sock.recv(262144)
                 except (OSError, socket.timeout):
                     break
                 if not data:
@@ -145,7 +160,7 @@ class H2Client:
                         # 连接（上层会重新建连），不让线程异常退出污染日志。
                         try:
                             logger.warning(f"[h2-reader] {self.host}:{self.port} "
-                                           f"receive_data 失败: {type(e).__name__}: {e}")
+                                           f"receive_data failed: {type(e).__name__}: {e}")
                         except Exception:  # noqa: BLE001
                             pass
                         break
@@ -203,7 +218,26 @@ class H2Client:
                     elif isinstance(event, h2.events.DataReceived):
                         # body 追加在锁外（bytearray += 是原子的，GIL 保护）
                         if stream:
+                            if stream.oversized:
+                                # 已标记 oversized：丢弃后续 DATA，避免继续累积
+                                continue
                             stream.body += event.data
+                            # 性能修复(审计 P-#2)：超过缓冲阈值时标记 oversized，
+                            # 唤醒等待的 request() 让其抛 OSError 回退 HTTP/1.1，
+                            # 并锁内 reset_stream 停止对端继续发送 DATA。
+                            if len(stream.body) > self._MAX_BUFFERED_BODY:
+                                stream.oversized = True
+                                stream.error = "body too large for h2 buffering"
+                                stream.done.set()
+                                stream.flow_ready.set()
+                                try:
+                                    with self._lock:
+                                        self._conn.reset_stream(sid)
+                                        out = self._conn.data_to_send() or b""
+                                    if out:
+                                        self._sendall(out)
+                                except Exception:  # noqa: BLE001
+                                    pass
 
                     elif isinstance(event, h2.events.StreamEnded):
                         if stream:
@@ -259,7 +293,7 @@ class H2Client:
             # 注意：标准 logging 不支持 logger.warning(name, msg) 形式，
             # 必须用 f-string 或 %s 占位符，否则 logging 自身会抛 TypeError
             try:
-                logger.warning(f"[h2-reader] {self.host}:{self.port} reader 线程异常退出: "
+                logger.warning(f"[h2-reader] {self.host}:{self.port} reader thread exited with exception: "
                                f"{type(e).__name__}: {e}")
             except Exception:  # noqa: BLE001
                 pass
@@ -283,9 +317,9 @@ class H2Client:
         body: bytes,
         timeout: float = 30.0,
     ) -> tuple[int, list[tuple[str, str]], list[tuple[str, str]], bytes]:
-        """发送 h2 请求并等待响应。线程安全。
+        """Send h2 request and wait for response. Thread-safe.
 
-        返回 (status, resp_headers, resp_trailers, resp_body)。
+        Returns (status, resp_headers, resp_trailers, resp_body).
         """
         import h2.exceptions
 
@@ -345,6 +379,12 @@ class H2Client:
         with self._lock:
             self._streams.pop(stream_id, None)
 
+        # 性能修复(审计 P-#2)：响应体超过缓冲阈值，抛 OSError 触发调用方
+        # 回退到 HTTP/1.1 流式转发（server.py 的 _h2_create_and_request /
+        # _h2_request_via_pool 已用 except Exception 捕获并 return None）。
+        if stream.oversized:
+            raise OSError("h2 response body exceeded buffering threshold")
+
         if stream.error:
             raise OSError(f"h2 stream error: {stream.error}")
 
@@ -352,12 +392,12 @@ class H2Client:
         return stream.status, stream.headers, stream.trailers, bytes(stream.body)
 
     def _send_body(self, stream_id: int, body: bytes, stream: _H2Stream, deadline: float):
-        """发送 body，处理 flow control（窗口不足时等待 WindowUpdated）。
+        """Send body, handle flow control (wait for WindowUpdated when window insufficient).
 
-        性能优化：
-        - chunk_size 用对端协商的 max_outbound_frame_size（可达 64KB），不再硬编码 16KB
-        - sendall 移到锁外（仅持 _send_lock），reader 线程可并发 receive_data
-        - flow_ready.clear() 在锁内 except 分支执行，避免 lost wakeup 竞态
+        Performance optimization:
+        - chunk_size uses peer-negotiated max_outbound_frame_size (up to 64KB), no longer hardcoded 16KB
+        - sendall moved outside lock (only holds _send_lock), reader thread can concurrently receive_data
+        - flow_ready.clear() executes in lock's except branch, avoiding lost wakeup race
         """
         import h2.exceptions
 
@@ -407,7 +447,7 @@ class H2Client:
                 stream.flow_ready.wait(min(0.02, remaining))
 
     def _cleanup_stream(self, stream_id: int):
-        """超时或出错时清理 stream。"""
+        """Clean up stream on timeout or error."""
         with self._lock:
             self._streams.pop(stream_id, None)
             try:
@@ -417,7 +457,7 @@ class H2Client:
                 pass
 
     def is_expired(self) -> bool:
-        """是否空闲过期（无活跃 stream 且超过 MAX_IDLE）。"""
+        """Whether idle expired (no active streams and exceeds MAX_IDLE)."""
         if self._closed:
             return True
         if self._streams:
@@ -425,7 +465,7 @@ class H2Client:
         return time.time() - self._last_used > self._MAX_IDLE
 
     def close(self):
-        """关闭 h2 连接。"""
+        """Close h2 connection."""
         self._closed = True
         try:
             with self._lock:
@@ -437,7 +477,7 @@ class H2Client:
             pass
         except Exception as e:  # noqa: BLE001
             try:
-                logger.debug(f"[h2-close] {self.host}:{self.port} close 异常: {e}")
+                logger.debug(f"[h2-close] {self.host}:{self.port} close exception: {e}")
             except Exception:  # noqa: BLE001
                 pass
         # F10: 先 shutdown+close 再 unregister，让 FIN/RST 在端口仍注册时发出，
@@ -462,20 +502,26 @@ class H2Client:
 # ---------- h2 连接池 ----------
 
 class H2ClientPool:
-    """h2 连接池，按 (host, port, scheme) 缓存 H2Client。
+    """h2 connection pool, caches H2Client by (host, port, scheme).
 
-    每个 key 最多 _MAX_PER_KEY 个 H2Client（多连接分散单锁瓶颈，
-    提升并发吞吐；h2 多路复用下 1 个连接理论够用，但单锁会成为瓶颈）。
-    内置后台清理线程，定期关闭空闲过期的连接。
+    Up to _MAX_PER_KEY H2Clients per key (multiple connections disperse single-lock bottleneck,
+    improving concurrent throughput; under h2 multiplexing 1 connection is theoretically sufficient, but single lock becomes bottleneck).
+    Built-in background cleanup thread, periodically closes idle expired connections.
+
+    性能修复(审计 P-#4)：采用 16 分片（与 server.py 的 _ConnPool 对齐），
+    每个 key 按 hash 分配到独立分片，分片内独立锁，避免单锁串行所有 get/put/remove。
     """
 
     _CLEANUP_INTERVAL = 30.0  # 清理检查间隔（秒）
-    _MAX_PER_KEY = 8  # 每个 key 最多缓存的连接数（3→8，降低高并发锁争用）
+    _MAX_PER_KEY = 12  # 每个 key 最多缓存的连接数（4→12：提升高并发站点连接复用率，减少 TLS 握手；h2 单连接 100+ stream，12 个可支撑 1200+ 并发）
+    _SHARD_COUNT = 16  # 分片数（与 _ConnPool 对齐，分散单锁瓶颈）
 
     def __init__(self):
-        # value 改为 list，支持每 key 多个 client
-        self._pool: dict[tuple, list[H2Client]] = {}
-        self._lock = threading.Lock()
+        # 16 分片：每分片独立 dict + lock，get/put/remove 只锁对应分片
+        self._pools: list[dict[tuple, list[H2Client]]] = [
+            {} for _ in range(self._SHARD_COUNT)]
+        self._locks: list[threading.Lock] = [
+            threading.Lock() for _ in range(self._SHARD_COUNT)]
         # 统计计数（原子操作，非精确，仅供调试）
         self._stats = {"hits": 0, "misses": 0, "created": 0, "closed_idle": 0,
                        "closed_error": 0, "requests": 0}
@@ -486,21 +532,26 @@ class H2ClientPool:
         )
         self._cleanup_thread.start()
 
-    def get(self, host: str, port: int, scheme: str) -> H2Client | None:
-        """获取可用的 H2Client。没有或已关闭返回 None。
+    def _shard(self, key: tuple) -> int:
+        """Return the shard index for a given key."""
+        return hash(key) % self._SHARD_COUNT
 
-        策略：优先返回活跃 stream 最少的 client（负载均衡）。
+    def get(self, host: str, port: int, scheme: str) -> H2Client | None:
+        """Get an available H2Client. Returns None if none or closed.
+
+        Strategy: preferentially return the client with the fewest active streams (load balancing).
         """
         key = (host, port, scheme)
-        with self._lock:
-            clients = self._pool.get(key)
+        shard = self._shard(key)
+        with self._locks[shard]:
+            clients = self._pools[shard].get(key)
             if not clients:
                 self._stats["misses"] += 1
                 return None
             # 过滤已关闭的，挑选活跃 stream 最少的
             alive = [c for c in clients if not c._closed]
             if not alive:
-                self._pool.pop(key, None)
+                self._pools[shard].pop(key, None)
                 self._stats["misses"] += 1
                 return None
             # 选活跃 stream 最少的（负载均衡，减少单锁争用）
@@ -509,10 +560,11 @@ class H2ClientPool:
             return best
 
     def put(self, client: H2Client) -> bool:
-        """放入池。如果池中连接数已达上限，不放入，返回 False（调用方应 close 该连接）。"""
+        """Put into pool. If pool connection count has reached limit, not put in, returns False (caller should close the connection)."""
         key = (client.host, client.port, client.scheme)
-        with self._lock:
-            clients = self._pool.setdefault(key, [])
+        shard = self._shard(key)
+        with self._locks[shard]:
+            clients = self._pools[shard].setdefault(key, [])
             # 过滤已关闭的
             clients[:] = [c for c in clients if not c._closed]
             if len(clients) >= self._MAX_PER_KEY:
@@ -524,51 +576,61 @@ class H2ClientPool:
             return True
 
     def remove(self, host: str, port: int, scheme: str):
-        """从池中移除并关闭所有该 key 的连接（出错时调用）。"""
+        """Remove and close all connections for this key from pool (called on error)."""
         key = (host, port, scheme)
-        with self._lock:
-            clients = self._pool.pop(key, None)
+        shard = self._shard(key)
+        with self._locks[shard]:
+            clients = self._pools[shard].pop(key, None)
         if clients:
             for client in clients:
                 client.close()
             self._stats["closed_error"] += len(clients)
 
     def remove_client(self, client: H2Client):
-        """只从池中移除并关闭单个连接（不影响该 host 的其他连接）。
+        """Remove and close only a single connection from pool (does not affect other connections for this host).
 
-        性能优化：单个 stream 超时/抖动不应清空整个 host 的连接池（最多 8 个），
-        否则后续并发请求都要重新 TLS 握手（多 1-2 RTT × N）。
+        Performance optimization: a single stream timeout/jitter should not clear the entire host's connection pool (up to 8),
+        otherwise subsequent concurrent requests all need to re-TLS handshake (extra 1-2 RTT x N).
         """
         key = (client.host, client.port, client.scheme)
-        with self._lock:
-            clients = self._pool.get(key)
+        shard = self._shard(key)
+        with self._locks[shard]:
+            clients = self._pools[shard].get(key)
             if clients:
                 # 原地过滤掉指定 client（用 is 判断身份）
                 clients[:] = [c for c in clients if c is not client]
                 if not clients:
-                    self._pool.pop(key, None)
+                    self._pools[shard].pop(key, None)
         client.close()
         self._stats["closed_error"] += 1
 
     def record_request(self):
-        """记录一次 h2 请求（统计用）。"""
+        """Record an h2 request (for statistics)."""
         self._stats["requests"] += 1
 
     def stats(self) -> dict:
-        """返回统计信息快照。"""
-        with self._lock:
-            total_clients = sum(len(v) for v in self._pool.values())
-            active_streams = sum(
-                len(c._streams) for v in self._pool.values() for c in v if not c._closed
-            )
-            return {
-                **self._stats,
-                "pool_size": total_clients,
-                "active_streams": active_streams,
-            }
+        """Return statistics snapshot.
+
+        分片后逐个分片加锁汇总，避免一次性持全局锁阻塞所有 get/put。
+        统计为粗略值，分片间非原子快照（仅供调试/监控）。
+        """
+        total_clients = 0
+        active_streams = 0
+        for shard in range(self._SHARD_COUNT):
+            with self._locks[shard]:
+                for v in self._pools[shard].values():
+                    total_clients += len(v)
+                    for c in v:
+                        if not c._closed:
+                            active_streams += len(c._streams)
+        return {
+            **self._stats,
+            "pool_size": total_clients,
+            "active_streams": active_streams,
+        }
 
     def _cleanup_loop(self):
-        """后台线程：定期清理空闲过期的 h2 连接。"""
+        """Background thread: periodically clean up idle expired h2 connections."""
         while not self._cleanup_stop.wait(self._CLEANUP_INTERVAL):
             try:
                 self._cleanup_once()
@@ -576,31 +638,36 @@ class H2ClientPool:
                 pass
 
     def _cleanup_once(self):
-        """执行一次清理。"""
-        to_close: list[H2Client] = []
-        with self._lock:
-            for key, clients in list(self._pool.items()):
-                alive = []
-                for client in clients:
-                    if client.is_expired():
-                        to_close.append(client)
+        """Perform one cleanup.
+
+        性能修复(审计 P-#4)：分片遍历，每次只锁一个分片，不阻塞其他分片的 get/put。
+        """
+        for shard in range(self._SHARD_COUNT):
+            to_close: list[H2Client] = []
+            with self._locks[shard]:
+                for key, clients in list(self._pools[shard].items()):
+                    alive = []
+                    for client in clients:
+                        if client.is_expired():
+                            to_close.append(client)
+                        else:
+                            alive.append(client)
+                    if alive:
+                        self._pools[shard][key] = alive
                     else:
-                        alive.append(client)
-                if alive:
-                    self._pool[key] = alive
-                else:
-                    self._pool.pop(key, None)
-        for client in to_close:
-            client.close()
-            self._stats["closed_idle"] += 1
+                        self._pools[shard].pop(key, None)
+            for client in to_close:
+                client.close()
+                self._stats["closed_idle"] += 1
 
     def close_all(self):
         self._cleanup_stop.set()
-        with self._lock:
-            for clients in self._pool.values():
-                for client in clients:
-                    client.close()
-            self._pool.clear()
+        for shard in range(self._SHARD_COUNT):
+            with self._locks[shard]:
+                for clients in self._pools[shard].values():
+                    for client in clients:
+                        client.close()
+                self._pools[shard].clear()
 
 
 # ---------- 向后兼容：单次请求接口（不推荐，仅供测试） ----------
@@ -615,9 +682,9 @@ def h2_request(
     body: bytes,
     timeout: float = 30.0,
 ) -> tuple[int, list[tuple[str, str]], list[tuple[str, str]], bytes]:
-    """在已建立的 h2 连接上发送单个请求（不复用）。推荐使用 H2Client.request()。
+    """Send a single request over an established h2 connection (no reuse). Recommend using H2Client.request().
 
-    返回 (status, resp_headers, resp_trailers, resp_body)。
+    Returns (status, resp_headers, resp_trailers, resp_body).
     """
     client = H2Client(sock, host, port=0, scheme=scheme)
     try:
@@ -627,7 +694,7 @@ def h2_request(
 
 
 def get_alpn_protocol(sock: socket.socket) -> str:
-    """获取 TLS 连接协商的 ALPN 协议。返回 'h2' / 'http/1.1' / ''。"""
+    """Get the ALPN protocol negotiated by TLS connection. Returns 'h2' / 'http/1.1' / ''."""
     try:
         proto = sock.selected_alpn_protocol()
         return proto or ""

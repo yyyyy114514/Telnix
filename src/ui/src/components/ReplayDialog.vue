@@ -8,6 +8,7 @@ import CodeEditor from './CodeEditor.vue'
 const { t } = useI18n()
 
 // 重放对话框：支持覆盖 method/host/port/body/headers
+// Repeat Advanced：批量并发重放 N 次（可选间隔、并发数）
 const props = defineProps<{
   modelValue: boolean
   flow: Flow | null
@@ -15,7 +16,11 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [boolean]
   replay: [id: number, override?: ReplayOverride]
+  repeat: [id: number, count: number, concurrency: number, intervalMs: number, override?: ReplayOverride]
 }>()
+
+// 模式：single = 单次重放（原行为），repeat = 批量重放
+const mode = ref<'single' | 'repeat'>('single')
 
 // 覆盖参数（空值表示用原始值）
 const editMethod = ref('')
@@ -25,6 +30,11 @@ const editBody = ref('')
 const editHeaders = ref('') // JSON 字符串
 const useOverride = ref(false) // 是否启用参数覆盖
 
+// Repeat Advanced 参数
+const repeatCount = ref(5)
+const repeatConcurrency = ref(1)
+const repeatInterval = ref(0) // 毫秒
+
 watch(
   () => props.modelValue,
   (v) => {
@@ -33,7 +43,6 @@ watch(
       editHost.value = props.flow.host
       editPort.value = null
       editBody.value = props.flow.request_body || ''
-      // 解析原始 headers 为可编辑 JSON
       try {
         const h = JSON.parse(props.flow.request_headers || '{}')
         editHeaders.value = JSON.stringify(h, null, 2)
@@ -41,27 +50,53 @@ watch(
         editHeaders.value = '{}'
       }
       useOverride.value = false
+      mode.value = 'single'
+      // 重置 repeat 参数到默认值，避免上次设置残留
+      repeatCount.value = 5
+      repeatConcurrency.value = 1
+      repeatInterval.value = 0
     }
   }
 )
 
+function buildOverride(): ReplayOverride | undefined {
+  if (!useOverride.value) return undefined
+  const override: ReplayOverride = {}
+  if (editMethod.value && editMethod.value !== props.flow!.method) override.method = editMethod.value
+  if (editHost.value && editHost.value !== props.flow!.host) override.host = editHost.value
+  if (editPort.value !== null) override.port = editPort.value
+  if (editBody.value !== (props.flow!.request_body || '')) override.body = editBody.value
+  try {
+    const h = JSON.parse(editHeaders.value || '{}')
+    override.headers = h
+  } catch {
+    ElMessage.error(t('replay.headersJsonInvalid'))
+    return undefined
+  }
+  return override
+}
+
 function confirm() {
   if (!props.flow) return
-  if (!useOverride.value) {
-    emit('replay', props.flow.id)
-  } else {
-    const override: ReplayOverride = {}
-    if (editMethod.value && editMethod.value !== props.flow.method) override.method = editMethod.value
-    if (editHost.value && editHost.value !== props.flow.host) override.host = editHost.value
-    if (editPort.value !== null) override.port = editPort.value
-    if (editBody.value !== (props.flow.request_body || '')) override.body = editBody.value
-    try {
-      const h = JSON.parse(editHeaders.value || '{}')
-      override.headers = h
-    } catch {
-      // JSON 格式错误时提示用户，避免静默丢弃 Headers 覆盖
-      ElMessage.error(t('replay.headersJsonInvalid'))
+  if (mode.value === 'repeat') {
+    // 参数校验
+    if (repeatCount.value < 1 || repeatCount.value > 1000) {
+      ElMessage.error(t('replay.repeatCountInvalid'))
+      return
     }
+    if (repeatConcurrency.value < 1 || repeatConcurrency.value > 50) {
+      ElMessage.error(t('replay.repeatConcurrencyInvalid'))
+      return
+    }
+    if (repeatInterval.value < 0 || repeatInterval.value > 60000) {
+      ElMessage.error(t('replay.repeatIntervalInvalid'))
+      return
+    }
+    const override = buildOverride()
+    if (useOverride.value && override === undefined) return // JSON 解析失败已提示
+    emit('repeat', props.flow.id, repeatCount.value, repeatConcurrency.value, repeatInterval.value, override)
+  } else {
+    const override = buildOverride()
     emit('replay', props.flow.id, override)
   }
   emit('update:modelValue', false)
@@ -69,6 +104,10 @@ function confirm() {
 function close() {
   emit('update:modelValue', false)
 }
+
+const confirmLabel = computed(() =>
+  mode.value === 'repeat' ? t('replay.repeatConfirm') : t('replay.confirm')
+)
 </script>
 
 <template>
@@ -83,7 +122,30 @@ function close() {
         <span class="method-tag" :class="'m-' + flow.method.toLowerCase()">{{ flow.method }}</span>
         <span class="mono text-muted">{{ flow.url }}</span>
       </div>
-      <div class="replay-meta text-muted">
+
+      <!-- 模式切换 -->
+      <el-radio-group v-model="mode" size="small" style="margin-top: 4px">
+        <el-radio-button value="single">{{ t('replay.modeSingle') }}</el-radio-button>
+        <el-radio-button value="repeat">{{ t('replay.modeRepeat') }}</el-radio-button>
+      </el-radio-group>
+
+      <!-- Repeat Advanced 参数 -->
+      <div v-if="mode === 'repeat'" class="repeat-form">
+        <div class="rp-row">
+          <label class="rp-label">{{ t('replay.repeatCount') }}</label>
+          <el-input-number v-model="repeatCount" :min="1" :max="1000" :step="1" size="small" style="width: 120px" />
+          <label class="rp-label" style="margin-left: 16px">{{ t('replay.repeatConcurrency') }}</label>
+          <el-input-number v-model="repeatConcurrency" :min="1" :max="50" :step="1" size="small" style="width: 100px" />
+        </div>
+        <div class="rp-row">
+          <label class="rp-label">{{ t('replay.repeatInterval') }}</label>
+          <el-input-number v-model="repeatInterval" :min="0" :max="60000" :step="100" size="small" style="width: 140px" />
+          <span class="text-muted rp-unit">{{ t('replay.repeatIntervalUnit') }}</span>
+        </div>
+        <div class="replay-meta text-muted">{{ t('replay.repeatHint') }}</div>
+      </div>
+
+      <div v-else class="replay-meta text-muted">
         {{ t('replay.defaultHint') }}
       </div>
 
@@ -121,7 +183,7 @@ function close() {
     <template #footer>
       <el-button @click="close">{{ t('common.cancel') }}</el-button>
       <el-button type="primary" @click="confirm">
-        <el-icon><RefreshRight /></el-icon>&nbsp;{{ t('replay.confirm') }}
+        <el-icon><RefreshRight /></el-icon>&nbsp;{{ confirmLabel }}
       </el-button>
     </template>
   </el-dialog>
@@ -140,6 +202,10 @@ function close() {
 .m-put { color: var(--on-warn); background: rgba(210,153,34,0.12); border-color: rgba(210,153,34,0.4); }
 .m-delete { color: var(--on-error); background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.4); }
 .replay-meta { font-size: 12px; line-height: 1.5; }
+.repeat-form { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; background: var(--on-bg-elevated); border-radius: 4px; }
+.rp-row { display: flex; align-items: center; gap: 8px; }
+.rp-label { font-size: 12px; color: var(--on-text-muted); width: 70px; flex-shrink: 0; text-align: right; }
+.rp-unit { font-size: 11px; }
 .override-form { display: flex; flex-direction: column; gap: 10px; }
 .ov-row { display: flex; align-items: flex-start; gap: 8px; }
 .ov-label {

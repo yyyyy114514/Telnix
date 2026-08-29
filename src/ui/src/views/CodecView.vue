@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 
 // 编解码工具：选择类型 + 加密/解密按钮（哈希只有加密）
+const { t } = useI18n()
 const input = ref('')
 const output = ref('')
 const type = ref('base64')
@@ -46,7 +48,7 @@ async function hash(algo: string): Promise<string> {
     return toHex(Array.from(new Uint8Array(buf)))
   } catch {
     if (algo === 'md5') return md5(input.value)
-    throw new Error('不支持该哈希算法')
+    throw new Error(t('codec.unsupportedHash'))
   }
 }
 
@@ -134,24 +136,24 @@ function md5(str: string): string {
 // 加密（编码）
 async function encode() {
   try {
-    const t = type.value
-    if (t === 'base64') {
+    const typeVal = type.value
+    if (typeVal === 'base64') {
       // btoa 不支持非 Latin1 字符（如中文），需先用 TextEncoder 编码为 UTF-8 字节再转 Latin1 字符串
       const bytes = new TextEncoder().encode(input.value)
       let binStr = ''
       for (let i = 0; i < bytes.length; i++) binStr += String.fromCharCode(bytes[i])
       output.value = btoa(binStr)
-    } else if (t === 'url') {
+    } else if (typeVal === 'url') {
       output.value = encodeURIComponent(input.value)
-    } else if (t === 'hex') {
+    } else if (typeVal === 'hex') {
       output.value = toHex(utf8ToBytes(input.value))
-    } else if (t === 'md5') {
+    } else if (typeVal === 'md5') {
       output.value = await hash('md5')
-    } else if (t === 'sha256') {
+    } else if (typeVal === 'sha256') {
       output.value = await hash('sha256')
     }
   } catch (e: any) {
-    ElMessage.error('编码失败：' + (e?.message || e))
+    ElMessage.error(t('codec.encodeFailed') + (e?.message || e))
     output.value = ''
   }
 }
@@ -159,26 +161,26 @@ async function encode() {
 // 解密（解码）
 async function decode() {
   try {
-    const t = type.value
-    if (t === 'base64') {
+    const typeVal = type.value
+    if (typeVal === 'base64') {
       output.value = bytesToUtf8(Array.from(Uint8Array.from(atob(input.value), (c) => c.charCodeAt(0))))
-    } else if (t === 'url') {
+    } else if (typeVal === 'url') {
       output.value = decodeURIComponent(input.value)
-    } else if (t === 'hex') {
+    } else if (typeVal === 'hex') {
       output.value = bytesToUtf8(fromHex(input.value))
     } else {
-      ElMessage.warning(currentType.value.label + ' 不支持解码')
+      ElMessage.warning(t('codec.notSupported', { type: currentType.value.label }))
     }
   } catch (e: any) {
-    ElMessage.error('解码失败：' + (e?.message || e))
+    ElMessage.error(t('codec.decodeFailed') + (e?.message || e))
     output.value = ''
   }
 }
 
 function swap() {
-  const t = input.value
+  const tmp = input.value
   input.value = output.value
-  output.value = t
+  output.value = tmp
 }
 
 function clearAll() {
@@ -188,42 +190,42 @@ function clearAll() {
 
 function copyOutput() {
   navigator.clipboard.writeText(output.value)
-  ElMessage.success('已复制')
+  ElMessage.success(t('codec.copied'))
 }
 </script>
 
 <template>
   <div class="codec-view full flex flex-col">
     <div class="page-header">
-      <div class="page-title"><el-icon><Key /></el-icon>&nbsp;编解码工具</div>
-      <el-button size="small" @click="clearAll">清空</el-button>
+      <div class="page-title"><el-icon><Key /></el-icon>&nbsp;{{ t('codec.title') }}</div>
+      <el-button size="small" @click="clearAll">{{ t('codec.clear') }}</el-button>
     </div>
 
     <div class="flex-1 overflow-auto codec-body">
       <div class="codec-controls">
-        <span class="text-muted">类型：</span>
+        <span class="text-muted">{{ t('codec.type') }}</span>
         <el-select v-model="type" style="width: 140px" size="default">
           <el-option v-for="t in types" :key="t.value" :label="t.label" :value="t.value" />
         </el-select>
         <el-button type="primary" @click="encode">
-          <el-icon><Top /></el-icon>&nbsp;{{ currentType.hasDecode ? '加密' : '计算' }}
+          <el-icon><Top /></el-icon>&nbsp;{{ currentType.hasDecode ? t('codec.encrypt') : t('codec.calculate') }}
         </el-button>
         <el-button v-if="currentType.hasDecode" type="success" @click="decode">
-          <el-icon><Bottom /></el-icon>&nbsp;解密
+          <el-icon><Bottom /></el-icon>&nbsp;{{ t('codec.decrypt') }}
         </el-button>
-        <el-button @click="swap">⇅ 交换</el-button>
+        <el-button @click="swap">⇅ {{ t('codec.swap') }}</el-button>
         <div class="flex-1"></div>
-        <el-button size="small" @click="copyOutput" :disabled="!output">复制结果</el-button>
+        <el-button size="small" @click="copyOutput" :disabled="!output">{{ t('codec.copyResult') }}</el-button>
       </div>
 
       <div class="codec-panes">
         <div class="codec-pane">
-          <div class="pane-label">输入</div>
-          <el-input v-model="input" type="textarea" :rows="14" resize="vertical" class="mono" placeholder="在此输入要编解码的文本…" />
+          <div class="pane-label">{{ t('codec.input') }}</div>
+          <el-input v-model="input" type="textarea" :rows="14" resize="vertical" class="mono" :placeholder="t('codec.inputPlaceholder')" />
         </div>
         <div class="codec-pane">
-          <div class="pane-label">输出</div>
-          <el-input :model-value="output" type="textarea" :rows="14" readonly resize="vertical" class="mono" placeholder="结果…" />
+          <div class="pane-label">{{ t('codec.output') }}</div>
+          <el-input :model-value="output" type="textarea" :rows="14" readonly resize="vertical" class="mono" :placeholder="t('codec.outputPlaceholder')" />
         </div>
       </div>
     </div>

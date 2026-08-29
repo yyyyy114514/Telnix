@@ -1,12 +1,14 @@
-"""AI 分析 API：分析流量 + 多轮对话 + 记录管理。"""
+"""AI analysis API: analyze flows + multi-turn chat + record management + SSE streaming."""
 
 import asyncio
 import json
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from ..ai import deepseek
 from . import err, ok
 
@@ -20,7 +22,6 @@ class AnalyzeRequest(BaseModel):
 class ChatRequest(BaseModel):
     chat_id: int
     message: str
-    # 可选：本次对话追加引用的流量 ID（如从抓包页"发送到已有会话"）
     flow_ids: list[int] = []
 
 
@@ -28,17 +29,26 @@ class UpdateTitleRequest(BaseModel):
     title: str
 
 
+class UpdateServiceRequest(BaseModel):
+    service: str
+
+
+class UpdateModelRequest(BaseModel):
+    service: str
+    model: str
+
+
 def _build_flow_context(flow_ids: list[int]) -> str:
-    """从 flow_ids 构建流量上下文文本（按 id 批量查询，消除 N+1）。"""
-    by_id = db.get_flows_by_ids(flow_ids)
+    """Build flow context text from flow_ids."""
+    by_id = db.get_flows_by_ids(flow_ids) if flow_ids else {}
     flows = [by_id[fid] for fid in flow_ids if fid in by_id]
     return deepseek._build_flow_context(flows)
 
 
 def _make_title(flows: list[dict]) -> str:
-    """从流量列表生成标题。"""
+    """Generate title from flow list."""
     if not flows:
-        return "空分析"
+        return "Empty analysis"
     first = flows[0]
     url = first.get("url", "")
     if len(url) > 50:
@@ -48,18 +58,17 @@ def _make_title(flows: list[dict]) -> str:
 
 @router.post("/ai/analyze")
 async def analyze(body: AnalyzeRequest):
-    """分析指定流量，创建聊天记录，返回分析结果 + chat_id。
+    """Analyze specified flows, create chat record, return analysis result + chat_id.
 
-    无 flow_ids（自由对话）时不调用 API，只创建空聊天记录，
-    等用户通过 /ai/chat 发首条消息再调用，避免浪费 token 生成问候语。
+    If no flow_ids (free chat), do not call API, only create empty chat record.
     """
     by_id = db.get_flows_by_ids(body.flow_ids) if body.flow_ids else {}
     flows = [by_id[fid] for fid in body.flow_ids if fid in by_id]
 
     flow_context = _build_flow_context(body.flow_ids)
-    title = _make_title(flows) if flows else "自由对话"
+    title = _make_title(flows) if flows else "Free chat"
 
-    # 自由对话：不调 API，只创建聊天记录，等用户先说话
+    # Free chat: create empty chat record
     if not body.flow_ids:
         chat_id = db.create_ai_chat(title, body.flow_ids, flow_context)
         return ok({
@@ -69,16 +78,29 @@ async def analyze(body: AnalyzeRequest):
             "tool_results": [],
         })
 
-    # 有流量：调用 AI 分析（同步阻塞调用移到线程池，避免阻塞事件循环）
+    # With flows: call AI analysis
     result = await asyncio.to_thread(deepseek.analyze_flows, body.flow_ids)
     if not result.get("ok"):
-        return err(result.get("error", "分析失败"))
+        return err(result.get("error", "Analysis failed"))
 
     ai_reply = result["result"]
 
-    # 持久化：创建聊天记录
+    # Create chat record
     chat_id = db.create_ai_chat(title, body.flow_ids, flow_context)
-    # 存入 AI 的首次分析回复
+
+    # Record usage
+    service = deepseek._get_current_service()
+    model = deepseek._get_model(service)
+    if result.get("input_tokens") or result.get("output_tokens"):
+        deepseek._record_usage(
+            chat_id=chat_id,
+            service=service,
+            model=model,
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
+        )
+
+    # Store AI's first analysis reply
     db.add_ai_message(chat_id, "assistant", ai_reply)
 
     return ok({
@@ -86,33 +108,36 @@ async def analyze(body: AnalyzeRequest):
         "result": ai_reply,
         "title": title,
         "tool_results": result.get("tool_results", []),
+        "usage": {
+            "input_tokens": result.get("input_tokens", 0),
+            "output_tokens": result.get("output_tokens", 0),
+        },
     })
 
 
 @router.post("/ai/chat")
 async def chat(body: ChatRequest):
-    """多轮对话：基于已有聊天记录追问。
-
-    支持在消息中追加引用流量（flow_ids）：当用户从抓包页"发送到已有会话"
-    时，前端会把引用的流量 ID 一起传过来，后端构建流量上下文注入给 AI。
-    """
-    chat = db.get_ai_chat(body.chat_id)
-    if not chat:
-        return err("聊天记录不存在")
+    """Multi-turn chat with SSE streaming support."""
+    chat_record = db.get_ai_chat(body.chat_id)
+    if not chat_record:
+        return err("Chat record not found")
 
     if not body.message.strip():
-        return err("消息不能为空")
+        return err("Message cannot be empty")
 
-    # 获取历史消息（排除当前用户消息）
+    # Get history messages
     history = db.get_ai_messages(body.chat_id)
     history_list = [{"role": m["role"], "content": m["content"]} for m in history]
 
-    # 流量上下文：优先用本次追加的 flow_ids，否则用聊天记录原有的
-    flow_context = chat["flow_context"] or ""
+    # Flow context
+    flow_context = chat_record["flow_context"] or ""
     if body.flow_ids:
         flow_context = _build_flow_context(body.flow_ids)
 
-    # 调用 AI（同步阻塞调用移到线程池，避免阻塞事件循环）
+    # Store user message
+    db.add_ai_message(body.chat_id, "user", body.message)
+
+    # Call AI
     result = await asyncio.to_thread(
         deepseek.chat,
         history_list,
@@ -120,56 +145,221 @@ async def chat(body: ChatRequest):
         body.message,
     )
     if not result.get("ok"):
-        return err(result.get("error", "对话失败"))
+        return err(result.get("error", "Chat failed"))
 
     ai_reply = result["result"]
 
-    # 持久化：存入用户消息 + AI 回复
-    db.add_ai_message(body.chat_id, "user", body.message)
+    # Record usage
+    service = deepseek._get_current_service()
+    model = deepseek._get_model(service)
+    if result.get("input_tokens") or result.get("output_tokens"):
+        deepseek._record_usage(
+            chat_id=body.chat_id,
+            service=service,
+            model=model,
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
+        )
+
+    # Store AI reply
     db.add_ai_message(body.chat_id, "assistant", ai_reply)
 
-    return ok({"result": ai_reply, "tool_results": result.get("tool_results", [])})
+    return ok({
+        "result": ai_reply,
+        "tool_results": result.get("tool_results", []),
+        "usage": {
+            "input_tokens": result.get("input_tokens", 0),
+            "output_tokens": result.get("output_tokens", 0),
+        },
+    })
+
+
+@router.post("/ai/chat/stream")
+async def chat_stream(body: ChatRequest):
+    """Streaming chat endpoint using SSE."""
+    chat_record = db.get_ai_chat(body.chat_id)
+    if not chat_record:
+        return err("Chat record not found")
+
+    if not body.message.strip():
+        return err("Message cannot be empty")
+
+    # Get history
+    history = db.get_ai_messages(body.chat_id)
+    history_list = [{"role": m["role"], "content": m["content"]} for m in history]
+
+    # Add current user message
+    history_list.append({"role": "user", "content": body.message})
+
+    # Flow context
+    flow_context = chat_record["flow_context"] or ""
+    if body.flow_ids:
+        flow_context = _build_flow_context(body.flow_ids)
+
+    # Store user message
+    db.add_ai_message(body.chat_id, "user", body.message)
+
+    async def generate():
+        service = deepseek._get_current_service()
+        model = deepseek._get_model(service)
+
+        # Run non-streaming API call in thread
+        result = await asyncio.to_thread(
+            deepseek._call_api,
+            history_list,
+            use_tools=True,
+        )
+
+        if not result.get("ok"):
+            err_data = json.dumps({"error": result.get("error", "Unknown error")})
+            yield f"data: {err_data}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        ai_reply = result["result"]
+
+        # Record usage
+        if result.get("input_tokens") or result.get("output_tokens"):
+            deepseek._record_usage(
+                chat_id=body.chat_id,
+                service=service,
+                model=model,
+                input_tokens=result.get("input_tokens", 0),
+                output_tokens=result.get("output_tokens", 0),
+            )
+
+        # Store AI reply
+        db.add_ai_message(body.chat_id, "assistant", ai_reply)
+
+        # Send usage first
+        usage_payload = json.dumps({
+            "type": "usage",
+            "usage": {
+                "input_tokens": result.get("input_tokens", 0),
+                "output_tokens": result.get("output_tokens", 0),
+            }
+        })
+        yield f"data: {usage_payload}\n\n"
+
+        # Stream content word by word
+        words = ai_reply.split()
+        for i, word in enumerate(words):
+            chunk = word
+            if i < len(words) - 1:
+                chunk += " "
+            escaped = chunk.replace("\n", "\\n").replace("\r", "\\r")
+            content_payload = json.dumps({"type": "content", "content": escaped})
+            yield f"data: {content_payload}\n\n"
+            await asyncio.sleep(0.005)
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/ai/chats")
 async def list_chats():
-    """聊天记录列表。"""
+    """Chat record list."""
     chats = db.get_ai_chats()
-    # 解析 flow_ids
     for c in chats:
         try:
             c["flow_ids"] = json.loads(c.get("flow_ids", "[]"))
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+            _capture_log("error", "API exception in ai.py", extra={"exc": repr(e)})
             c["flow_ids"] = []
     return ok(chats)
 
 
 @router.get("/ai/chats/{chat_id}")
 async def get_chat(chat_id: int):
-    """获取单个聊天记录 + 所有消息。"""
-    chat = db.get_ai_chat(chat_id)
-    if not chat:
-        return err("聊天记录不存在")
+    """Get single chat record + all messages."""
+    chat_record = db.get_ai_chat(chat_id)
+    if not chat_record:
+        return err("Chat record not found")
     try:
-        chat["flow_ids"] = json.loads(chat.get("flow_ids", "[]"))
-    except Exception:  # noqa: BLE001
-        chat["flow_ids"] = []
+        chat_record["flow_ids"] = json.loads(chat_record.get("flow_ids", "[]"))
+    except Exception as e:
+        _capture_log("error", "API exception in ai.py", extra={"exc": repr(e)})
+        chat_record["flow_ids"] = []
     messages = db.get_ai_messages(chat_id)
-    return ok({"chat": chat, "messages": messages})
+    return ok({"chat": chat_record, "messages": messages})
 
 
 @router.put("/ai/chats/{chat_id}/title")
 async def update_title(chat_id: int, body: UpdateTitleRequest):
-    """更新聊天标题。"""
-    chat = db.get_ai_chat(chat_id)
-    if not chat:
-        return err("聊天记录不存在")
+    """Update chat title."""
+    chat_record = db.get_ai_chat(chat_id)
+    if not chat_record:
+        return err("Chat record not found")
     db.update_ai_chat_title(chat_id, body.title)
     return ok({"title": body.title})
 
 
 @router.delete("/ai/chats/{chat_id}")
 async def delete_chat(chat_id: int):
-    """删除聊天记录。"""
+    """Delete chat record."""
     db.delete_ai_chat(chat_id)
     return ok({"deleted": True})
+
+
+# ---------- AI Service Management ----------
+
+@router.get("/ai/services")
+async def get_services():
+    """Get available AI services and their status."""
+    status = deepseek.get_service_status()
+    return ok(status)
+
+
+@router.get("/ai/usage")
+async def get_usage():
+    """Get AI usage statistics."""
+    stats = deepseek.get_ai_usage_stats()
+    return ok(stats)
+
+
+@router.put("/ai/service")
+async def update_service(body: UpdateServiceRequest):
+    """Update the current AI service."""
+    service = body.service
+    if service not in deepseek.AI_SERVICES:
+        return err(f"Unknown service: {service}")
+    db.set_setting("ai_service", service)
+    return ok({"service": service})
+
+
+@router.put("/ai/model")
+async def update_model(body: UpdateModelRequest):
+    """Update the model for a specific service."""
+    service = body.service
+    model = body.model
+    if service not in deepseek.AI_SERVICES:
+        return err(f"Unknown service: {service}")
+    config = deepseek.AI_SERVICES[service]
+    if model not in config.get("supported_models", []):
+        return err(f"Model {model} not supported for service {service}")
+    db.set_setting(f"{service}_model", model)
+    return ok({"service": service, "model": model})
+
+
+@router.get("/ai/models/{service}")
+async def get_models(service: str):
+    """Get available models for a service."""
+    if service not in deepseek.AI_SERVICES:
+        return err(f"Unknown service: {service}")
+    config = deepseek.AI_SERVICES[service]
+    return ok({
+        "service": service,
+        "name": config["name"],
+        "models": config.get("supported_models", []),
+        "default_model": config.get("default_model", ""),
+        "pricing": config.get("pricing", {}),
+    })

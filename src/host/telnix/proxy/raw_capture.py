@@ -77,6 +77,231 @@ _LOCAL_IP_CACHE_LOCK = threading.Lock()
 _DROPPED_PACKETS = 0
 _DROPPED_PACKETS_LOCK = threading.Lock()
 
+# P1 监控统计（模块级，供 API 层轮询）
+# 滑动窗口：最近 N 秒的带宽/pps 数据（环形缓冲区）
+_BW_WINDOW_SEC = 30
+_BW_WINDOW_SIZE = 30  # 1 秒一个桶
+_BW_BUCKETS: list[dict] = []  # [{"ts": float, "pkt_count": int, "bytes": int}, ...]
+_BW_BUCKETS_LOCK = threading.Lock()
+
+# 协议分布（每分钟重置）
+_PROTO_COUNTS = {"tcp": 0, "udp": 0, "dns": 0, "http": 0, "https": 0}
+_PROTO_COUNTS_LOCK = threading.Lock()
+_PROTO_COUNTS_SINCE = time.time()
+
+# 活跃连接表（用于连接监控表格）
+_ACTIVE_CONNECTIONS: dict[str, dict] = {}  # key: f"{proto}:{local_ip}:{local_port}:{remote_ip}:{remote_port}"
+_ACTIVE_CONNECTIONS_LOCK = threading.Lock()
+_ACTIVE_CONNECTIONS_TTL = 30.0  # 30 秒无活动则移除
+
+# 增量进程统计（避免每次 get_raw_stats 遍历 3000+ 连接）
+# key: proc_name → {"count": int, "pkts": int, "bytes": int}
+_PROC_STATS: dict[str, dict] = {}
+_PROC_STATS_LOCK = threading.Lock()
+_PROC_STATS_MAX_TOP = 10  # 只维护 Top N
+
+
+def _record_packet(proto: str, size: int, local_ip: str, local_port: int, remote_ip: str, remote_port: int, pid: int | None, proc_name: str | None):
+    """Record a packet for statistics (called from enrich loop)."""
+    now = time.time()
+    proc_key = proc_name or "(unknown)"
+    with _PROC_STATS_LOCK:
+        if proc_key not in _PROC_STATS:
+            _PROC_STATS[proc_key] = {"count": 0, "pkts": 0, "bytes": 0}
+        _PROC_STATS[proc_key]["count"] += 1
+        _PROC_STATS[proc_key]["pkts"] += 1
+        _PROC_STATS[proc_key]["bytes"] += size
+    global _DROPPED_PACKETS
+    # 更新滑动窗口
+    with _BW_BUCKETS_LOCK:
+        _BW_BUCKETS.append({
+            "ts": now,
+            "pkt_count": 1,
+            "bytes": size,
+            "proto": proto,
+        })
+        # 保留最近 _BW_WINDOW_SEC 秒的数据
+        cutoff = now - _BW_WINDOW_SEC
+        while _BW_BUCKETS and _BW_BUCKETS[0]["ts"] < cutoff:
+            _BW_BUCKETS.pop(0)
+    # 更新协议分布
+    with _PROTO_COUNTS_LOCK:
+        _PROTO_COUNTS[proto] = _PROTO_COUNTS.get(proto, 0) + 1
+        # 每分钟重置
+        if now - _PROTO_COUNTS_SINCE > 60:
+            for k in _PROTO_COUNTS:
+                _PROTO_COUNTS[k] = 0
+    # 更新活跃连接
+    conn_key = f"{proto}:{local_ip}:{local_port}:{remote_ip}:{remote_port}"
+    with _ACTIVE_CONNECTIONS_LOCK:
+        _ACTIVE_CONNECTIONS[conn_key] = {
+            "proto": proto,
+            "local_ip": local_ip,
+            "local_port": local_port,
+            "remote_ip": remote_ip,
+            "remote_port": remote_port,
+            "pid": pid,
+            "proc_name": proc_name or "",
+            "last_seen": now,
+            "pkt_count": 1,
+            "bytes": size,
+        }
+
+
+def _touch_connection(proto: str, local_ip: str, local_port: int, remote_ip: str, remote_port: int, pid: int | None, proc_name: str | None, size: int):
+    """Touch an existing connection to update its last_seen time."""
+    conn_key = f"{proto}:{local_ip}:{local_port}:{remote_ip}:{remote_port}"
+    proc_key = proc_name or "(unknown)"
+    with _PROC_STATS_LOCK:
+        if proc_key not in _PROC_STATS:
+            _PROC_STATS[proc_key] = {"count": 0, "pkts": 0, "bytes": 0}
+        _PROC_STATS[proc_key]["count"] += 1
+        _PROC_STATS[proc_key]["pkts"] += 1
+        _PROC_STATS[proc_key]["bytes"] += size
+    with _ACTIVE_CONNECTIONS_LOCK:
+        if conn_key in _ACTIVE_CONNECTIONS:
+            _ACTIVE_CONNECTIONS[conn_key]["last_seen"] = time.time()
+            _ACTIVE_CONNECTIONS[conn_key]["pkt_count"] += 1
+            _ACTIVE_CONNECTIONS[conn_key]["bytes"] += size
+
+
+def _get_raw_stats() -> dict:
+    """Get current capture statistics."""
+    global _DROPPED_PACKETS
+    now = time.time()
+    # 滑动窗口统计
+    with _BW_BUCKETS_LOCK:
+        # 计算最近窗口内的 pps 和带宽
+        cutoff = now - _BW_WINDOW_SEC
+        recent = [b for b in _BW_BUCKETS if b["ts"] >= cutoff]
+        total_pkts = sum(b["pkt_count"] for b in recent)
+        total_bytes = sum(b["bytes"] for b in recent)
+        pps = total_pkts / _BW_WINDOW_SEC if _BW_WINDOW_SEC > 0 else 0
+        bps = total_bytes * 8 / _BW_WINDOW_SEC if _BW_WINDOW_SEC > 0 else 0  # bits per second
+        mbps = bps / 1_000_000
+        # 趋势数据（每秒一个点）
+        trend = []
+        for i in range(_BW_WINDOW_SEC):
+            t = now - i
+            bucket_pkts = sum(b["pkt_count"] for b in recent if t - 1 <= b["ts"] < t + 0.001)
+            bucket_bytes = sum(b["bytes"] for b in recent if t - 1 <= b["ts"] < t + 0.001)
+            trend.insert(0, {
+                "ts": int(t),
+                "pps": bucket_pkts,
+                "mbps": round(bucket_bytes * 8 / 1_000_000, 4),
+            })
+        trend = trend[-20:]  # 只返回最近 20 秒用于图表显示
+    # 丢包统计
+    with _DROPPED_PACKETS_LOCK:
+        dropped = _DROPPED_PACKETS
+    # 协议分布
+    with _PROTO_COUNTS_LOCK:
+        proto_counts = dict(_PROTO_COUNTS)
+    # 活跃连接
+    with _ACTIVE_CONNECTIONS_LOCK:
+        # 清理过期连接
+        expire_cutoff = now - _ACTIVE_CONNECTIONS_TTL
+        expired_keys = [k for k, v in _ACTIVE_CONNECTIONS.items() if v["last_seen"] < expire_cutoff]
+        for k in expired_keys:
+            _ACTIVE_CONNECTIONS.pop(k, None)
+        # 构建连接列表
+        connections = list(_ACTIVE_CONNECTIONS.values())
+        # Top 5 进程排序（使用增量统计，O(1)）
+        with _PROC_STATS_LOCK:
+            top_processes = sorted(_PROC_STATS.items(), key=lambda x: x[1]["pkts"], reverse=True)[:5]
+        top_process_list = [{"name": name, **stats} for name, stats in top_processes]
+    return {
+        "pps": round(pps, 2),
+        "mbps": round(mbps, 4),
+        "total_packets": total_pkts,
+        "total_bytes": total_bytes,
+        "dropped_packets": dropped,
+        "proto_distribution": proto_counts,
+        "tcp_count": proto_counts.get("tcp", 0),
+        "udp_count": proto_counts.get("udp", 0),
+        "dns_count": proto_counts.get("dns", 0),
+        "http_count": proto_counts.get("http", 0),
+        "https_count": proto_counts.get("https", 0),
+        "trend": trend,
+        "active_connections": connections,
+        "top_processes": top_process_list,
+        "timestamp": now,
+    }
+
+
+def _reset_raw_stats():
+    """Reset all statistics counters."""
+    global _DROPPED_PACKETS, _PROTO_COUNTS, _PROTO_COUNTS_SINCE
+    with _BW_BUCKETS_LOCK:
+        _BW_BUCKETS.clear()
+    with _DROPPED_PACKETS_LOCK:
+        _DROPPED_PACKETS = 0
+    with _PROTO_COUNTS_LOCK:
+        for k in _PROTO_COUNTS:
+            _PROTO_COUNTS[k] = 0
+        _PROTO_COUNTS_SINCE = time.time()
+    with _ACTIVE_CONNECTIONS_LOCK:
+        _ACTIVE_CONNECTIONS.clear()
+
+
+# 为了兼容旧代码的导入方式，保留 _RAW_STATS
+_RAW_STATS = {}
+
+# 忽略规则缓存（与 server.py 保持同步，5 秒刷新）
+_IGNORED_PIDS: set[int] = set()
+_IGNORED_NAMES: set[str] = set()
+_IGNORED_HOST_REGEXES: list = []
+_IGNORED_LOCK = threading.Lock()
+_IGNORED_LAST_REFRESH = 0.0
+_IGNORED_REFRESH_INTERVAL = 5.0
+
+
+def _refresh_ignored():
+    """Refresh ignore rules from DB (cached, 5s TTL)."""
+    global _IGNORED_PIDS, _IGNORED_NAMES, _IGNORED_HOST_REGEXES, _IGNORED_LAST_REFRESH
+    now = time.time()
+    if now - _IGNORED_LAST_REFRESH < _IGNORED_REFRESH_INTERVAL:
+        return
+    _IGNORED_LAST_REFRESH = now
+    rows = db.get_ignored_processes()
+    pids = {r["pid"] for r in rows if r.get("pid") and r["pid"] > 0}
+    names = {r["process_name"].lower()
+             for r in rows
+             if (not r.get("pid") or r["pid"] <= 0) and r.get("process_name")}
+    host_rows = db.get_ignored_hosts()
+    hosts = [r["host_pattern"] for r in host_rows if r.get("host_pattern")]
+    # 预编译通配符正则
+    import re as _re
+    host_rx = []
+    for p in hosts:
+        try:
+            escaped = p.replace(".", r"\.").replace("*", ".*").replace("?", ".")
+            host_rx.append(_re.compile(escaped, _re.IGNORECASE))
+        except Exception:  # noqa: BLE001
+            host_rx.append(None)
+    with _IGNORED_LOCK:
+        _IGNORED_PIDS = pids
+        _IGNORED_NAMES = names
+        _IGNORED_HOST_REGEXES = host_rx
+
+
+def _is_ignored(pid: int | None, proc_name: str | None, host: str | None) -> bool:
+    """Check if flow should be ignored per user rules (pid / process name / host wildcard)."""
+    _refresh_ignored()
+    with _IGNORED_LOCK:
+        pid_set = _IGNORED_PIDS
+        name_set = _IGNORED_NAMES
+        host_rx = _IGNORED_HOST_REGEXES
+    if pid is not None and pid > 0 and pid in pid_set:
+        return True
+    if proc_name and proc_name.lower() in name_set:
+        return True
+    if host and host_rx:
+        for rx in host_rx:
+            if rx is not None and rx.search(host):
+                return True
+    return False
+
 
 def _extract_path(url: str, host: str | None, scheme: str | None) -> str:
     """Robustly extract the path (including query/fragment) from a full URL.
@@ -121,8 +346,8 @@ class RawCapture:
         # 队列满时丢包保平安（避免反压导致抓包线程卡顿）
         self._enrich_queue: queue.Queue = queue.Queue(maxsize=20000)
         self._enrich_threads: list[threading.Thread] = []
-        # 4 个 worker：2 个在高流量时容易成为瓶颈（1000 pps 时每 worker 500 pps）
-        self._enrich_worker_count = 4
+        # worker 数自适应 CPU 核数（4→8）：高流量（2000+ pps）时 4 个易成瓶颈
+        self._enrich_worker_count = min(8, os.cpu_count() or 4)
 
     def set_pid_filter(self, pids: set[int] | None):
         self._pid_filter = pids
@@ -603,6 +828,22 @@ class RawCapture:
                 "remote_ip": remote_ip,
                 "ip_region": self._ip_region_cached(remote_ip) if remote_ip else "",
             }
+        # 忽略检查（与 ProxyServer 逻辑一致）：DNS 包 host=qname（真实域名），HTTP 包 host 已是域名，直接用
+        # 纯二进制 TCP/UDP 包 host=remote_ip（无域名），此时仅靠 PID/进程名过滤
+        _flow_host = flow.get("host", "")
+        if _is_ignored(pid, proc_name, _flow_host):
+            return
+        # P1 监控统计：记录包信息用于实时监控
+        _record_packet(
+            proto=flow["protocol"],
+            size=len(payload),
+            local_ip=src_ip,
+            local_port=src_port,
+            remote_ip=remote_ip,
+            remote_port=remote_port,
+            pid=pid,
+            proc_name=proc_name,
+        )
         db.insert_flow_async(flow)
 
     @staticmethod

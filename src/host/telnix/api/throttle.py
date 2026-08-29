@@ -1,15 +1,16 @@
-"""弱网模拟（Throttle）API：模拟高延迟、低带宽、丢包等网络环境。
+"""Weak network simulation (Throttle) API: simulate high latency, low bandwidth, packet loss and other network environments.
 
-设置项（存 settings.json）：
+Settings (stored in settings.json):
 - throttle_enabled (0/1)
-- throttle_latency_ms：每连接延迟毫秒数（模拟 RTT）
-- throttle_bps_kbps：限速 KB/s（0=不限速）
-- throttle_drop_pct：丢包率 0-100（仅隧道流量生效）
+- throttle_latency_ms: per-connection delay in milliseconds (simulates RTT)
+- throttle_bps_kbps: speed limit KB/s (0=unlimited)
+- throttle_drop_pct: packet loss rate 0-100 (only effective for tunneled traffic)
 """
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from .. import settings_store
+from ..logger import _capture_log
 from ..proxy import throttle as throttle_mod
 from . import ok
 
@@ -17,7 +18,7 @@ router = APIRouter()
 
 
 class ThrottleConfig(BaseModel):
-    """弱网配置。所有字段可选，未传不动。"""
+    """Weak network configuration. All fields optional, unchanged if not provided."""
     enabled: bool | None = None
     latency_ms: int | None = None
     bps_kbps: int | None = None
@@ -26,13 +27,13 @@ class ThrottleConfig(BaseModel):
 
 @router.get("/throttle")
 async def get_throttle():
-    """读取当前弱网配置。"""
+    """Read current weak network configuration."""
     return ok(throttle_mod.get_config())
 
 
 @router.put("/throttle")
 async def set_throttle(body: ThrottleConfig):
-    """更新弱网配置（热生效，无需重启）。"""
+    """Update weak network configuration (takes effect immediately, no restart needed)."""
     if body.enabled is not None:
         settings_store.set_setting("throttle_enabled", "1" if body.enabled else "0")
     if body.latency_ms is not None:

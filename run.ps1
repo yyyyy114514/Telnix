@@ -10,43 +10,6 @@ $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path $PSScriptRoot).Path
 $hostDir = Join-Path $projectRoot "src\host"
 
-# ---------- 查找系统 Python（避免用到 TRAE 内置 Python）----------
-function Find-SystemPython {
-    # 1. py launcher（官方 Windows Python 启动器，指向系统 Python）
-    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyLauncher) {
-        try {
-            $exe = & py -3 -c "import sys; print(sys.executable)" 2>$null
-            if ($exe -and $exe -notmatch 'TRAE') {
-                return $exe.Trim()
-            }
-        } catch { }
-    }
-    # 2. 搜索常见系统安装路径
-    $candidates = @()
-    $localApp = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
-    if ($localApp) {
-        $candidates += Get-ChildItem "$localApp\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch 'TRAE' } |
-            Sort-Object Name -Descending |
-            Select-Object -ExpandProperty FullName
-    }
-    $candidates += Get-ChildItem "C:\Python3*\python.exe" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch 'TRAE' } |
-        Select-Object -ExpandProperty FullName
-    $candidates += Get-ChildItem "C:\Program Files\Python3*\python.exe" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch 'TRAE' } |
-        Select-Object -ExpandProperty FullName
-    if ($candidates.Count -gt 0) {
-        return $candidates[0]
-    }
-    # 3. 兜底：PATH 中的 python（可能不是系统 Python）
-    return 'python'
-}
-
-$pythonExe = Find-SystemPython
-Write-Host "[Python] $pythonExe" -ForegroundColor Gray
-
 # 检查后端是否已安装
 $telnixPkg = Join-Path $hostDir "telnix\__init__.py"
 if (-not (Test-Path $telnixPkg)) {
@@ -82,15 +45,6 @@ foreach ($port in @(18901, 8888)) {
     } catch { }
 }
 
-# 关闭系统代理（避免上次 Telnix 异常退出后代理设置残留）
-try {
-    $proxyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-    Set-ItemProperty -Path $proxyPath -Name ProxyEnable -Value 0 -Type DWord -ErrorAction Stop
-    Write-Host "[OK] 系统代理已关闭（避免残留）" -ForegroundColor Gray
-} catch {
-    # 忽略权限错误
-}
-
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Starting Telnix..." -ForegroundColor Cyan
@@ -101,4 +55,4 @@ Write-Host "  Args:      $args" -ForegroundColor Gray
 Write-Host ""
 
 Set-Location $hostDir
-& $pythonExe -m telnix @args
+& python -m telnix @args

@@ -1,23 +1,25 @@
-"""协议深度解析 API：从 TCP/UDP 二进制数据解析出协议字段。
+"""Protocol deep parsing API: parse protocol fields from TCP/UDP binary data.
 
-支持协议（按端口和首字节自动探测）：
-- DNS（53/5353）
-- TLS（443/8443 等，识别 ClientHello/ServerHello）
-- HTTP（80/8080 等，请求/响应）
-- NTP（123）
-- SMTP/POP3/IMAP/FTP 命令-响应（25/110/143/21 等）
-- SSH 版本字符串（22）
+Supported protocols (auto-detected by port and first byte):
+- DNS (53/5353)
+- TLS (443/8443 etc., identifies ClientHello/ServerHello)
+- HTTP (80/8080 etc., request/response)
+- NTP (123)
+- SMTP/POP3/IMAP/FTP command-response (25/110/143/21 etc.)
+- SSH version string (22)
 
-不引入新依赖，纯标准库 struct/bytes 操作。
+No new dependencies, pure standard library struct/bytes operations.
 """
 import base64
+import os
 import struct
 import socket
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from .. import db
+from ..logger import _capture_log
 from . import err, ok
 
 router = APIRouter()
@@ -29,32 +31,32 @@ router = APIRouter()
 
 # ---------- DNS 解析（RFC 1035） ----------
 def _decode_dns(data: bytes) -> dict:
-    """DNS 协议解析。"""
+    """DNS protocol parsing."""
     if len(data) < 12:
-        return {"protocol": "DNS", "error": "数据过短"}
+        return {"protocol": "DNS", "error": "Data too short"}
     tx_id, flags, qdcount, ancount, nscount, arcount = struct.unpack(">HHHHHH", data[:12])
     is_response = bool(flags & 0x8000)
     opcode = (flags >> 11) & 0x0F
     rcode = flags & 0x000F
-    qr_label = "响应" if is_response else "查询"
+    qr_label = "Response" if is_response else "Query"
     opcode_label = {
-        0: "标准查询", 1: "反向查询", 2: "服务器状态",
-        4: "通知", 5: "更新",
-    }.get(opcode, f"未知({opcode})")
+        0: "Standard query", 1: "Inverse query", 2: "Server status",
+        4: "Notify", 5: "Update",
+    }.get(opcode, f"Unknown({opcode})")
     rcode_label = {
-        0: "无错误", 1: "格式错误", 2: "服务器失败",
-        3: "域名不存在", 4: "未实现", 5: "拒绝查询",
-    }.get(rcode, f"未知({rcode})")
+        0: "No error", 1: "Format error", 2: "Server failure",
+        3: "Domain name does not exist", 4: "Not implemented", 5: "Query refused",
+    }.get(rcode, f"Unknown({rcode})")
     fields = [
-        {"label": "方向", "value": qr_label, "color": "blue"},
+        {"label": "Direction", "value": qr_label, "color": "blue"},
         {"label": "Transaction ID", "value": f"0x{tx_id:04x}"},
         {"label": "Opcode", "value": opcode_label},
         {"label": "QR", "value": "Response" if is_response else "Query"},
         {"label": "RCODE", "value": rcode_label, "color": "amber" if rcode else None},
-        {"label": "问题数", "value": qdcount},
-        {"label": "回答数", "value": ancount, "color": "green" if ancount else None},
-        {"label": "授权数", "value": nscount},
-        {"label": "附加数", "value": arcount},
+        {"label": "Questions", "value": qdcount},
+        {"label": "Answers", "value": ancount, "color": "green" if ancount else None},
+        {"label": "Authority", "value": nscount},
+        {"label": "Additional", "value": arcount},
     ]
     offset = 12
     # 解析 Question 段
@@ -71,7 +73,7 @@ def _decode_dns(data: bytes) -> dict:
         class_label = _dns_class_label(qclass)
         questions.append(f"{name} ({type_label}/{class_label})")
     if questions:
-        fields.append({"label": "查询问题", "value": "\n".join(questions), "color": "blue"})
+        fields.append({"label": "Query", "value": "\n".join(questions), "color": "blue"})
     # 解析 Answer 段（简略）
     answers = []
     for _ in range(ancount):
@@ -89,12 +91,12 @@ def _decode_dns(data: bytes) -> dict:
         rdata_label = _format_dns_rdata(rtype, rdata)
         answers.append(f"{name} → {rdata_label} (TTL={ttl}s)")
     if answers:
-        fields.append({"label": "回答", "value": "\n".join(answers), "color": "green"})
-    return {"protocol": "DNS", "summary": f"{qr_label} {qdcount}问/{ancount}答", "fields": fields}
+        fields.append({"label": "Answers", "value": "\n".join(answers), "color": "green"})
+    return {"protocol": "DNS", "summary": f"{qr_label} {qdcount}Q/{ancount}A", "fields": fields}
 
 
 def _parse_dns_name(data: bytes, offset: int) -> tuple[str, int]:
-    """解析 DNS 名称（支持压缩指针）。"""
+    """Parse DNS name (supports compression pointers)."""
     labels = []
     jumped = False
     original_offset = offset
@@ -156,14 +158,14 @@ def _format_dns_rdata(rtype: int, rdata: bytes) -> str:
             txt_len = rdata[0]
             txt = rdata[1:1 + txt_len].decode("utf-8", errors="replace")
             return f'"{txt}"'
-    return f"<{len(rdata)}字节>"
+    return f"<{len(rdata)} bytes>"
 
 
 # ---------- TLS 解析（RFC 5246 / RFC 8446） ----------
 def _decode_tls(data: bytes) -> dict:
-    """TLS 协议解析（识别 ClientHello/ServerHello 等）。"""
+    """TLS protocol parsing (identifies ClientHello/ServerHello etc.)."""
     if len(data) < 5:
-        return {"protocol": "TLS", "error": "数据过短"}
+        return {"protocol": "TLS", "error": "Data too short"}
     content_type, version, length = struct.unpack(">BHH", data[:5])
     version_major = (version >> 8) & 0xFF
     version_minor = version & 0xFF
@@ -213,14 +215,14 @@ def _decode_tls(data: bytes) -> dict:
                             ciphers.append(f"0x{cipher:04x}")
                         if ciphers:
                             fields.append({"label": "CipherSuites", "value": ", ".join(ciphers[:10]) + ("..." if len(ciphers) > 10 else "")})
-            except Exception:
-                pass
+            except Exception as e:
+                _capture_log("error", "TLS decode error", extra={"exc": repr(e)})
     return {"protocol": "TLS", "summary": f"{content_label} ({version_label})", "fields": fields}
 
 
 # ---------- HTTP 解析 ----------
 def _decode_http(data: bytes) -> dict:
-    """HTTP 请求/响应解析。"""
+    """HTTP request/response parsing."""
     try:
         text = data.decode("utf-8", errors="replace")
         # 找到 headers 结束（CRLF CRLF 或 LF LF）
@@ -234,7 +236,7 @@ def _decode_http(data: bytes) -> dict:
         body = text[end_idx + sep_len:] if end_idx != -1 else ""
         lines = head.split("\r\n") if "\r\n" in head else head.split("\n")
         if not lines:
-            return {"protocol": "HTTP", "error": "空请求"}
+            return {"protocol": "HTTP", "error": "Empty request"}
         first = lines[0]
         # 请求行
         if any(first.startswith(m + " ") for m in ("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT")):
@@ -251,10 +253,10 @@ def _decode_http(data: bytes) -> dict:
                 "protocol": "HTTP",
                 "summary": f"{method} {path}",
                 "fields": [
-                    {"label": "方向", "value": "请求", "color": "blue"},
-                    {"label": "方法", "value": method, "color": "green"},
-                    {"label": "路径", "value": path},
-                    {"label": "版本", "value": version, "color": "dim"},
+                    {"label": "Direction", "value": "Request", "color": "blue"},
+                    {"label": "Method", "value": method, "color": "green"},
+                    {"label": "Path", "value": path},
+                    {"label": "Version", "value": version, "color": "dim"},
                     {"label": "Headers", "value": "\n".join(f"{k}: {v}" for k, v in headers.items())},
                     {"label": "Body", "value": body[:2000], "color": "dim"} if body else None,
                 ],
@@ -273,44 +275,44 @@ def _decode_http(data: bytes) -> dict:
             try:
                 code_int = int(code)
                 code_color = "green" if code_int < 300 else "amber" if code_int < 500 else "red"
-            except Exception:
+            except ValueError:
                 code_color = "dim"
             return {
                 "protocol": "HTTP",
                 "summary": f"{code} {reason}",
                 "fields": [
-                    {"label": "方向", "value": "响应", "color": "blue"},
-                    {"label": "版本", "value": version, "color": "dim"},
-                    {"label": "状态码", "value": code, "color": code_color},
-                    {"label": "原因", "value": reason},
+                    {"label": "Direction", "value": "Response", "color": "blue"},
+                    {"label": "Version", "value": version, "color": "dim"},
+                    {"label": "Status Code", "value": code, "color": code_color},
+                    {"label": "Reason", "value": reason},
                     {"label": "Headers", "value": "\n".join(f"{k}: {v}" for k, v in headers.items())},
                     {"label": "Body", "value": body[:2000], "color": "dim"} if body else None,
                 ],
             }
-        return {"protocol": "HTTP", "error": "无法识别请求行/状态行", "fields": []}
+        return {"protocol": "HTTP", "error": "Unrecognized request line/status line", "fields": []}
     except Exception as e:
         return {"protocol": "HTTP", "error": str(e)}
 
 
 # ---------- NTP 解析 ----------
 def _decode_ntp(data: bytes) -> dict:
-    """NTP v3/v4 协议解析。"""
+    """NTP v3/v4 protocol parsing."""
     if len(data) < 48:
-        return {"protocol": "NTP", "error": "数据过短"}
+        return {"protocol": "NTP", "error": "Data too short"}
     leap = (data[0] >> 6) & 0x03
     ver = (data[0] >> 3) & 0x07
     mode = data[0] & 0x07
     stratum = data[1]
     poll = data[2]
     precision = data[3]
-    leap_label = {0: "无警告", 1: "+1s", 2: "-1s", 3: "告警"}.get(leap)
+    leap_label = {0: "No warning", 1: "+1s", 2: "-1s", 3: "Alarm"}.get(leap)
     mode_label = {
-        1: "对称主动", 2: "对称被动", 3: "客户端", 4: "服务器",
-        5: "广播", 6: "组播控制", 7: "私有",
-    }.get(mode, f"未知({mode})")
+        1: "Symmetric active", 2: "Symmetric passive", 3: "Client", 4: "Server",
+        5: "Broadcast", 6: "Multicast control", 7: "Private",
+    }.get(mode, f"Unknown({mode})")
     stratum_label = {
-        0: "无效/ Kiss-of-Death", 1: "主参考", 16: "不可达",
-    }.get(stratum, f"层级 {stratum}")
+        0: "Invalid / Kiss-of-Death", 1: "Primary reference", 16: "Unreachable",
+    }.get(stratum, f"Stratum {stratum}")
     fields = [
         {"label": "Leap", "value": leap_label, "color": "amber" if leap else None},
         {"label": "Version", "value": f"v{ver}", "color": "dim"},
@@ -334,14 +336,14 @@ def _decode_ntp(data: bytes) -> dict:
         try:
             dt = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(unix_ts))
             fields.append({"label": "Transmit Timestamp", "value": f"{dt} UTC ({ts[1]})", "color": "green"})
-        except Exception:
+        except (ValueError, OSError):
             fields.append({"label": "Transmit Timestamp", "value": f"{ts[0]}.{ts[1]}"})
     return {"protocol": "NTP", "summary": f"{mode_label} v{ver}", "fields": fields}
 
 
 # ---------- 文本协议（SMTP/FTP/POP3/IMAP/SSH 等） ----------
 def _decode_text(data: bytes, proto: str) -> dict:
-    """通用文本协议解析：显示前几行命令/响应。"""
+    """Generic text protocol parsing: display first few lines of command/response."""
     try:
         text = data.decode("utf-8", errors="replace")
         lines = text.split("\r\n") if "\r\n" in text else text.split("\n")
@@ -350,8 +352,8 @@ def _decode_text(data: bytes, proto: str) -> dict:
             "protocol": proto,
             "summary": lines[0][:80] if lines else "",
             "fields": [
-                {"label": "首行", "value": lines[0] if lines else "", "color": "blue"},
-                {"label": "完整内容", "value": preview + ("..." if len(lines) > 20 else ""), "color": "dim"},
+                {"label": "First line", "value": lines[0] if lines else "", "color": "blue"},
+                {"label": "Full content", "value": preview + ("..." if len(lines) > 20 else ""), "color": "dim"},
             ],
         }
     except Exception as e:
@@ -359,23 +361,23 @@ def _decode_text(data: bytes, proto: str) -> dict:
 
 
 def _decode_unknown(data: bytes) -> dict:
-    """未知协议：显示前 N 字节预览。"""
+    """Unknown protocol: display first N bytes preview."""
     preview = data[:64].hex(" ")
     printable = "".join(chr(b) if 32 <= b < 127 else "·" for b in data[:64])
     return {
         "protocol": "Unknown",
-        "summary": f"{len(data)} 字节",
+        "summary": f"{len(data)} bytes",
         "fields": [
-            {"label": "长度", "value": f"{len(data)} 字节", "color": "dim"},
-            {"label": "前 64 字节 Hex", "value": preview, "color": "dim"},
-            {"label": "前 64 字节 ASCII", "value": printable, "color": "dim"},
+            {"label": "Length", "value": f"{len(data)} bytes", "color": "dim"},
+            {"label": "First 64 bytes Hex", "value": preview, "color": "dim"},
+            {"label": "First 64 bytes ASCII", "value": printable, "color": "dim"},
         ],
     }
 
 
 # ---------- 端口/内容自动探测 ----------
 def _pick_decoder(port: int, raw: bytes) -> callable:
-    """按端口和首字节自动选择解析器。"""
+    """Auto-select parser by port and first byte."""
     # 优先按端口
     if port in (53, 5353):
         return _decode_dns
@@ -436,26 +438,133 @@ def _pick_decoder(port: int, raw: bytes) -> callable:
     return _decode_unknown
 
 
+@router.post("/flows/apply-decoder")
+async def apply_decoder_plugin(request: Request):
+    """Run user-defined decoder plugin and decode the specified flow's field.
+
+    Request body: {"plugin_path": "/path/to/decoder.py", "flow": {...}, "field": "response_body"}
+    Returns: {"decoded": {...}}
+
+    Decoder interface:
+        def decode(data: bytes, flow: dict) -> dict:
+            return {"messages": [...], "fields": {...}}
+    Executes the plugin script via subprocess to avoid loading code dynamically in-process.
+    """
+    import json as _json
+    import subprocess
+    import sys
+    import tempfile
+    try:
+        body = await request.json()
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in decode.py", extra={"exc": repr(e)})
+        body = {}
+    plugin_path = body.get("plugin_path") or ""
+    flow = body.get("flow") or {}
+    field = body.get("field") or "response_body"
+    if not plugin_path:
+        return err("plugin_path is required")
+    # 安全修复：路径白名单校验
+    # 仅允许插件目录（~/.telnix/plugins/）下的 .py 文件
+    try:
+        # 禁止绝对路径传入（强制使用相对插件目录路径）
+        if os.path.isabs(plugin_path):
+            return err("Absolute plugin_path is forbidden, use relative path under plugins directory")
+        # 禁止路径遍历
+        normalized = os.path.normpath(plugin_path)
+        if ".." in normalized or normalized.startswith("/") or (sys.platform == "win32" and ":" in normalized):
+            return err("Path traversal is forbidden in plugin_path")
+        # 仅允许 .py 文件
+        if not normalized.endswith(".py"):
+            return err("Only .py files are allowed as plugin")
+        # 构造插件目录路径并校验
+        from ..config import get_data_dir
+        plugins_dir = os.path.join(get_data_dir(), "plugins")
+        os.makedirs(plugins_dir, exist_ok=True)
+        full_plugin_path = os.path.join(plugins_dir, normalized)
+        # 验证真实路径是否在插件目录内（防止 symlink 逃逸）
+        real_plugin_path = os.path.realpath(full_plugin_path)
+        if not real_plugin_path.startswith(os.path.realpath(plugins_dir) + os.sep) and real_plugin_path != os.path.realpath(plugins_dir):
+            return err("Plugin path is outside the allowed plugins directory")
+        plugin_path = real_plugin_path
+    except Exception as e:  # noqa: BLE001
+        return err(f"Invalid plugin_path: {e}")
+    if not os.path.isfile(plugin_path):
+        return err(f"Decoder file not found: {plugin_path}")
+    # Get the raw bytes of the specified field
+    val = flow.get(field) or ""
+    if isinstance(val, str) and val.startswith("base64:"):
+        try:
+            data = base64.b64decode(val[7:])
+        except Exception as e:  # noqa: BLE001
+            return err(f"base64 decode failed: {e}")
+    elif isinstance(val, str):
+        data = val.encode("utf-8", errors="replace")
+    else:
+        data = b""
+    # Write a runner script that imports the plugin and calls decode()
+    # stdin receives: line 1 = flow JSON, then raw bytes of data (base64-encoded)
+    runner = f'''
+import sys, json, base64
+sys.path.insert(0, {os.path.dirname(os.path.abspath(plugin_path))!r})
+import {os.path.splitext(os.path.basename(plugin_path))[0]!r} as plugin
+line = sys.stdin.readline()
+flow = json.loads(line) if line.strip() else {{}}
+data_b64 = sys.stdin.buffer.read()
+data = base64.b64decode(data_b64) if data_b64 else b""
+result = plugin.decode(data, flow)
+sys.stdout.write(json.dumps(result, ensure_ascii=False, default=str))
+'''
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tf:
+        tf.write(runner)
+        runner_path = tf.name
+    # Pass flow JSON as first line, then raw data bytes (base64-encoded for safe transport)
+    import binascii
+    stdin_input = json.dumps(flow, ensure_ascii=False).encode("utf-8") + b"\n" + binascii.b2a_base64(data).strip()
+    try:
+        proc = subprocess.run(
+            [sys.executable, runner_path],
+            input=stdin_input,
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001
+        return err(f"Decoder execution failed: {e}")
+    finally:
+        try:
+            os.unlink(runner_path)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        stderr_msg = (proc.stderr or b"").decode("utf-8", errors="replace").strip()[:500]
+        return err(f"Decoder execution failed (exit {proc.returncode}): {stderr_msg}")
+    try:
+        decoded = _json.loads(proc.stdout.decode("utf-8", errors="replace"))
+    except Exception as e:  # noqa: BLE001
+        return err(f"Decoder returned invalid JSON: {e}")
+    return ok({"decoded": decoded})
+
+
 @router.get("/flows/{flow_id}/decode")
 async def decode_flow(flow_id: int, field: str = "raw_data"):
-    """解析 TCP/UDP 流量的协议字段。
+    """Parse protocol fields of TCP/UDP traffic.
 
     field: raw_data | request_body | response_body
-    按端口和首字节自动探测协议，返回结构化字段。
+    Auto-detects protocol by port and first byte, returns structured fields.
     """
     flow = db.get_flow(flow_id)
     if not flow:
-        return err("流量不存在")
+        return err("Flow not found")
     val = flow.get(field) or ""
     if val.startswith("base64:"):
         try:
             raw = base64.b64decode(val[7:])
-        except Exception:
-            return err("base64 解码失败")
+        except ValueError:
+            return err("base64 decode failed")
     else:
         raw = val.encode("utf-8", errors="replace")
     if not raw:
-        return ok({"protocol": "empty", "summary": "无数据", "fields": []})
+        return ok({"protocol": "empty", "summary": "No data", "fields": []})
     port = flow.get("dst_port") or flow.get("src_port") or 0
     decoder = _pick_decoder(port, raw)
     result = decoder(raw)
@@ -464,7 +573,7 @@ async def decode_flow(flow_id: int, field: str = "raw_data"):
         result["fields"] = []
     if isinstance(result.get("fields"), list):
         result["fields"] = [
-            {"label": "端口", "value": str(port), "color": "dim"},
-            {"label": "数据长度", "value": f"{len(raw)} 字节", "color": "dim"},
+            {"label": "Port", "value": str(port), "color": "dim"},
+            {"label": "Data length", "value": f"{len(raw)} bytes", "color": "dim"},
         ] + result["fields"]
     return ok(result)

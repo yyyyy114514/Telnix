@@ -1,4 +1,4 @@
-"""设置 API + 证书管理 API。"""
+"""Settings API + certificate management API."""
 
 import json
 import os
@@ -9,14 +9,16 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse
 
 from .. import db, logger, settings_store
+from ..logger import _capture_log
 from . import err, ok
+from .auth import is_loopback
 
 router = APIRouter()
 
 
 @router.get("/settings")
-async def get_settings():
-    """获取设置。inspector_tabs / flow_columns 等 JSON 数组类型自动反序列化。"""
+async def get_settings(request: Request):
+    """Get settings. JSON array types like inspector_tabs / flow_columns are auto-deserialized."""
     raw = db.get_all_settings()
     # 自动反序列化 JSON 数组类型的设置项
     json_keys = {"inspector_tabs", "flow_columns"}
@@ -25,7 +27,10 @@ async def get_settings():
         if v and isinstance(v, str):
             try:
                 raw[k] = json.loads(v)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+
+                _capture_log("error", "API exception", extra={"exc": repr(e)})
+
                 pass
     # 注入默认数据路径：用户未设置时返回实际数据目录，便于前端直观显示
     if not raw.get("data_path"):
@@ -37,43 +42,148 @@ async def get_settings():
     try:
         from ..proxy.mitmproxy_engine import MITMPROXY_AVAILABLE
         raw["mitmproxy_available"] = MITMPROXY_AVAILABLE
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in settings.py", extra={"exc": repr(e)})
         raw["mitmproxy_available"] = False
     # 安全：不向客户端回传敏感凭据（避免被非回环来源读取 / 被写入 localStorage）
-    # - api_token：API 鉴权令牌本身，泄露即绕过鉴权
-    # - clash_secret：Mihomo 控制面密钥
-    for _secret_key in ("api_token", "clash_secret"):
-        raw.pop(_secret_key, None)
+    # - api_token：API 鉴权令牌本身，泄露即绕过鉴权，任何来源都不回传
+    # - clash_secret：Mihomo 控制面密钥，仅回环保留，非回环来源替换为 has_clash_secret 布尔值
+    raw.pop("api_token", None)
+    client = request.client
+    client_host = client.host if client is not None else ""
+    if not is_loopback(client_host):
+        raw["has_clash_secret"] = bool(raw.get("clash_secret"))
+        raw.pop("clash_secret", None)
     return ok(raw)
 
 
 @router.put("/settings")
 async def update_settings(body: dict):
-    """更新设置。list/dict 类型自动 JSON 序列化，bool 转 1/0。
+    """Update settings. list/dict types auto JSON serialized, bool converted to 1/0.
 
-    支持任意 key：用户偏好（列排序、导航顺序、主题等）也通过此接口写入 settings.json。
+    Supports any key: user preferences (column sorting, navigation order, theme, etc.) are also written to settings.json via this endpoint.
+
+    Performance: batch-merge all keys in one write, instead of calling set_setting
+    per key (each set_setting reads+writes the entire JSON file, causing 5+ second
+    delays when settings.json is large or has many keys).
     """
+    from .. import secure_storage
     json_keys = {"inspector_tabs", "flow_columns"}
+    # 安全修复：敏感字段自动加密存储
+    encrypted_keys = {"clash_secret", "deepseek_api_key"}
+    updates: dict[str, str] = {}
     for k, v in body.items():
         if v is None:
             continue  # 跳过前端未设置的 null 值
+        # clash_secret 为空字符串时跳过：非回环访问时 GET 不返回密钥，
+        # 前端会设为空字符串，如果保存则覆盖真实密钥导致 Clash 401
+        if k == "clash_secret" and v == "":
+            continue
         if k in json_keys:
-            db.set_setting(k, json.dumps(v, ensure_ascii=False))
+            updates[k] = json.dumps(v, ensure_ascii=False)
         elif isinstance(v, bool):
-            db.set_setting(k, "1" if v else "0")
+            updates[k] = "1" if v else "0"
         elif isinstance(v, (list, dict)):
-            db.set_setting(k, json.dumps(v, ensure_ascii=False))
+            updates[k] = json.dumps(v, ensure_ascii=False)
         else:
-            db.set_setting(k, str(v))
-    return ok(db.get_all_settings(), "设置已更新")
+            val_str = str(v)
+            # 敏感字段：写入时加密
+            if k in encrypted_keys and val_str:
+                val_str = secure_storage.encrypt(val_str)
+            updates[k] = val_str
+    if updates:
+        # 批量写入：一次读+一次写，避免 N 次 IO
+        from .. import settings_store
+        settings_store.set_all_settings(updates)
+    return ok(db.get_all_settings(), "Settings updated")
+
+
+# ---------- Performance Configuration ----------
+
+@router.get("/settings/performance")
+async def get_performance_config():
+    """Get performance configuration."""
+    from .. import settings_store
+    return ok({
+        "max_body_size": settings_store.get_setting_int("max_body_size", 10 * 1024 * 1024),
+        "decompress_threshold": settings_store.get_setting_int("decompress_threshold", 1024),
+        "ssl_context_cache_size": settings_store.get_setting_int("ssl_context_cache_size", 256),
+        "max_connections": settings_store.get_setting_int("max_connections", 200),
+    })
+
+
+@router.put("/settings/performance")
+async def update_performance_config(body: dict):
+    """Update performance configuration."""
+    from .. import settings_store
+    updates = {}
+    if "max_body_size" in body:
+        updates["max_body_size"] = str(int(body["max_body_size"]))
+    if "decompress_threshold" in body:
+        updates["decompress_threshold"] = str(int(body["decompress_threshold"]))
+    if "ssl_context_cache_size" in body:
+        updates["ssl_context_cache_size"] = str(int(body["ssl_context_cache_size"]))
+    if "max_connections" in body:
+        updates["max_connections"] = str(int(body["max_connections"]))
+    if updates:
+        settings_store.set_all_settings(updates)
+    return ok(updates, "Performance config updated")
+
+
+@router.post("/settings/performance/preset")
+async def apply_performance_preset(body: dict):
+    """Apply a performance preset (light/standard/high_performance)."""
+    preset_name = body.get("preset", "standard")
+    from ..settings_store import PERFORMANCE_PRESETS
+    if preset_name not in PERFORMANCE_PRESETS:
+        return err(f"Unknown preset: {preset_name}")
+    preset = PERFORMANCE_PRESETS[preset_name]
+    from .. import settings_store
+    updates = {
+        "max_body_size": str(preset["max_body_size"]),
+        "decompress_threshold": str(preset["decompress_threshold"]),
+        "ssl_context_cache_size": str(preset["ssl_context_cache_size"]),
+        "max_connections": str(preset["max_connections"]),
+    }
+    settings_store.set_all_settings(updates)
+    return ok(updates, f"Applied preset: {preset_name}")
+
+
+# ---------- SSL/TLS Configuration ----------
+
+@router.get("/settings/ssl")
+async def get_ssl_config():
+    """Get SSL/TLS configuration."""
+    from .. import settings_store
+    return ok({
+        "min_tls_version": settings_store.get_setting("min_tls_version", "TLS 1.2"),
+        "cipher_suites": settings_store.get_setting("cipher_suites", "DEFAULT"),
+        "sni_spoofing": settings_store.get_setting("sni_spoofing", "0") == "1",
+    })
+
+
+@router.put("/settings/ssl")
+async def update_ssl_config(body: dict):
+    """Update SSL/TLS configuration."""
+    from .. import settings_store
+    updates = {}
+    if "min_tls_version" in body:
+        updates["min_tls_version"] = str(body["min_tls_version"])
+    if "cipher_suites" in body:
+        updates["cipher_suites"] = str(body["cipher_suites"])
+    if "sni_spoofing" in body:
+        updates["sni_spoofing"] = "1" if body["sni_spoofing"] else "0"
+    if updates:
+        settings_store.set_all_settings(updates)
+    return ok(updates, "SSL config updated")
 
 
 @router.post("/settings/open-file")
 async def open_settings_file():
-    """用记事本打开 settings.json 文件。"""
+    """Open settings.json file with Notepad."""
     path = settings_store.get_settings_path()
     if not os.path.exists(path):
-        return err(f"设置文件不存在: {path}")
+        return err(f"Settings file not found: {path}")
     try:
         if sys.platform == "win32":
             # 用记事本打开（不阻塞，记事本独立进程）
@@ -82,21 +192,21 @@ async def open_settings_file():
         else:
             import subprocess
             subprocess.Popen(["xdg-open", path])  # noqa: S603
-        logger.info("settings", f"打开设置文件: {path}")
+        logger.info("settings", f"Open settings file: {path}")
         return ok({"opened": True, "path": path})
     except Exception as e:
-        logger.error("settings", f"打开设置文件失败: {path}", str(e))
-        return err(f"打开失败: {e}")
+        logger.error("settings", f"Failed to open settings file: {path}", str(e))
+        return err(f"Open failed: {e}")
 
 
-# ---------- 证书管理 ----------
+# ---------- Certificate management ----------
 
 def _get_lan_ip() -> str:
-    """获取本机局域网 IP（用于手机配代理/扫码下载证书）。
+    """Get local LAN IP (for phone proxy configuration/QR code certificate download).
 
-    原理：开一个 UDP socket "连接" 公网 IP（不发数据，只让 OS 选路由），
-    读 socket 的本地地址。不可达也没关系，OS 会按路由表选合适的本地 IP。
-    失败回退 127.0.0.1。
+    Principle: open a UDP socket "connecting" to a public IP (no data sent, just let OS choose route),
+    read socket's local address. Unreachable is fine, OS will select appropriate local IP per routing table.
+    Fallback to 127.0.0.1 on failure.
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -112,27 +222,27 @@ def _get_lan_ip() -> str:
 
 @router.get("/cert/root.pem")
 async def download_root_cert(request: Request):
-    """下载 Telnix 根证书（.pem 格式），供手机浏览器扫码下载安装。
+    """Download Telnix root certificate (.pem format), for phone browser QR code download and install.
 
-    路由设计为 /api/cert/root.pem（注意：和 /api/cert/status 同前缀），
-    手机扫码直接访问 http://电脑IP:18901/api/cert/root.pem 即可下载。
+    Route designed as /api/cert/root.pem (note: same prefix as /api/cert/status),
+    phone scans QR code and directly visits http://computer_IP:18901/api/cert/root.pem to download.
     """
     proxy = request.app.state.telnix.proxy
     if proxy is None or proxy.ssl_bump is None:
-        return err("代理未启动")
+        return err("Proxy not started")
     path = proxy.ssl_bump.root_cert_path
     if not os.path.exists(path):
-        return err(f"根证书不存在: {path}")
+        return err(f"Root cert not found: {path}")
     return FileResponse(path, media_type="application/x-pem-file",
                         filename="telnix_root.pem")
 
 
 def _android_cert_filename(cert_path: str) -> str:
-    """计算安卓系统证书文件名（subject_hash_old + .0）。
+    """Calculate Android system certificate filename (subject_hash_old + .0).
 
-    安卓 7+ 需把证书放到 /system/etc/security/cacerts/，文件名必须是
-    "<subject_hash_old>.0"。优先用 openssl 命令计算（最准），
-    失败回退到 cryptography 库（兼容性较好）。
+    Android 7+ requires placing certificate in /system/etc/security/cacerts/, filename must be
+    "<subject_hash_old>.0". Prefer using openssl command (most accurate),
+    fallback to cryptography library (better compatibility) on failure.
     """
     # 方式1：openssl x509 -inform PEM -subject_hash_old
     import subprocess
@@ -145,7 +255,10 @@ def _android_cert_filename(cert_path: str) -> str:
             h = r.stdout.strip().splitlines()[0]
             if h and len(h) == 8:
                 return f"{h}.0"
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
 
     # 方式2：用 cryptography 库手动计算（OpenSSL 兼容的 subject_hash_old 算法）
@@ -166,7 +279,10 @@ def _android_cert_filename(cert_path: str) -> str:
         # 强制最高位为 0（与 OpenSSL 一致）
         val = val & 0x7FFFFFFF
         return f"{val:08x}.0"
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
 
     # 方式3：兜底，用固定名（不推荐但保证不报错）
@@ -175,13 +291,13 @@ def _android_cert_filename(cert_path: str) -> str:
 
 @router.get("/cert/android.pem")
 async def download_android_cert(request: Request):
-    """下载安卓 7+ 系统证书格式（文件名为 <subject_hash_old>.0）。
+    """Download Android 7+ system certificate format (filename is <subject_hash_old>.0).
 
-    安卓 7+ 用户证书不被信任，需要把证书推到 /system/etc/security/cacerts/，
-    且文件名必须是 "<subject_hash_old>.0"。本接口直接返回计算好文件名的证书，
-    省去用户在电脑上跑 openssl 的步骤。
+    Android 7+ user certificates are not trusted, need to push certificate to /system/etc/security/cacerts/,
+    and filename must be "<subject_hash_old>.0". This endpoint directly returns certificate with computed filename,
+    saving user from running openssl on computer.
 
-    用法（root 手机）：
+    Usage (rooted phone):
         adb push <hash>.0 /sdcard/
         adb shell su -c "mount -o rw,remount /system && \\
                          mv /sdcard/<hash>.0 /system/etc/security/cacerts/ && \\
@@ -189,10 +305,10 @@ async def download_android_cert(request: Request):
     """
     proxy = request.app.state.telnix.proxy
     if proxy is None or proxy.ssl_bump is None:
-        return err("代理未启动")
+        return err("Proxy not started")
     path = proxy.ssl_bump.root_cert_path
     if not os.path.exists(path):
-        return err(f"根证书不存在: {path}")
+        return err(f"Root cert not found: {path}")
     filename = _android_cert_filename(path)
     return FileResponse(path, media_type="application/x-pem-file",
                         filename=filename)
@@ -200,30 +316,37 @@ async def download_android_cert(request: Request):
 
 @router.get("/mobile/setup")
 async def mobile_setup(request: Request):
-    """移动端抓包配置信息：本机 IP、代理端口、API 端口、证书下载 URL。
+    """Mobile capture configuration info: local IP, proxy port, API port, certificate download URL.
 
-    供前端"手机抓包"向导显示二维码用：二维码内容是证书下载 URL，
-    手机扫码后浏览器打开直接下载 .pem。
+    For frontend "phone capture" wizard to display QR code: QR code content is certificate download URL,
+    phone scans and browser opens it to directly download .pem.
     """
     lan_ip = _get_lan_ip()
     proxy_port = 8888
     try:
         from ..config import get_proxy_port
         proxy_port = get_proxy_port()
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
     api_port = 18901
     try:
         from ..config import get_port
         api_port = get_port()
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
     # API 已加 Token 鉴权（回环免鉴权，非回环需 Token）。手机通过局域网 IP
     # 访问属于非回环来源，必须在证书下载链接中附带 Token，否则会被 401 拒绝。
     try:
         from . import auth
         token = auth.get_api_token()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in settings.py", extra={"exc": repr(e)})
         token = ""
     base = f"http://{lan_ip}:{api_port}/api"
     return ok({
@@ -238,10 +361,10 @@ async def mobile_setup(request: Request):
 
 @router.get("/cert/status")
 async def cert_status(request: Request):
-    """证书状态（已装/未装）。"""
+    """Certificate status (installed/not installed)."""
     proxy = request.app.state.telnix.proxy
     if proxy is None or proxy.ssl_bump is None:
-        return err("代理未启动")
+        return err("Proxy not started")
     installed = proxy.ssl_bump.is_root_cert_installed()
     proxy.cert_installed = installed
     return ok({
@@ -251,12 +374,95 @@ async def cert_status(request: Request):
     })
 
 
-@router.post("/cert/install")
-async def cert_install(request: Request):
-    """安装根证书到系统信任库（Windows 需 UAC，会弹窗）。"""
+@router.get("/cert/details")
+async def cert_details(request: Request):
+    """Get detailed certificate information including expiry countdown and cache stats."""
     proxy = request.app.state.telnix.proxy
     if proxy is None or proxy.ssl_bump is None:
-        return err("代理未启动")
+        return err("Proxy not started")
+
+    from datetime import datetime, timezone
+    import os
+
+    root_cert_path = proxy.ssl_bump.root_cert_path
+    expiry_countdown = None
+    issued_date = None
+    expiry_date = None
+    serial_number = None
+
+    # 读取证书信息
+    if os.path.exists(root_cert_path):
+        try:
+            from cryptography import x509
+            with open(root_cert_path, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            issued_date = cert.not_valid_before_utc.isoformat() if hasattr(cert, "not_valid_before_utc") else cert.not_valid_before.isoformat()
+            expiry_date = cert.not_valid_after_utc.isoformat() if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after.isoformat()
+            # 计算到期天数
+            expiry = cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after
+            now = datetime.now(timezone.utc)
+            delta = expiry.replace(tzinfo=timezone.utc) - now
+            expiry_countdown = delta.days
+            # 序列号
+            serial_number = str(cert.serial_number)
+        except Exception as e:
+            _capture_log("error", "cert details parse error", extra={"exc": repr(e)})
+
+    # 获取叶证书缓存数量（如果有缓存统计）
+    leaf_cert_count = 0
+    if hasattr(proxy.ssl_bump, "get_leaf_cert_count"):
+        try:
+            leaf_cert_count = proxy.ssl_bump.get_leaf_cert_count()
+        except Exception:
+            pass
+
+    # 证书过期告警开关
+    from .. import settings_store
+    cert_expiry_alert = settings_store.get_setting("cert_expiry_alert", "1") == "1"
+
+    return ok({
+        "root_cert_path": root_cert_path,
+        "installed": proxy.ssl_bump.is_root_cert_installed(),
+        "thumbprint": proxy.ssl_bump.root_thumbprint(),
+        "issued_date": issued_date,
+        "expiry_date": expiry_date,
+        "expiry_countdown": expiry_countdown,
+        "serial_number": serial_number,
+        "leaf_cert_count": leaf_cert_count,
+        "cert_expiry_alert": cert_expiry_alert,
+    })
+
+
+@router.put("/cert/expiry-alert")
+async def cert_expiry_alert(body: dict):
+    """Update certificate expiry alert setting."""
+    enabled = body.get("enabled", True)
+    from .. import settings_store
+    settings_store.set_setting("cert_expiry_alert", "1" if enabled else "0")
+    return ok({"cert_expiry_alert": enabled})
+
+
+@router.post("/cert/regenerate")
+async def cert_regenerate(request: Request):
+    """Regenerate root certificate (dangerous operation)."""
+    proxy = request.app.state.telnix.proxy
+    if proxy is None or proxy.ssl_bump is None:
+        return err("Proxy not started")
+    try:
+        # 重新生成根证书
+        proxy.ssl_bump.generate_root_cert()
+        proxy.cert_installed = False  # 需要重新安装
+        return ok({"regenerated": True}, "Certificate regenerated. Please reinstall the root certificate.")
+    except Exception as e:
+        return err(f"Failed to regenerate certificate: {e}")
+
+
+@router.post("/cert/install")
+async def cert_install(request: Request):
+    """Install root certificate to system trust store (Windows requires UAC, will popup)."""
+    proxy = request.app.state.telnix.proxy
+    if proxy is None or proxy.ssl_bump is None:
+        return err("Proxy not started")
 
     expected_thumbprint = proxy.ssl_bump.root_thumbprint()
     result = proxy.ssl_bump.install_root_cert()
@@ -271,46 +477,46 @@ async def cert_install(request: Request):
             proxy.clear_ssl_bump_failed_hosts()
         return ok(
             {**result, "thumbprint": expected_thumbprint, "verified": True},
-            "根证书已安装并通过验证",
+            "Root certificate installed and verified",
         )
     elif result.get("installed") and not verified:
         return err(
-            "证书安装后验证失败：certutil 返回成功但未在信任库中找到对应指纹的证书。"
-            "可能原因：(1) Windows CTL 缓存延迟，请等待 30 秒后重试；"
-            "(2) UAC 弹窗未确认或被组策略拦截；"
-            "(3) 证书文件被杀毒软件隔离。",
+            "Certificate verification failed after install: certutil returned success but the certificate with the matching fingerprint was not found in the trust store. "
+            "Possible causes: (1) Windows CTL cache delay, please wait 30 seconds and retry; "
+            "(2) UAC prompt not confirmed or blocked by group policy; "
+            "(3) Certificate file quarantined by antivirus software.",
             data={**result, "verified": False, "thumbprint": expected_thumbprint},
         )
     else:
         error_msg = result.get("error", "")
         hint = ""
-        if "用户取消了 UAC" in error_msg:
-            hint = "请在 UAC 弹窗中点击'是'。若未出现弹窗，请检查 UAC 策略设置。"
-        elif "超时" in error_msg:
-            hint = "UAC 等待超时，请重新点击安装并在 2 分钟内确认 UAC 弹窗。"
+        if "cancelled UAC" in error_msg:
+            hint = "Please click 'Yes' in the UAC prompt. If no prompt appears, check UAC policy settings."
+        elif "timeout" in error_msg:
+            hint = "UAC wait timed out, please click install again and confirm the UAC prompt within 2 minutes."
         return err(
-            f"安装失败（exit_code={result.get('exit_code')}）{hint}",
+            f"Install failed (exit_code={result.get('exit_code')}) {hint}",
             data=result,
         )
 
 
 @router.post("/cert/remove")
 async def cert_remove(request: Request):
-    """移除根证书（需 UAC）。"""
+    """Remove root certificate (requires UAC)."""
     proxy = request.app.state.telnix.proxy
     if proxy is None or proxy.ssl_bump is None:
-        return err("代理未启动")
+        return err("Proxy not started")
     result = proxy.ssl_bump.remove_root_cert()
     if result.get("removed"):
         proxy.cert_installed = False
-        return ok(result, "根证书已移除")
-    return err(f"移除失败（exit_code={result.get('exit_code')}）", data=result)
+        return ok(result, "Root certificate removed")
+    return err(f"Remove failed (exit_code={result.get('exit_code')})", data=result)
 
 
-# ---------- 路径操作 ----------
+# ---------- Path operations ----------
 
 def _get_allowed_base_dirs():
-    """返回允许 open-path/list-dirs 访问的根目录列表。"""
+    """Return list of root directories allowed for open-path/list-dirs access."""
     from ..config import get_cert_dir, get_data_dir
     dirs = [get_data_dir(), get_cert_dir()]
     # 可选：UI dist 目录
@@ -319,7 +525,10 @@ def _get_allowed_base_dirs():
         ui_dir = get_ui_dist_dir()
         if ui_dir and os.path.isdir(ui_dir):
             dirs.append(ui_dir)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
     return [os.path.realpath(d) for d in dirs if os.path.isdir(d)]
 
@@ -330,7 +539,7 @@ _BLOCKED_EXTS = {".exe", ".bat", ".cmd", ".js", ".vbs", ".ps1", ".scr", ".com", 
 
 @router.post("/settings/open-path")
 async def open_path(body: dict):
-    """在系统文件管理器中打开指定路径。路径为空时使用默认数据目录。"""
+    """Open specified path in system file manager. When path is empty, uses default data directory."""
     from ..config import get_data_dir
     path = (body.get("path") or "").strip()
     if not path:
@@ -341,37 +550,37 @@ async def open_path(body: dict):
     try:
         real_path = os.path.realpath(path)
     except Exception as e:  # noqa: BLE001
-        return err(f"路径无效: {path} ({e})")
+        return err(f"Invalid path: {path} ({e})")
 
     allowed_dirs = _get_allowed_base_dirs()
     if not any(real_path == d or real_path.startswith(d + os.sep) for d in allowed_dirs):
-        return err("禁止打开此路径（仅允许数据目录和证书目录）")
+        return err("Opening this path is forbidden (only data dir and cert dir are allowed)")
 
     if not os.path.exists(real_path):
-        return err(f"路径不存在: {real_path}")
+        return err(f"Path not found: {real_path}")
 
     # Windows 上禁止打开可执行文件
     if sys.platform == "win32":
         _, ext = os.path.splitext(real_path)
         if ext.lower() in _BLOCKED_EXTS:
-            return err(f"禁止打开可执行文件: {ext}")
+            return err(f"Opening executable files is forbidden: {ext}")
         try:
             os.startfile(real_path)  # noqa: S606
         except OSError as e:
-            return err(f"打开失败: {e}")
+            return err(f"Open failed: {e}")
     else:
         import subprocess
         try:
             subprocess.Popen(["xdg-open", real_path])  # noqa: S603
         except OSError as e:
-            return err(f"打开失败: {e}")
-    logger.info("settings", f"打开路径: {real_path}")
+            return err(f"Open failed: {e}")
+    logger.info("settings", f"Open path: {real_path}")
     return ok({"opened": True, "path": real_path})
 
 
 @router.get("/settings/list-dirs")
 async def list_dirs(path: str = Query("")):
-    """列出指定路径下的子目录，用于前端目录选择器。"""
+    """List subdirectories under specified path, for frontend directory selector."""
     if not path:
         # 返回系统根/家目录
         if sys.platform == "win32":
@@ -401,9 +610,9 @@ async def list_dirs(path: str = Query("")):
         if not is_root_or_drive:
             if not any(real_path == d or real_path.startswith(d + os.sep)
                        for d in allowed_dirs):
-                return err("禁止列出此路径（仅允许数据目录和证书目录）")
+                return err("Listing this path is forbidden (only data dir and cert dir are allowed)")
         if not os.path.isdir(real_path):
-            return err(f"不是目录: {real_path}")
+            return err(f"Not a directory: {real_path}")
         dirs = []
         for name in sorted(os.listdir(real_path)):
             full = os.path.join(real_path, name)
@@ -414,5 +623,5 @@ async def list_dirs(path: str = Query("")):
             parent = ""
         return ok({"current": path, "dirs": dirs, "parent": parent})
     except Exception as e:
-        logger.error("settings", f"列目录失败: {path}", str(e))
-        return err(f"读取失败: {e}")
+        logger.error("settings", f"List dirs failed: {path}", str(e))
+        return err(f"Read failed: {e}")

@@ -1,12 +1,12 @@
-"""§3.16 环境快照：导出/导入当前环境状态。
+"""§3.16 Environment snapshot: export/import current environment state.
 
-环境状态包含：
-- 所有自动回复规则
-- focus 设置（专注模式）
-- 断点设置（请求/响应断点开关 + 超时）
+Environment state includes:
+- All auto-reply rules
+- focus settings (focus mode)
+- Breakpoint settings (request/response breakpoint toggle + timeout)
 
-GET /snapshot  返回当前环境状态
-POST /snapshot  导入环境状态（清空现有规则后导入新的 + 设置 focus + 断点）
+GET /snapshot  Returns current environment state
+POST /snapshot  Import environment state (clear existing rules then import new + set focus + breakpoint)
 """
 
 import json
@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from ..auto_reply.rules import invalidate_cache
 from . import err, ok
 
@@ -24,22 +25,24 @@ router = APIRouter()
 
 
 def _serialize_rule(rule: dict) -> dict:
-    """序列化规则用于快照导出（mock_headers/modify_rules 反序列化为对象）。"""
+    """Serialize rule for snapshot export (deserialize mock_headers/modify_rules into objects)."""
     out = dict(rule)
     try:
         out["mock_headers"] = json.loads(out.get("mock_headers") or "{}")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in snapshot.py", extra={"exc": repr(e)})
         out["mock_headers"] = {}
     try:
         out["modify_rules"] = json.loads(out.get("modify_rules") or "[]")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in snapshot.py", extra={"exc": repr(e)})
         out["modify_rules"] = []
     return out
 
 
 @router.get("/snapshot")
 async def get_snapshot(request: Request):
-    """返回当前环境状态（所有规则 + focus 设置 + 断点设置）。"""
+    """Return current environment state (all rules + focus settings + breakpoint settings)."""
     rules = [_serialize_rule(r) for r in db.get_rules()]
 
     # focus 设置：从运行时代理对象获取
@@ -69,19 +72,19 @@ async def get_snapshot(request: Request):
 
 
 class SnapshotImport(BaseModel):
-    """环境快照导入。所有字段可选；未提供则不修改对应部分。"""
-    rules: list[dict] | None = None  # 规则列表（与导出格式一致）
-    focus: dict | None = None  # focus 设置
-    breakpoint: dict | None = None  # 断点设置
-    # 是否清空现有规则（默认 True；False=追加）
+    """Environment snapshot import. All fields optional; if not provided, corresponding part is not modified."""
+    rules: list[dict] | None = None  # Rule list (consistent with export format)
+    focus: dict | None = None  # focus settings
+    breakpoint: dict | None = None  # Breakpoint settings
+    # Whether to clear existing rules (default True; False=append)
     clear_rules: bool = True
 
 
 @router.post("/snapshot")
 async def import_snapshot(body: SnapshotImport, request: Request):
-    """导入环境状态：清空现有规则后导入新的 + 设置 focus + 断点。
+    """Import environment state: clear existing rules then import new + set focus + breakpoint.
 
-    规则字段与 GET /snapshot 导出格式一致（mock_headers/modify_rules 为对象）。
+    Rule fields are consistent with GET /snapshot export format (mock_headers/modify_rules are objects).
     """
     result = {"rules_imported": 0, "rules_cleared": 0,
               "focus_set": False, "breakpoint_set": False}
@@ -124,7 +127,8 @@ async def import_snapshot(body: SnapshotImport, request: Request):
                 }
                 db.insert_rule(rule)
                 imported += 1
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                _capture_log("error", "API exception in snapshot.py", extra={"exc": repr(e)})
                 # 单条规则导入失败不影响其他规则
                 continue
         result["rules_imported"] = imported

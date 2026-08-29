@@ -42,6 +42,10 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: ['lodash', 'element-plus', 'vue', 'vue-router', 'pinia'],
+    // monaco-editor 的 worker 入口带 ?worker 后缀，Vite dep optimizer 无法处理
+    // （TypeError: Cannot read properties of undefined (reading 'imports')），
+    // 必须排除，否则整个 dep 优化失败，所有依赖返回 504 Outdated Optimize Dep → 白屏。
+    exclude: ['monaco-editor'],
   },
   build: {
     outDir: 'dist',

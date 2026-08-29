@@ -2761,13 +2761,13 @@ Telnix 提供 MCP (Model Context Protocol) 服务器，让 Claude Desktop / Curs
 
 ```bash
 # 方式1：模块直接运行（推荐）
-python -m Telnix.mcp_server
+python -m telnix.mcp_server
 
 # 方式2：安装后的入口点
 Telnix-mcp
 
 # 自定义后端地址
-python -m Telnix.mcp_server --base-url http://127.0.0.1:18901
+python -m telnix.mcp_server --base-url http://127.0.0.1:18901
 # 或用环境变量
 set TELNIX_API=http://127.0.0.1:18901
 ```
@@ -2781,7 +2781,7 @@ set TELNIX_API=http://127.0.0.1:18901
   "mcpServers": {
     "Telnix": {
       "command": "python",
-      "args": ["-m", "Telnix.mcp_server"],
+      "args": ["-m", "telnix.mcp_server"],
       "cwd": ".\\src\\host",
       "env": { "TELNIX_API": "http://127.0.0.1:18901" }
     }
@@ -2789,7 +2789,7 @@ set TELNIX_API=http://127.0.0.1:18901
 }
 ```
 
-**Cursor / VS Code**：参考各客户端的 MCP 配置文档，command 填 `python`，args 填 `["-m", "Telnix.mcp_server"]`。
+**Cursor / VS Code**：参考各客户端的 MCP 配置文档，command 填 `python`，args 填 `["-m", "telnix.mcp_server"]`。
 
 ### C.3 工具清单（88 个，100% 覆盖 CLI）
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from ..proxy.server import Headers, SocketReader, read_body
 from .. import logger
+from ..logger import _capture_log
 from . import err, ok
 
 router = APIRouter()
@@ -76,7 +77,8 @@ def _resolve_safe_target(host: str, port: int) -> str | None:
         return None
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in send.py", extra={"exc": repr(e)})
         return None
     for info in infos:
         try:

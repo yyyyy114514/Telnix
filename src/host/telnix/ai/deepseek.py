@@ -1,34 +1,177 @@
-"""DeepSeek API calls: traffic analysis + multi-turn conversation + Agent tool calls.
+"""AI analysis module: supports multiple AI services (Claude, Claude, GPT-4o, Gemini, Ollama).
 
-Supports:
-- Traffic analysis (first analysis creates a chat record)
-- Multi-turn conversation (with traffic context)
-- Agent capability: AI can call tools to create auto-modify rules (modify request/response)
-- Direct conversation without traffic
+Features:
+- Multi-service support with unified interface
+- SSE streaming responses
+- Token usage tracking and cost estimation
 """
 
 import json
 import os
 import ssl
+from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 
 from .. import db, logger
 
-API_URL = "https://api.deepseek.com/chat/completions"
-# 支持的模型列表（其他模型已弃用）
-SUPPORTED_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
-DEFAULT_MODEL = "deepseek-v4-flash"
+# Default API endpoints
+DEFAULT_DEEPSEEK_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+
+# Supported AI services
+AI_SERVICES = {
+    "deepseek": {
+        "name": "DeepSeek",
+        "default_model": "deepseek-v4-flash",
+        "supported_models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "api_type": "openai_compatible",
+        "pricing": {  # RMB per 1M tokens (input/output)
+            "deepseek-v4-flash": (0.1, 0.5),
+            "deepseek-v4-pro": (2.0, 8.0),
+        },
+    },
+    "anthropic": {
+        "name": "Claude (Anthropic)",
+        "default_model": "claude-3-5-sonnet-20241022",
+        "supported_models": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
+        "api_type": "anthropic",
+        "api_url": "https://api.anthropic.com/v1/messages",
+        "pricing": {
+            "claude-3-5-sonnet-20241022": (11.0, 32.0),
+            "claude-3-5-haiku-20241022": (0.8, 4.0),
+            "claude-3-opus-20240229": (90.0, 270.0),
+        },
+    },
+    "openai": {
+        "name": "GPT (OpenAI)",
+        "default_model": "gpt-4o",
+        "supported_models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+        "api_type": "openai",
+        "api_url": "https://api.openai.com/v1/chat/completions",
+        "pricing": {
+            "gpt-4o": (15.0, 60.0),
+            "gpt-4o-mini": (0.75, 3.0),
+            "gpt-4-turbo": (30.0, 90.0),
+            "gpt-3.5-turbo": (0.5, 1.5),
+        },
+    },
+    "gemini": {
+        "name": "Gemini (Google)",
+        "default_model": "gemini-1.5-pro",
+        "supported_models": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"],
+        "api_type": "google",
+        "api_url": "https://generativelanguage.googleapis.com/v1beta/models",
+        "pricing": {  # Free tier up to limits, then per 1M tokens
+            "gemini-1.5-pro": (3.5, 10.5),
+            "gemini-1.5-flash": (0.075, 0.3),
+            "gemini-2.0-flash-exp": (0.0, 0.0),  # Free tier
+        },
+    },
+    "ollama": {
+        "name": "Ollama (Local)",
+        "default_model": "llama3.1",
+        "supported_models": [],  # Dynamic, depends on installed models
+        "api_type": "ollama",
+        "api_url": DEFAULT_OLLAMA_URL,
+        "pricing": (0.0, 0.0),  # Local, no cost
+    },
+}
 
 
-def _get_model() -> str:
-    """Read the user-selected model from settings, default deepseek-v4-flash."""
-    m = db.get_setting("deepseek_model", DEFAULT_MODEL)
-    if m not in SUPPORTED_MODELS:
-        m = DEFAULT_MODEL
-    return m
+@dataclass
+class AIUsageRecord:
+    """AI usage record for tracking costs."""
+    chat_id: int
+    service: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    total_cost: float  # RMB
 
-# ---------- 工具定义 ----------
+
+def _get_current_service() -> str:
+    """Get the currently selected AI service."""
+    return db.get_setting("ai_service", "deepseek")
+
+
+def _get_service_config(service: str) -> dict:
+    """Get configuration for a specific AI service."""
+    config = AI_SERVICES.get(service, AI_SERVICES["deepseek"])
+    # Get API key from settings
+    key_map = {
+        "deepseek": "deepseek_api_key",
+        "anthropic": "anthropic_api_key",
+        "openai": "openai_api_key",
+        "gemini": "gemini_api_key",
+        "ollama": "ollama_api_key",
+    }
+    key_name = key_map.get(service, "")
+    raw_key = db.get_setting(key_name, "")
+    # Decrypt if encrypted
+    from .. import secure_storage
+    api_key = secure_storage.decrypt(raw_key) if secure_storage.is_encrypted(raw_key) else raw_key
+
+    # Get custom endpoint if configured
+    endpoint_key = f"{service}_endpoint"
+    endpoint = db.get_setting(endpoint_key, "")
+
+    return {
+        **config,
+        "api_key": api_key,
+        "endpoint": endpoint,
+    }
+
+
+def _get_model(service: str) -> str:
+    """Get the user-selected model for a service."""
+    model_key = f"{service}_model"
+    default = AI_SERVICES.get(service, {}).get("default_model", "")
+    return db.get_setting(model_key, default)
+
+
+def _record_usage(chat_id: int, service: str, model: str,
+                  input_tokens: int, output_tokens: int) -> AIUsageRecord:
+    """Record AI usage and calculate cost."""
+    pricing = AI_SERVICES.get(service, {}).get("pricing", {})
+    model_pricing = pricing.get(model, (0, 0))
+    if isinstance(model_pricing, tuple):
+        input_price, output_price = model_pricing
+    else:
+        input_price, output_price = 0, 0
+
+    total_cost = (input_tokens / 1_000_000 * input_price +
+                  output_tokens / 1_000_000 * output_price)
+
+    record = AIUsageRecord(
+        chat_id=chat_id,
+        service=service,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost=total_cost,
+    )
+
+    # Store in database
+    db.record_ai_usage(
+        chat_id=chat_id,
+        service=service,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost=total_cost,
+    )
+
+    return record
+
+
+def get_ai_usage_stats() -> dict:
+    """Get AI usage statistics (today, this month, all time)."""
+    return db.get_ai_usage_stats()
+
+
+# ---------- Tool definitions ----------
 
 TOOLS = [
     {
@@ -45,7 +188,9 @@ TOOLS = [
                 "properties": {
                     "url_pattern": {
                         "type": "string",
-                        "description": "URL match pattern, supports wildcard *. Example: *steamstart.top*",
+                        "description": (
+                            "URL match pattern, supports wildcard *. Example: *steamstart.top*"
+                        ),
                     },
                     "field_key": {
                         "type": "string",
@@ -69,6 +214,41 @@ TOOLS = [
                     },
                 },
                 "required": ["url_pattern", "field_key", "field_value", "note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_script_rule",
+            "description": (
+                "Create an auto-modify rule with a custom Python script to modify the HTTP request or response. "
+                "Use this when the user wants a complex modification that can't be done with simple field replacement "
+                "(e.g. conditional logic, multi-field updates, computed values, body rewriting). "
+                "The script runs in a sandboxed subprocess and must define an on_request(ctx) and/or on_response(ctx) function."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url_pattern": {
+                        "type": "string",
+                        "description": "URL wildcard pattern to match (e.g. '*.example.com/api/*')",
+                    },
+                    "script": {
+                        "type": "string",
+                        "description": "Python script source code. Must define on_request(ctx) and/or on_response(ctx).",
+                    },
+                    "modify_target": {
+                        "type": "string",
+                        "enum": ["request", "response"],
+                        "description": "Whether to modify request or response. Default: response.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Optional note for this rule",
+                    },
+                },
+                "required": ["url_pattern", "script"],
             },
         },
     },
@@ -101,28 +281,80 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_all_auto_reply_rules",
-            "description": "Delete all auto-modify rules (clear all at once). Call this tool when the user says 'delete all rules' / 'clear rules', do not call delete_auto_reply_rule one by one.",
+            "description": "Delete all auto-modify rules (clear all at once). Call this tool when the user says 'delete all rules' / 'clear rules'.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dns_hijack_stats",
+            "description": "Query DNS hijack statistics and logs.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_traffic",
+            "description": "Query captured traffic flows with filtering.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "protocol": {
+                        "type": "string",
+                        "enum": ["http", "tcp", "udp"],
+                        "description": "Protocol filter: 'http' (default), 'tcp', or 'udp'",
+                    },
+                    "host": {"type": "string", "description": "Filter by host name (substring match)"},
+                    "limit": {"type": "integer", "description": "Max number of results (default: 10000)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_request",
+            "description": "Send an HTTP request to test or probe a target.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL to send the request to"},
+                    "method": {"type": "string", "description": "HTTP method: GET (default), POST, PUT, DELETE"},
+                    "headers": {"type": "string", "description": "Extra headers as JSON string"},
+                    "body": {"type": "string", "description": "Request body (for POST/PUT)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "global_analysis",
+            "description": "Generate a comprehensive analysis report from all captured traffic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "focus": {
+                        "type": "string",
+                        "enum": ["overview", "security", "performance", "all"],
+                        "description": "Analysis focus: 'overview' (default), 'security', 'performance', or 'all'",
+                    },
+                },
+                "required": [],
+            },
         },
     },
 ]
 
 
 def _parse_dsml_tool_calls(text: str) -> list[dict]:
-    """Parse DSML-format tool calls from DeepSeek text output.
-
-    Format example:
-      <｜｜DSML｜｜tool_calls>
-      <｜｜DSML｜｜invoke name="delete_auto_reply_rule">
-      <｜｜DSML｜｜parameter name="rule_id" string="true">53354dfe</｜｜DSML｜｜parameter>
-      </｜｜DSML｜｜invoke>
-      </｜｜DSML｜｜tool_calls>
-
-    Returns a list of [{"name": "...", "arguments": {...}}].
-    """
+    """Parse DSML-format tool calls from Claude text output."""
     import re
     results: list[dict] = []
-    # 匹配每个 invoke 块
     invoke_re = re.compile(
         r'<｜｜DSML｜｜invoke\s+name="([^"]+)">(.*?)</｜｜DSML｜｜invoke>',
         re.DOTALL,
@@ -146,19 +378,13 @@ def _parse_dsml_tool_calls(text: str) -> list[dict]:
 def _strip_dsml(text: str) -> str:
     """Remove DSML tag blocks from text, keeping other text."""
     import re
-    # 移除整个 tool_calls 块
     cleaned = re.sub(
         r'<｜｜DSML｜｜tool_calls>.*?</｜｜DSML｜｜tool_calls>',
-        '',
-        text,
-        flags=re.DOTALL,
+        '', text, flags=re.DOTALL,
     )
-    # 移除可能残留的单独 invoke 块
     cleaned = re.sub(
         r'<｜｜DSML｜｜invoke\s+name="[^"]+">.*?</｜｜DSML｜｜invoke>',
-        '',
-        cleaned,
-        flags=re.DOTALL,
+        '', cleaned, flags=re.DOTALL,
     )
     return cleaned.strip()
 
@@ -170,23 +396,18 @@ def _execute_tool(name: str, arguments: dict) -> str:
         field_key = arguments.get("field_key", "")
         field_value = arguments.get("field_value", "")
         note = arguments.get("note", "") or ""
-        # modify_target: 'response'（默认）或 'request'
-        # 'response' -> action=modify_response, target=response_body
-        # 'request'  -> action=modify_request,  target=request_body
         modify_target = str(arguments.get("modify_target", "response")).lower().strip()
         if modify_target not in ("request", "response"):
             modify_target = "response"
         is_request = modify_target == "request"
         action = "modify_request" if is_request else "modify_response"
         body_target = "request_body" if is_request else "response_body"
-        modify_rules = json.dumps([
-            {
-                "target": body_target,
-                "op": "replace",
-                "key": field_key,
-                "value": field_value,
-            }
-        ])
+        modify_rules = json.dumps([{
+            "target": body_target,
+            "op": "replace",
+            "key": field_key,
+            "value": field_value,
+        }])
         rule_id = db.add_rule({
             "enabled": 1,
             "match_mode": "wildcard",
@@ -195,7 +416,6 @@ def _execute_tool(name: str, arguments: dict) -> str:
             "modify_rules": modify_rules,
             "note": note,
         })
-        # 清除规则缓存
         try:
             from ..auto_reply.rules import invalidate_cache
             invalidate_cache()
@@ -203,30 +423,50 @@ def _execute_tool(name: str, arguments: dict) -> str:
             pass
         target_label = "request body" if is_request else "response body"
         logger.info("ai", f"AI created auto-modify rule ({action}): {url_pattern} -> {field_key}={field_value}",
-                     f"rule_id={rule_id}, note={note}")
-        return (f"Created auto-modify rule (ID: {rule_id}, action: {action}): URL pattern '{url_pattern}', "
-                f"replace {target_label} field '{field_key}' with '{field_value}', note: {note}")
+                    f"rule_id={rule_id}, note={note}")
+        return (f"Created auto-modify rule (ID: {rule_id}): URL pattern '{url_pattern}', "
+                f"replace {target_label} field '{field_key}' with '{field_value}'")
+
+    elif name == "create_script_rule":
+        url_pattern = arguments.get("url_pattern", "")
+        script = arguments.get("script", "")
+        note = arguments.get("note", "") or ""
+        modify_target = str(arguments.get("modify_target", "response")).lower().strip()
+        if modify_target not in ("request", "response"):
+            modify_target = "response"
+        rule_id = db.add_rule({
+            "enabled": 1,
+            "match_mode": "wildcard",
+            "pattern": url_pattern,
+            "action": "script",
+            "modify_rules": script,
+            "note": note,
+        })
+        try:
+            from ..auto_reply.rules import invalidate_cache
+            invalidate_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        target_label = "request" if modify_target == "request" else "response"
+        return (f"Created script rule (ID: {rule_id}): URL pattern '{url_pattern}', "
+                f"modify {target_label} with custom Python script.")
 
     elif name == "list_auto_reply_rules":
         rules = db.get_rules()
         if not rules:
             return json.dumps({"count": 0, "rules": []}, ensure_ascii=False)
-        # 返回结构化 JSON，让 AI 能准确提取 rule_id
-        rule_list = []
-        for r in rules:
-            rule_list.append({
-                "rule_id": r["id"],
-                "enabled": bool(r["enabled"]),
-                "match_mode": r["match_mode"],
-                "pattern": r["pattern"],
-                "action": r["action"],
-                "note": r.get("note", ""),
-            })
+        rule_list = [{
+            "rule_id": r["id"],
+            "enabled": bool(r["enabled"]),
+            "match_mode": r["match_mode"],
+            "pattern": r["pattern"],
+            "action": r["action"],
+            "note": r.get("note", ""),
+        } for r in rules]
         return json.dumps({"count": len(rule_list), "rules": rule_list}, ensure_ascii=False)
 
     elif name == "delete_auto_reply_rule":
         rule_id_raw = arguments.get("rule_id", "")
-        # 支持逗号分隔的多个 ID
         ids = [s.strip() for s in str(rule_id_raw).split(",") if s.strip()]
         if not ids:
             return "No rule ID provided for deletion"
@@ -240,11 +480,9 @@ def _execute_tool(name: str, arguments: dict) -> str:
                 continue
             db.delete_rule(rule_id)
             still = db.get_rule(rule_id)
-            if still:
-                results.append({"rule_id": rule_id, "ok": False, "error": "Still exists after deletion"})
-            else:
-                results.append({"rule_id": rule_id, "ok": True, "pattern": existing.get("pattern", "")})
-                logger.info("ai", f"AI deleted rule {rule_id}", f"pattern={existing.get('pattern')}")
+            results.append({"rule_id": rule_id, "ok": not still, "pattern": existing.get("pattern", "")})
+            if not still:
+                logger.info("ai", f"AI deleted rule {rule_id}")
         try:
             from ..auto_reply.rules import invalidate_cache
             invalidate_cache()
@@ -269,37 +507,138 @@ def _execute_tool(name: str, arguments: dict) -> str:
         except Exception:  # noqa: BLE001
             pass
         logger.info("ai", f"AI deleted all rules, total {count}")
-        # 验证
-        remaining = db.get_rules()
-        return json.dumps({
-            "deleted": count,
-            "remaining": len(remaining),
-            "msg": f"Deleted {count} rule(s)" + (f", {len(remaining)} rule(s) not deleted" if remaining else ""),
-        }, ensure_ascii=False)
+        return json.dumps({"deleted": count, "msg": f"Deleted {count} rule(s)"})
+
+    elif name == "dns_hijack_stats":
+        try:
+            from ..proxy.dns_hijack import get_stats, get_hijack_log
+            stats = get_stats()
+            log = get_hijack_log()
+            return json.dumps({
+                "stats": stats,
+                "log_count": len(log),
+                "log": log[-50:],
+            }, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    elif name == "query_traffic":
+        try:
+            protocol = arguments.get("protocol", "http")
+            host = arguments.get("host", None)
+            limit = int(arguments.get("limit", 10000))
+            session_id = db.get_current_session_id() or 0
+            flows = db.get_flows(
+                session_id, limit=limit, offset=0,
+                host=host, protocol=protocol if protocol != "http" else None,
+            )
+            out = [{
+                "id": f.get("id"),
+                "protocol": f.get("protocol", "http"),
+                "method": f.get("method", ""),
+                "url": f.get("url", ""),
+                "host": f.get("host", ""),
+                "status_code": f.get("status_code"),
+                "size": f.get("size", 0),
+                "process_name": f.get("process_name", ""),
+                "pid": f.get("pid"),
+                "timestamp": f.get("timestamp", ""),
+            } for f in flows[:limit]]
+            return json.dumps({"count": len(out), "flows": out}, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    elif name == "send_request":
+        try:
+            url = arguments.get("url", "")
+            method = arguments.get("method", "GET").upper()
+            extra_headers = arguments.get("headers", "")
+            body = arguments.get("body", "")
+            headers = {}
+            if extra_headers:
+                try:
+                    headers.update(json.loads(extra_headers))
+                except Exception:  # noqa: BLE001
+                    pass
+            client = httpx.Client(timeout=15.0)
+            resp = client.request(method, url, headers=headers, content=body if body else None)
+            result = {
+                "status_code": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": resp.text[:5000] if resp.text else "",
+            }
+            client.close()
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    elif name == "global_analysis":
+        try:
+            focus = arguments.get("focus", "all")
+            session_id = db.get_current_session_id() or 0
+            http_flows = db.get_flows(session_id, limit=10000, offset=0, protocol=None)
+            tcp_flows = db.get_flows(session_id, limit=5000, offset=0, protocol="tcp")
+            udp_flows = db.get_flows(session_id, limit=5000, offset=0, protocol="udp")
+            dns_data = {"stats": {}, "log_count": 0}
+            try:
+                from ..proxy.dns_hijack import get_stats, get_hijack_log
+                dns_data = {"stats": get_stats(), "log": get_hijack_log()[-20:], "log_count": len(get_hijack_log())}
+            except Exception:  # noqa: BLE001
+                pass
+            proto_counts = {}
+            for f in http_flows:
+                p = f.get("protocol", "http")
+                proto_counts[p] = proto_counts.get(p, 0) + 1
+            for f in tcp_flows:
+                p = f.get("protocol", "tcp")
+                proto_counts[p] = proto_counts.get(p, 0) + 1
+            for f in udp_flows:
+                p = f.get("protocol", "udp")
+                proto_counts[p] = proto_counts.get(p, 0) + 1
+            report = {
+                "session_id": session_id,
+                "focus": focus,
+                "summary": {
+                    "total_flows": len(http_flows) + len(tcp_flows) + len(udp_flows),
+                    "http_flows": len(http_flows),
+                    "tcp_flows": len(tcp_flows),
+                    "udp_flows": len(udp_flows),
+                    "protocol_distribution": proto_counts,
+                    "dns_hijack_log_count": dns_data.get("log_count", 0),
+                },
+                "recent_http": [
+                    {"id": f.get("id"), "method": f.get("method", ""), "url": f.get("url", ""),
+                     "host": f.get("host", ""), "status": f.get("status_code"), "size": f.get("size", 0)}
+                    for f in http_flows[:20]
+                ],
+            }
+            return json.dumps(report, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     return f"Unknown tool: {name}"
 
 
-# ---------- 消息构建 ----------
+# ---------- System prompt ----------
 
 SYSTEM_PROMPT = (
     "You are a network traffic analysis assistant. The user will provide HTTP/HTTPS captured traffic data. "
     "You need to analyze the purpose, anomalies, key parameters, and authentication information of the traffic in Chinese. "
     "The user may follow up with details about this traffic; please answer based on the provided traffic context.\n\n"
-    "You also have Agent capabilities to help the user manage auto-modify rules (modify request or response):\n"
-    "- When the user says 'help me set up auto-modify to change xxx field to yyy' / 'change xxx in the response', call the create_auto_reply_rule tool (modify_target='response' or omit)\n"
-    "- When the user says 'change xxx in the request' / 'tamper request parameters' / 'forge request fields', call the create_auto_reply_rule tool with modify_target='request'\n"
-    "- When the user asks 'what auto-modify rules are there' / 'list rules', **you must call the list_auto_reply_rules tool first** to check actual rules; do not answer from memory\n"
-    "- When the user says 'delete rule xxx', call the delete_auto_reply_rule tool (supports comma-separated multiple IDs)\n"
-    "- When the user says 'delete all rules' / 'clear rules', **directly call the delete_all_auto_reply_rules tool**; do not list then delete one by one\n\n"
+    "You also have Agent capabilities to help the user manage auto-modify rules:\n"
+    "- When the user says 'help me set up auto-modify to change xxx field to yyy', call create_auto_reply_rule\n"
+    "- When the user asks for complex modifications, call create_script_rule\n"
+    "- When the user asks 'list rules', call list_auto_reply_rules\n"
+    "- When the user says 'delete rule xxx', call delete_auto_reply_rule\n"
+    "- When the user says 'delete all rules', call delete_all_auto_reply_rules\n"
+    "- When the user asks about DNS hijack stats, call dns_hijack_stats\n"
+    "- When the user asks to query traffic, call query_traffic\n"
+    "- When the user asks to send a request, call send_request\n"
+    "- When the user asks for global analysis, call global_analysis\n\n"
     "**Important guidelines**:\n"
-    "1. When creating a rule, you must fill in the note field (comment), briefly describing what this rule does\n"
-    "2. For any rule query/delete operation, you must call the list_auto_reply_rules tool first to get the real rule list; never answer 'no rules' based on historical memory\n"
-    "3. When deleting a rule, use the real rule_id returned by list; do not use old IDs from memory\n"
-    "4. When deleting all rules, use delete_all_auto_reply_rules; do not loop calling delete_auto_reply_rule\n"
-    "5. list_auto_reply_rules returns JSON; the rule_id field of each item in the rules array is the real ID\n"
-    "6. When the user says 'change request', be sure to pass modify_target='request'; when not explicitly stated, default to changing the response (omit or pass 'response')\n\n"
-    "After calling a tool, tell the user the operation result in Chinese. Output in Markdown."
+    "1. When creating a rule, you must fill in the note field\n"
+    "2. For rule queries/deletes, you must call list_auto_reply_rules first\n"
+    "3. Output in Markdown format.\n"
 )
 
 
@@ -324,6 +663,15 @@ def _build_flow_context(flows: list[dict]) -> str:
     return "\n".join(snippets)
 
 
+def _safe_json(s):
+    if not s:
+        return {}
+    try:
+        return json.loads(s)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _build_analyze_messages(flows: list[dict]) -> list[dict]:
     """Build the message list for the first analysis."""
     flow_ctx = _build_flow_context(flows)
@@ -343,9 +691,8 @@ def _build_analyze_messages(flows: list[dict]) -> list[dict]:
     ]
 
 
-def _build_chat_messages(history: list[dict], flow_context: str,
-                         user_message: str) -> list[dict]:
-    """Build the multi-turn conversation message list (with traffic context + history)."""
+def _build_chat_messages(history: list[dict], flow_context: str, user_message: str) -> list[dict]:
+    """Build the multi-turn conversation message list."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"The following is the analyzed traffic context; subsequent Q&A is based on it:\n\n{flow_context}"},
@@ -356,19 +703,8 @@ def _build_chat_messages(history: list[dict], flow_context: str,
     return messages
 
 
-def _safe_json(s):
-    if not s:
-        return {}
-    try:
-        return json.loads(s)
-    except Exception:  # noqa: BLE001
-        return {}
+# ---------- API calls ----------
 
-
-# ---------- API 调用 ----------
-
-# S6 修复：日志脱敏——AI 工具调用的 args 可能包含授权头/Token/Cookie 等敏感信息，
-# 直接记录会经 /api/logs 与 /api/logs/export 泄露。对敏感键与字符串中的凭据片段做脱敏。
 _SENSITIVE_KEYS = (
     "authorization", "cookie", "set-cookie", "token", "api_key",
     "apikey", "secret", "password", "x-api-key",
@@ -376,7 +712,7 @@ _SENSITIVE_KEYS = (
 
 
 def _redact_sensitive(obj, depth: int = 0):
-    """递归屏蔽敏感键值与字符串中的凭据片段，用于日志脱敏。"""
+    """Recursively mask sensitive keys and credential fragments for logging."""
     if depth > 6:
         return obj
     if isinstance(obj, dict):
@@ -396,60 +732,73 @@ def _redact_sensitive(obj, depth: int = 0):
 
 
 def _create_client() -> httpx.Client:
-    """Create an httpx client to call the DeepSeek official API.
-
-    Security: DeepSeek is a public HTTPS service; certificate verification is enabled by
-    default to prevent man-in-the-middle attacks from intercepting and stealing the Bearer
-    API Key in request headers. Only when the environment variable
-    TELNIX_DEEPSEEK_INSECURE=1 is explicitly set (self-signed CA / debug proxy environment)
-    is verification temporarily disabled; not recommended for production.
-    """
-    if os.environ.get("TELNIX_DEEPSEEK_INSECURE") == "1":
+    """Create an httpx client with proper SSL settings."""
+    if os.environ.get("TELNIX_AI_INSECURE") == "1":
+        logger.warning("ai", "TELNIX_AI_INSECURE=1 enabled, SSL verification disabled")
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        return httpx.Client(verify=ctx, timeout=120)
-    return httpx.Client(timeout=120)
+        return httpx.Client(verify=ctx, timeout=180, trust_env=False)
+    return httpx.Client(timeout=180, trust_env=False)
 
 
-def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
-    """Call the DeepSeek API, returns {ok, result/error, tool_results?}."""
-    api_key = db.get_setting("deepseek_api_key", "")
-    if not api_key:
-        return {"ok": False, "error": "DeepSeek API key not configured"}
+def _call_openai_compatible_api(messages: list[dict], service: str,
+                                model: str, api_key: str,
+                                base_url: str = None,
+                                use_tools: bool = False) -> dict:
+    """Call OpenAI-compatible API (Claude, OpenAI, Ollama)."""
+    config = _get_service_config(service)
+    url = base_url or config.get("endpoint") or config.get("api_url", DEFAULT_DEEPSEEK_URL)
+
+    # For Claude, use default URL if no custom endpoint
+    if service == "deepseek" and not base_url and not config.get("endpoint"):
+        url = DEFAULT_DEEPSEEK_URL
+
+    # For Ollama, use default URL if no custom endpoint
+    if service == "ollama" and not base_url and not config.get("endpoint"):
+        url = DEFAULT_OLLAMA_URL
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+
+    # Add auth header for OpenAI-compatible APIs
+    if service in ("deepseek", "openai"):
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+    }
+
+    # Ollama doesn't support tools, OpenAI-compatible services do
+    if use_tools and service != "ollama":
+        payload["tools"] = TOOLS
+        payload["tool_choice"] = "auto"
+
     try:
-        logger.info("ai", f"Calling DeepSeek API, messages={len(messages)}, tools={use_tools}")
-        model = _get_model()
+        logger.info("ai", f"Calling {service} API, model={model}, messages={len(messages)}, tools={use_tools}")
         with _create_client() as client:
-            payload = {
-                "model": model,
-                "messages": messages,
-                "stream": False,
-            }
-            if use_tools:
-                payload["tools"] = TOOLS
-                payload["tool_choice"] = "auto"
-            resp = client.post(
-                API_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
+            resp = client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
+
+            # Extract usage info
+            usage = data.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+
             message = data.get("choices", [{}])[0].get("message", {})
 
-            # 处理工具调用
+            # Handle tool calls
             tool_calls = message.get("tool_calls", [])
-            # 兼容 DeepSeek 偶尔把 tool 调用写在文本里的 DSML 格式
             content_text = message.get("content", "") or ""
+
+            # Parse DSML tool calls if present
             if not tool_calls and "<｜｜DSML｜｜" in content_text:
                 parsed = _parse_dsml_tool_calls(content_text)
                 if parsed:
-                    logger.info("ai", f"Parsed {len(parsed)} tool calls from DSML text")
-                    # 构造标准 tool_calls 结构
                     for i, p in enumerate(parsed):
                         tool_calls.append({
                             "id": f"dsml_{i}",
@@ -458,9 +807,9 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
                                 "arguments": json.dumps(p["arguments"], ensure_ascii=False),
                             },
                         })
-                    # 从展示给用户的 content 中移除 DSML 标签，避免用户看到原始标签
-                    cleaned = _strip_dsml(content_text)
-                    message["content"] = cleaned
+                    content_text = _strip_dsml(content_text)
+                    message["content"] = content_text
+
             if tool_calls:
                 results = []
                 messages.append(message)
@@ -479,60 +828,380 @@ def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
                         "tool_call_id": tc.get("id", ""),
                         "content": result,
                     })
-                # 再次调用 API，让它根据工具结果生成回复
-                logger.info("ai", "Tool calls completed, requesting API again to generate reply")
-                resp2 = client.post(
-                    API_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "stream": False,
-                    },
-                )
+
+                # Second API call with tool results
+                logger.info("ai", "Tool calls completed, requesting API again")
+                resp2 = client.post(url, headers=headers, json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                })
                 resp2.raise_for_status()
                 data2 = resp2.json()
-                result_text = (
-                    data2.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                )
-                logger.info("ai", "API call succeeded (with tool calls)")
-                # 第二次 API 返回的 content 也可能含 DSML 标签，需清理
+                result_text = data2.get("choices", [{}])[0].get("message", {}).get("content", "")
                 result_text = _strip_dsml(result_text)
+                logger.info("ai", "API call succeeded (with tool calls)")
+
+                # Get usage from second call
+                usage2 = data2.get("usage", {})
+                input_tokens += usage2.get("prompt_tokens", 0)
+                output_tokens += usage2.get("completion_tokens", 0)
+
                 return {
                     "ok": True,
                     "result": result_text,
                     "tool_results": results,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
                 }
 
-            result = message.get("content", "") or ""
-            # 无 tool_calls 时的回复也可能含 DSML 标签，统一清理
+            result = content_text or ""
             result = _strip_dsml(result)
             logger.info("ai", f"API call succeeded, reply length={len(result)}")
-            return {"ok": True, "result": result}
+
+            return {
+                "ok": True,
+                "result": result,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+
     except httpx.HTTPStatusError as e:
-        logger.error("ai", f"DeepSeek API returned error: {e.response.status_code}",
+        logger.error("ai", f"{service} API returned error: {e.response.status_code}",
                      e.response.text[:500])
-        return {"ok": False, "error": f"DeepSeek returned {e.response.status_code}: "
-                                      f"{e.response.text[:200]}"}
+        return {"ok": False, "error": f"API returned {e.response.status_code}: {e.response.text[:200]}"}
     except Exception as e:  # noqa: BLE001
-        logger.error("ai", f"DeepSeek API request failed: {e}", str(e))
+        logger.error("ai", f"{service} API request failed: {e}", str(e))
         return {"ok": False, "error": f"Request failed: {e}"}
 
 
+def _call_anthropic_api(messages: list[dict], api_key: str, model: str,
+                        use_tools: bool = False) -> dict:
+    """Call Anthropic Claude API."""
+    url = "https://api.anthropic.com/v1/messages"
+
+    # Convert messages format for Anthropic
+    anthropic_messages = []
+    system_content = ""
+    for msg in messages:
+        if msg["role"] == "system":
+            system_content += msg["content"] + "\n\n"
+        elif msg["role"] == "user":
+            anthropic_messages.append({"role": "user", "content": msg["content"]})
+        elif msg["role"] == "assistant":
+            anthropic_messages.append({"role": "assistant", "content": msg["content"]})
+        elif msg["role"] == "tool":
+            anthropic_messages.append({
+                "role": "user",
+                "content": f"[Tool result: {msg.get('name', 'unknown')}]\n{msg['content']}"
+            })
+
+    payload = {
+        "model": model,
+        "messages": anthropic_messages,
+        "max_tokens": 4096,
+    }
+    if system_content:
+        payload["system"] = system_content
+
+    if use_tools:
+        # Convert our tools to Anthropic format
+        payload["tools"] = [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"]["description"],
+                "input_schema": t["function"].get("parameters", {}),
+            }
+            for t in TOOLS
+        ]
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+    }
+
+    try:
+        logger.info("ai", f"Calling Anthropic API, model={model}")
+        with _create_client() as client:
+            resp = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            usage = data.get("usage", {})
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+
+            content = data.get("content", [])
+            if isinstance(content, list):
+                # Handle stop reason
+                stop_reason = data.get("stop_reason", "")
+                result_text = ""
+                for block in content:
+                    if block.get("type") == "text":
+                        result_text += block.get("text", "")
+                    elif block.get("type") == "tool_use":
+                        # Handle tool use
+                        pass
+            else:
+                result_text = str(content)
+
+            # Check for tool use in response
+            tool_uses = [b for b in content if b.get("type") == "tool_use"] if isinstance(content, list) else []
+            if tool_uses:
+                results = []
+                messages.append({"role": "assistant", "content": content})
+                for tool_use in tool_uses:
+                    name = tool_use.get("name", "")
+                    input_json = tool_use.get("input", {})
+                    logger.info("ai", f"AI calling tool: {name}", f"args: {_redact_sensitive(input_json)}")
+                    result = _execute_tool(name, input_json)
+                    results.append({"name": name, "result": result})
+                    messages.append({
+                        "role": "user",
+                        "content": f"<result_of_tool_call>\n{result}\n</result_of_tool_call>"
+                    })
+
+                # Second call with tool results
+                resp2 = client.post(url, headers=headers, json={
+                    "model": model,
+                    "messages": anthropic_messages + [
+                        {"role": "assistant", "content": content},
+                        {"role": "user", "content": "Continue with the tool results provided above."}
+                    ],
+                    "max_tokens": 4096,
+                })
+                resp2.raise_for_status()
+                data2 = resp2.json()
+                content2 = data2.get("content", [])
+                if isinstance(content2, list):
+                    for block in content2:
+                        if block.get("type") == "text":
+                            result_text += block.get("text", "")
+                usage2 = data2.get("usage", {})
+                input_tokens += usage2.get("input_tokens", 0)
+                output_tokens += usage2.get("output_tokens", 0)
+
+                return {
+                    "ok": True,
+                    "result": result_text,
+                    "tool_results": results,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                }
+
+            logger.info("ai", f"API call succeeded, reply length={len(result_text)}")
+            return {
+                "ok": True,
+                "result": result_text,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+
+    except httpx.HTTPStatusError as e:
+        logger.error("ai", f"Anthropic API returned error: {e.response.status_code}",
+                     e.response.text[:500])
+        return {"ok": False, "error": f"API returned {e.response.status_code}: {e.response.text[:200]}"}
+    except Exception as e:  # noqa: BLE001
+        logger.error("ai", f"Anthropic API request failed: {e}", str(e))
+        return {"ok": False, "error": f"Request failed: {e}"}
+
+
+def _call_gemini_api(messages: list[dict], api_key: str, model: str,
+                    use_tools: bool = False) -> dict:
+    """Call Google Gemini API."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    # Convert messages format for Gemini
+    contents = []
+    system_instruction = ""
+    for msg in messages:
+        if msg["role"] == "system":
+            system_instruction = msg["content"]
+        elif msg["role"] == "user":
+            contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
+        elif msg["role"] == "assistant":
+            contents.append({"role": "model", "parts": [{"text": msg["content"]}]})
+        elif msg["role"] == "tool":
+            contents.append({
+                "role": "user",
+                "parts": [{"text": f"[Tool result]\n{msg['content']}"}]
+            })
+
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.95,
+            "topK": 40,
+            "maxOutputTokens": 8192,
+        },
+    }
+    if system_instruction:
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+
+    if use_tools:
+        # Convert tools to Gemini format (simplified)
+        payload["tools"] = [{"functionDeclarations": [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"]["description"],
+                "parameters": t["function"].get("parameters", {}),
+            }
+            for t in TOOLS
+        ]}]
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        url = f"{url}?key={api_key}"
+
+    try:
+        logger.info("ai", f"Calling Gemini API, model={model}")
+        with _create_client() as client:
+            resp = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Gemini doesn't provide token counts in the same way
+            input_tokens = 0
+            output_tokens = 0
+
+            candidates = data.get("candidates", [])
+            if candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                result_text = ""
+                for part in parts:
+                    if "text" in part:
+                        result_text += part["text"]
+                    elif "functionCall" in part:
+                        # Handle function call
+                        fc = part["functionCall"]
+                        name = fc.get("name", "")
+                        args = fc.get("args", {})
+                        logger.info("ai", f"AI calling tool: {name}", f"args: {_redact_sensitive(args)}")
+                        result = _execute_tool(name, args)
+
+                        # Continue with function response
+                        resp2 = client.post(url, headers=headers, json={
+                            "contents": contents + [{
+                                "role": "model",
+                                "parts": [part]
+                            }, {
+                                "role": "user",
+                                "parts": [{"functionResponse": {
+                                    "name": name,
+                                    "response": {"result": result}
+                                }}]
+                            }],
+                            "generationConfig": payload["generationConfig"],
+                        })
+                        resp2.raise_for_status()
+                        data2 = resp2.json()
+                        candidates2 = data2.get("candidates", [])
+                        if candidates2:
+                            parts2 = candidates2[0].get("content", {}).get("parts", [])
+                            for p2 in parts2:
+                                if "text" in p2:
+                                    result_text += p2["text"]
+
+                return {
+                    "ok": True,
+                    "result": result_text,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                }
+
+            return {"ok": False, "error": "No response from Gemini"}
+
+    except httpx.HTTPStatusError as e:
+        logger.error("ai", f"Gemini API returned error: {e.response.status_code}",
+                     e.response.text[:500])
+        return {"ok": False, "error": f"API returned {e.response.status_code}: {e.response.text[:200]}"}
+    except Exception as e:  # noqa: BLE001
+        logger.error("ai", f"Gemini API request failed: {e}", str(e))
+        return {"ok": False, "error": f"Request failed: {e}"}
+
+
+def _call_api(messages: list[dict], use_tools: bool = False) -> dict:
+    """Call the configured AI service API."""
+    service = _get_current_service()
+    config = _get_service_config(service)
+    api_key = config.get("api_key", "")
+    model = _get_model(service)
+
+    if not api_key and service != "ollama":
+        return {"ok": False, "error": f"{config['name']} API key not configured"}
+
+    api_type = config.get("api_type", "openai_compatible")
+
+    if api_type == "anthropic":
+        return _call_anthropic_api(messages, api_key, model, use_tools)
+    elif api_type == "google":
+        return _call_gemini_api(messages, api_key, model, use_tools)
+    else:
+        # OpenAI-compatible (Claude, OpenAI, Ollama)
+        return _call_openai_compatible_api(messages, service, model, api_key, use_tools=use_tools)
+
+
 def analyze_flows(flow_ids: list[int]) -> dict:
-    """Analyze the specified flow list, returns {ok, result/error}. Supports empty list (free conversation)."""
-    flows = [db.get_flow(fid) for fid in flow_ids] if flow_ids else []
-    flows = [f for f in flows if f]
+    """Analyze the specified flow list."""
+    if flow_ids:
+        by_id = db.get_flows_by_ids(flow_ids)
+        flows = [by_id[i] for i in flow_ids if i in by_id]
+    else:
+        flows = []
     messages = _build_analyze_messages(flows)
     return _call_api(messages, use_tools=True)
 
 
 def chat(history: list[dict], flow_context: str, user_message: str) -> dict:
-    """Multi-turn conversation: answer user questions based on history and traffic context."""
+    """Multi-turn conversation."""
     messages = _build_chat_messages(history, flow_context, user_message)
     return _call_api(messages, use_tools=True)
+
+
+def get_available_models() -> dict:
+    """Get available models for each service."""
+    result = {}
+    for service, config in AI_SERVICES.items():
+        # Check if API key is configured
+        key_map = {
+            "deepseek": "deepseek_api_key",
+            "anthropic": "anthropic_api_key",
+            "openai": "openai_api_key",
+            "gemini": "gemini_api_key",
+            "ollama": "ollama_api_key",
+        }
+        key_name = key_map.get(service, "")
+        raw_key = db.get_setting(key_name, "")
+        from .. import secure_storage
+        has_key = bool(secure_storage.decrypt(raw_key) if secure_storage.is_encrypted(raw_key) else raw_key)
+
+        # Get selected model for this service
+        selected_model = _get_model(service) or config.get("default_model", "")
+
+        result[service] = {
+            "name": config["name"],
+            "models": config.get("supported_models", []),
+            "default_model": config.get("default_model", ""),
+            "selected_model": selected_model,
+            "has_api_key": has_key,
+            "pricing": config.get("pricing", {}),
+        }
+
+    return result
+
+
+def get_service_status() -> dict:
+    """Get status of all AI services."""
+    current = _get_current_service()
+    available = get_available_models()
+
+    return {
+        "current_service": current,
+        "services": available,
+    }

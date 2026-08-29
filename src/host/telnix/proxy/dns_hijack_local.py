@@ -1,22 +1,22 @@
-"""DNS 劫持后端 - Unix 跨平台实现（本地 DNS 服务器 + iptables/pf 重定向）。
+"""DNS hijack backend - Unix cross-platform implementation (local DNS server + iptables/pf redirect).
 
-在 macOS / Linux 上替代 Windows 的 WinDivert DNS 劫持：
-- 启动一个本地 DNS 服务器（监听 127.0.0.1:5354）
-- 用 iptables/pf 把 UDP 53 重定向到本地 DNS 服务器端口
-- DNS 服务器解析查询，匹配规则时返回 fake_ip，否则转发给上游 DNS
+Replaces Windows WinDivert DNS hijack on macOS / Linux:
+- Starts a local DNS server (listening on 127.0.0.1:5354)
+- Uses iptables/pf to redirect UDP 53 to local DNS server port
+- DNS server resolves queries, returns fake_ip when matching rules, otherwise forwards to upstream DNS
 
-与 Windows 版本的核心差异：
-- Windows: WinDivert 拦截 UDP 53 响应包，修改 A 记录 RDATA
-- Unix: 本地 DNS 服务器直接构造响应（更干净，无需修改原响应包）
+Core differences from Windows version:
+- Windows: WinDivert intercepts UDP 53 response packets, modifies A record RDATA
+- Unix: Local DNS server directly constructs responses (cleaner, no need to modify original response packets)
 
-优势：
-- 不依赖 WinDivert 内核驱动
-- 本地 DNS 服务器可以缓存查询结果（性能提升）
-- 规则匹配逻辑更简单（直接构造响应）
+Advantages:
+- No dependency on WinDivert kernel driver
+- Local DNS server can cache query results (performance improvement)
+- Rule matching logic is simpler (directly construct response)
 
-限制：
-- 需要修改系统 DNS 配置或用 iptables/pf 重定向 53 端口
-- 仅劫持 UDP DNS（TCP DNS 暂不处理，绝大多数客户端用 UDP）
+Limitations:
+- Need to modify system DNS config or use iptables/pf to redirect port 53
+- Only hijacks UDP DNS (TCP DNS not handled for now, most clients use UDP)
 """
 
 from __future__ import annotations
@@ -97,12 +97,12 @@ except ImportError:
 
 
 class LocalDnsHijacker:
-    """Unix 平台 DNS 劫持后端（本地 DNS 服务器 + iptables/pf 重定向）。
+    """Unix platform DNS hijack backend (local DNS server + iptables/pf redirect).
 
-    对外接口与 Windows 的 DnsHijacker 类保持一致：
+    External interface consistent with Windows DnsHijacker class:
     - start() / stop() / status()
     - set_rules() / get_rules()
-    - running / last_error 属性
+    - running / last_error properties
     """
 
     def __init__(self):
@@ -134,7 +134,7 @@ class LocalDnsHijacker:
         return self._last_error
 
     def set_rules(self, rules: dict[str, str], default_ip: str = ""):
-        """更新劫持规则（与 Windows 版本接口一致）。"""
+        """Update hijack rules (interface consistent with Windows version)."""
         with self._lock:
             self._rules = {
                 k.strip().lower(): v.strip()
@@ -149,7 +149,7 @@ class LocalDnsHijacker:
                     # 防止 ReDoS：通配符过多会导致正则引擎指数级回溯
                     # （20 个 *a* + 200 字符域名实测 >3s 卡顿）
                     if pattern.count('*') + pattern.count('?') > _MAX_WILDCARDS_PER_PATTERN:
-                        logger.warning("dns_hijack", "规则通配符过多，已跳过编译",
+                        logger.warning("dns_hijack", "Too many rule wildcards, skipped compilation",
                                        f"pattern={pattern!r} count={pattern.count('*') + pattern.count('?')}"
                                        f" max={_MAX_WILDCARDS_PER_PATTERN}")
                         continue
@@ -164,7 +164,7 @@ class LocalDnsHijacker:
             return dict(self._rules), self._default_ip
 
     def _match_rule(self, domain: str) -> str | None:
-        """匹配域名，返回劫持 IP 或 None（与 Windows 版本逻辑一致）。"""
+        """Match domain, return hijack IP or None (logic consistent with Windows version)."""
         d = domain.strip().lower()
         if not d:
             return None
@@ -188,23 +188,23 @@ class LocalDnsHijacker:
             return False
 
     def start(self) -> tuple[bool, str]:
-        """启动 DNS 劫持。"""
+        """Start DNS hijack."""
         if not IS_UNIX:
-            return False, "LocalDnsHijacker 仅支持 Linux/macOS"
+            return False, "LocalDnsHijacker only supports Linux/macOS"
         if self._running:
-            return True, "已在运行"
+            return True, "Already running"
         if not self._is_admin():
-            msg = "DNS 劫持需要 root 权限（iptables/pf 需要 root）"
+            msg = "DNS hijack requires root privileges (iptables/pf requires root)"
             self._last_error = msg
-            logger.error("dns_hijack", "Unix DNS 劫持需要 root", "请用 sudo 启动 Telnix")
+            logger.error("dns_hijack", "Unix DNS hijack requires root", "Please start Telnix with sudo")
             return False, msg
 
         try:
-            # 启动本地 DNS 服务器
+            # Start local DNS server
             if not self._start_dns_server():
                 return False, self._last_error
 
-            # 添加 iptables/pf 重定向规则
+            # Add iptables/pf redirect rules
             if IS_LINUX:
                 if not self._setup_iptables_redirect():
                     self._stop_dns_server()
@@ -216,25 +216,25 @@ class LocalDnsHijacker:
 
             self._running = True
             backend = "iptables+local_dns" if IS_LINUX else "pf+local_dns"
-            logger.info("dns_hijack", f"DNS 劫持已启动 ({backend})",
+            logger.info("dns_hijack", f"DNS hijack started ({backend})",
                         f"local_dns=127.0.0.1:{_LOCAL_DNS_PORT}")
-            return True, f"DNS 劫持已启动（{backend}）"
+            return True, f"DNS hijack started ({backend})"
         except Exception as e:  # noqa: BLE001
             self._last_error = str(e)
-            logger.error("dns_hijack", "Unix DNS 劫持启动失败", str(e))
+            logger.error("dns_hijack", "Unix DNS hijack start failed", str(e))
             self._cleanup_rules()
             self._stop_dns_server()
-            return False, f"启动失败: {e}"
+            return False, f"Start failed: {e}"
 
     def _start_dns_server(self) -> bool:
-        """启动本地 DNS 服务器（监听 127.0.0.1:5354）。"""
+        """Start local DNS server (listening on 127.0.0.1:5354)."""
         try:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._sock.bind(("127.0.0.1", _LOCAL_DNS_PORT))
             self._sock.settimeout(1.0)  # 1 秒超时，便于响应 stop
         except OSError as e:
-            self._last_error = f"本地 DNS 服务器启动失败: {e}（端口 {_LOCAL_DNS_PORT} 可能被占用）"
+            self._last_error = f"Local DNS server start failed: {e} (port {_LOCAL_DNS_PORT} may be occupied)"
             return False
         # 启动 DNS 服务器线程
         self._thread = threading.Thread(target=self._dns_loop, daemon=True, name="local-dns")
@@ -242,7 +242,7 @@ class LocalDnsHijacker:
         return True
 
     def _setup_iptables_redirect(self) -> bool:
-        """Linux: 用 iptables NAT 把 UDP 53 重定向到本地 DNS 端口。"""
+        """Linux: use iptables NAT to redirect UDP 53 to local DNS port."""
         self._iptables_rules = []
         # OUTPUT 链：本机出站 UDP 53 重定向
         rule = (
@@ -256,27 +256,27 @@ class LocalDnsHijacker:
         try:
             result = subprocess.run(rule, capture_output=True, timeout=5)
             if result.returncode != 0:
-                self._last_error = f"iptables 添加规则失败: {result.stderr.decode('utf-8', errors='replace')}"
+                self._last_error = f"iptables add rule failed: {result.stderr.decode('utf-8', errors='replace')}"
                 self._cleanup_rules()
                 return False
             self._iptables_rules.append(rule)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            self._last_error = f"iptables 不可用: {e}"
+            self._last_error = f"iptables unavailable: {e}"
             return False
         return True
 
     def _setup_pf_redirect(self) -> bool:
-        """macOS: 用 pf rdr 把 UDP 53 重定向到本地 DNS 端口。"""
-        # 写入 anchor 规则文件
+        """macOS: use pf rdr to redirect UDP 53 to local DNS port."""
+        # Write anchor rule file
         pf_rules = (
-            f"# Telnix DNS 劫持规则（自动生成，请勿手动编辑）\n"
+            f"# Telnix DNS hijack rules (auto-generated, do not edit manually)\n"
             f"rdr pass on lo0 proto udp from any to any port 53 -> 127.0.0.1 port {_LOCAL_DNS_PORT}\n"
         )
         try:
             with open(_PF_DNS_ANCHOR_FILE, "w", encoding="utf-8") as f:
                 f.write(pf_rules)
         except OSError as e:
-            self._last_error = f"写入 pf anchor 文件失败: {e}"
+            self._last_error = f"Failed to write pf anchor file: {e}"
             return False
 
         # 加载 anchor
@@ -286,14 +286,14 @@ class LocalDnsHijacker:
                 capture_output=True, timeout=5,
             )
             if result.returncode != 0:
-                self._last_error = f"pfctl 加载 anchor 失败: {result.stderr.decode('utf-8', errors='replace')}"
+                self._last_error = f"pfctl load anchor failed: {result.stderr.decode('utf-8', errors='replace')}"
                 self._cleanup_rules()
                 return False
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            self._last_error = f"pfctl 不可用: {e}"
+            self._last_error = f"pfctl unavailable: {e}"
             return False
 
-        # 检查主配置是否引用 anchor
+        # Check if main config references the anchor
         try:
             result = subprocess.run(
                 ["pfctl", "-s", "rules"],
@@ -302,14 +302,14 @@ class LocalDnsHijacker:
             rules_output = result.stdout.decode("utf-8", errors="replace")
             if f'anchor "{_PF_DNS_ANCHOR_NAME}"' not in rules_output:
                 self._last_error = (
-                    f"pf 主配置未引用 anchor '{_PF_DNS_ANCHOR_NAME}'。"
-                    f"请在 /etc/pf.conf 中添加：anchor \"{_PF_DNS_ANCHOR_NAME}\"，"
-                    f"然后运行：sudo pfctl -f /etc/pf.conf"
+                    f"pf main config does not reference anchor '{_PF_DNS_ANCHOR_NAME}'."
+                    f"Please add to /etc/pf.conf: anchor \"{_PF_DNS_ANCHOR_NAME}\","
+                    f"then run: sudo pfctl -f /etc/pf.conf"
                 )
                 self._cleanup_rules()
                 return False
         except subprocess.TimeoutExpired:
-            self._last_error = "pfctl 查询规则超时"
+            self._last_error = "pfctl query rules timeout"
             self._cleanup_rules()
             return False
 
@@ -317,7 +317,7 @@ class LocalDnsHijacker:
         return True
 
     def _dns_loop(self):
-        """本地 DNS 服务器主循环。"""
+        """Local DNS server main loop."""
         while self._running:
             try:
                 try:
@@ -326,7 +326,7 @@ class LocalDnsHijacker:
                     continue
                 except OSError as e:
                     if self._running:
-                        logger.error("dns_hijack", "本地 DNS 服务器 recv 失败", str(e))
+                        logger.error("dns_hijack", "Local DNS server recv failed", str(e))
                     break
                 # 处理查询（在主循环中同步处理，避免线程开销）
                 try:
@@ -335,14 +335,14 @@ class LocalDnsHijacker:
                     with _STATS_LOCK:
                         _STATS["errors"] += 1
                     if self._running:
-                        logger.error("dns_hijack", "DNS 查询处理异常", str(e))
+                        logger.error("dns_hijack", "DNS query handling exception", str(e))
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.error("dns_hijack", "DNS 循环异常", str(e))
+                    logger.error("dns_hijack", "DNS loop exception", str(e))
                     time.sleep(0.1)
 
     def _handle_dns_query(self, data: bytes, client_addr: tuple):
-        """处理单个 DNS 查询。"""
+        """Handle a single DNS query."""
         with _STATS_LOCK:
             _STATS["total_packets"] += 1
 
@@ -390,7 +390,7 @@ class LocalDnsHijacker:
         self._forward_to_upstream(data, client_addr, query_info)
 
     def _parse_dns_query(self, data: bytes) -> dict:
-        """解析 DNS 查询包，提取 domain 和 qtype。"""
+        """Parse DNS query packet, extract domain and qtype."""
         # DNS header: ID(2) + FLAGS(2) + QDCOUNT(2) + ANCOUNT(2) + NSCOUNT(2) + ARCOUNT(2)
         # Query: QNAME(变长) + QTYPE(2) + QCLASS(2)
         offset = 12
@@ -417,7 +417,7 @@ class LocalDnsHijacker:
         }
 
     def _build_a_response(self, query: bytes, query_info: dict, ip: str) -> bytes:
-        """构造 A 记录响应包。"""
+        """Build A record response packet."""
         # 截断查询包至 Question 段末尾，丢弃可能的 Additional 段（如 EDNS0 OPT）。
         # 否则 ARCOUNT=0 但包体仍含 Additional 数据，造成 DNS 包不一致。
         query_end = query_info.get("query_end", len(query))
@@ -440,7 +440,7 @@ class LocalDnsHijacker:
         return bytes(response)
 
     def _build_empty_response(self, query: bytes, query_info: dict) -> bytes:
-        """构造空响应（用于 AAAA 强制 IPv4 回退）。"""
+        """Build empty response (used for AAAA to force IPv4 fallback)."""
         # 截断查询包至 Question 段末尾，丢弃可能的 Additional 段
         query_end = query_info.get("query_end", len(query))
         response = bytearray(query[:query_end])
@@ -454,11 +454,11 @@ class LocalDnsHijacker:
 
     @staticmethod
     def _rewrite_response_id(query: bytes, response: bytes) -> bytes:
-        """把上游响应的 DNS transaction id 替换为当前查询的 id。
+        """Replace the DNS transaction id of upstream response with current query's id.
 
-        缓存的响应包是首次查询时上游返回的，其 TXID 属于首次那台客户端。
-        直接复用会导致后续客户端 TXID 不匹配、响应被解析器丢弃。这里只改写
-        头部前 2 字节的 id，其余（含压缩指针）保持一致即可。
+        The cached response packet was returned by upstream during the first query, and its TXID belongs to that first client.
+        Directly reusing it would cause TXID mismatch for subsequent clients, and the response would be discarded by the resolver. Here we only rewrite
+        the first 2 bytes of id in the header, the rest (including compression pointers) remain consistent.
         """
         if len(query) < 2 or len(response) < 2:
             return response
@@ -468,7 +468,7 @@ class LocalDnsHijacker:
         return bytes(out)
 
     def _forward_to_upstream(self, query: bytes, client_addr: tuple, query_info: dict):
-        """转发查询给上游 DNS 服务器并返回响应。"""
+        """Forward query to upstream DNS server and return response."""
         # 缓存检查
         cache_key = (query_info["domain"], query_info["qtype"])
         now = time.time()
@@ -526,18 +526,18 @@ class LocalDnsHijacker:
             pass
 
     def stop(self) -> tuple[bool, str]:
-        """停止 DNS 劫持。返回 (success, msg) 与 Windows 版本接口一致。"""
+        """Stop DNS hijack. Returns (success, msg) consistent with Windows version interface."""
         if not self._running:
-            return True, "未在运行"
+            return True, "Not running"
         self._running = False
         self._cleanup_rules()
         self._stop_dns_server()
         backend = "iptables+local_dns" if IS_LINUX else "pf+local_dns"
-        logger.info("dns_hijack", f"DNS 劫持已停止 ({backend})")
-        return True, "DNS 劫持已停止"
+        logger.info("dns_hijack", f"DNS hijack stopped ({backend})")
+        return True, "DNS hijack stopped"
 
     def _stop_dns_server(self):
-        """停止本地 DNS 服务器。"""
+        """Stop local DNS server."""
         if self._sock is not None:
             try:
                 self._sock.close()
@@ -549,7 +549,7 @@ class LocalDnsHijacker:
             self._thread = None
 
     def _cleanup_rules(self):
-        """清理 iptables/pf 规则。"""
+        """Clean up iptables/pf rules."""
         # Linux: 删除 iptables 规则
         for rule in self._iptables_rules:
             del_rule = list(rule)
@@ -581,7 +581,7 @@ class LocalDnsHijacker:
             pass
 
     def status(self) -> dict:
-        """返回 DNS 劫持状态（与 Windows 版本字段保持一致）。"""
+        """Return DNS hijack status (fields consistent with Windows version)."""
         return {
             "running": self._running,
             "last_error": self._last_error,
@@ -597,7 +597,7 @@ class LocalDnsHijacker:
 
 
 def is_unix_dns_hijack_available() -> bool:
-    """检查 Unix DNS 劫持后端是否可用。"""
+    """Check if Unix DNS hijack backend is available."""
     if not IS_UNIX:
         return False
     try:
@@ -611,7 +611,7 @@ def is_unix_dns_hijack_available() -> bool:
 
 
 def get_unix_dns_hijack_status() -> dict:
-    """返回 Unix DNS 劫持后端状态。"""
+    """Return Unix DNS hijack backend status."""
     try:
         is_admin = os.geteuid() == 0
     except AttributeError:
@@ -621,5 +621,5 @@ def get_unix_dns_hijack_status() -> dict:
         "supported": True,
         "backend": "iptables+local_dns" if IS_LINUX else ("pf+local_dns" if IS_MACOS else "none"),
         "is_admin": is_admin,
-        "hint": ("就绪" if is_admin else "需要 root 权限") if IS_UNIX else "不支持的平台",
+        "hint": ("Ready" if is_admin else "Root privileges required") if IS_UNIX else "Unsupported platform",
     }

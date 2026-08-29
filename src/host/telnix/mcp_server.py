@@ -1,21 +1,21 @@
-"""Telnix MCP Server —— 把 Telnix 的抓包/拦截/改包能力暴露给 MCP 客户端。
+"""Telnix MCP Server — Exposes Telnix's capture/intercept/modify capabilities to MCP clients.
 
-基于 MCP Python SDK (FastMCP)，通过 stdio 与 MCP 客户端通信。
-复用 Telnix 后端 HTTP API（默认 http://127.0.0.1:18901），不直接操作数据库。
+Built on the MCP Python SDK (FastMCP), communicates with MCP clients via stdio.
+Reuses the Telnix backend HTTP API (default http://127.0.0.1:18901), does not touch the database directly.
 
-设计原则：
-1. 工具返回 JSON 字符串（text content），错误也封装成 JSON 而非抛异常
-2. 大输出自动截断（默认 64KB），防止 MCP 消息过大卡死客户端
-3. 参数 schema 由 Python 类型注解 + docstring 自动生成
-4. 不写 stdout（STDIO 协议约束），日志走 stderr
-5. 纯 HTTP 调用，无本地文件/进程操作（除 agent_workspace 需要备份文件）
+Design principles:
+1. Tools return JSON strings (text content); errors are also wrapped as JSON rather than thrown
+2. Large output is auto-truncated (default 64KB) to prevent oversized MCP messages from freezing clients
+3. Parameter schema is auto-generated from Python type annotations + docstring
+4. Never writes to stdout (STDIO protocol constraint); logs go to stderr
+5. Pure HTTP calls, no local file/process operations (except agent_workspace which needs a backup file)
 
-启动：
+Startup:
     python -m telnix.mcp_server
     python -m telnix.mcp_server --base-url http://127.0.0.1:18901
     set TELNIX_API=http://127.0.0.1:18901 && python -m telnix.mcp_server
 
-MCP 客户端配置示例（claude_desktop_config.json）：
+MCP client config example (claude_desktop_config.json):
     {
       "mcpServers": {
         "telnix": {
@@ -36,15 +36,15 @@ import re
 import functools
 import shlex
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any, Optional
+
+import httpx
 
 # MCP SDK
 from mcp.server.fastmcp import FastMCP
 
-# ---------- 配置 ----------
+# ---------- Config ----------
 
 DEFAULT_HOST = "127.0.0.1"
 try:
@@ -54,86 +54,88 @@ except Exception:  # noqa: BLE001
     DEFAULT_PORT = 18901
 BASE_URL = os.environ.get("TELNIX_API", f"http://{DEFAULT_HOST}:{DEFAULT_PORT}").rstrip("/")
 
-# 输出截断阈值（字节）。MCP 工具返回过大会让客户端卡死，64KB 是安全上限。
-MAX_OUTPUT_BYTES = 64 * 1024
-# 单流量字段截断（如 response_body 可能几 MB）
-MAX_FIELD_BYTES = 16 * 1024
+# Output truncation threshold (bytes). Oversized MCP tool returns freeze clients; 64KB is a safe upper bound.
+# 设计修复：从环境变量读取，支持部署时配置
+MAX_OUTPUT_BYTES = int(os.environ.get("TELNIX_MCP_MAX_OUTPUT_BYTES", 64 * 1024))
+# Single-flow field truncation (e.g. response_body can be several MB)
+MAX_FIELD_BYTES = int(os.environ.get("TELNIX_MCP_MAX_FIELD_BYTES", 16 * 1024))
 
-# ---------- MCP 实例 ----------
+# ---------- MCP instance ----------
 
 mcp = FastMCP("telnix")
 
 
-# ---------- HTTP 客户端 ----------
+# ---------- HTTP client ----------
 
 def _api(method: str, path: str, body: Any = None, timeout: float = 30.0) -> dict:
-    """调用后端 API，返回 {code, data, msg}。失败不 sys.exit，返回错误 dict。"""
+    """Call backend API, returns {code, data, msg}. On failure does not sys.exit, returns error dict."""
     url = f"{BASE_URL}/api{path}"
-    data = None
     headers = {"Accept": "application/json"}
+    content = None
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
+        content = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+            resp = client.request(method, url, content=content, headers=headers)
             try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return {"code": 0, "data": raw, "msg": "ok"}
-    except urllib.error.HTTPError as e:
+                return resp.json()
+            except Exception:
+                return {"code": 0, "data": resp.text, "msg": "ok"}
+    except httpx.HTTPStatusError as e:
         try:
-            return json.loads(e.read().decode("utf-8", errors="replace"))
+            return e.response.json()
         except Exception:  # noqa: BLE001
-            return {"code": e.code, "msg": f"HTTP {e.code}: {e.reason}", "data": None}
-    except urllib.error.URLError as e:
-        return {"code": -1, "msg": f"无法连接后端 {BASE_URL}: {e.reason}", "data": None,
-                "hint": "后端未启动？运行: cd src\\host && python -m telnix"}
+            return {"code": e.response.status_code, "msg": f"HTTP {e.response.status_code}: {e.response.reason_phrase}", "data": None}
+    except httpx.ConnectError as e:
+        return {"code": -1, "msg": f"Cannot connect to backend {BASE_URL}: {e}", "data": None,
+                "hint": "Backend not started? Run: cd src\\host && python -m telnix"}
     except Exception as e:  # noqa: BLE001
-        return {"code": -1, "msg": f"连接异常: {e}", "data": None}
+        return {"code": -1, "msg": f"Connection error: {e}", "data": None}
 
 
 def _ok(res: dict) -> tuple[Optional[Any], Optional[str]]:
-    """提取 data。成功返回 (data, None)，失败返回 (None, error_msg)。"""
+    """Extract data. Returns (data, None) on success, (None, error_msg) on failure."""
     if res.get("code") == 0:
         return res.get("data"), None
-    msg = res.get("msg") or "未知错误"
+    msg = res.get("msg") or "Unknown error"
     hint = _hint_for_error(msg)
     if hint:
-        msg = f"{msg} | 修复建议: {hint}"
+        msg = f"{msg} | Fix suggestion: {hint}"
     return None, msg
 
 
 def _api_with_windivert_ack(method: str, path: str, body: Any = None,
                             timeout: float = 30.0) -> dict:
-    """调用可能触发 WinDivert 加载的 API（raw/transparent-proxy start）。
+    """Call APIs that may trigger WinDivert loading (raw/transparent-proxy start).
 
-    若后端返回 need_ack=true（首次启用未确认），自动触发桌面置顶原生弹窗流程：
-    1. POST /system/request-windivert-ack 创建 pending 请求 + 弹原生 Yes/No
-    2. 长轮询 /system/windivert-ack-request/{rid}/wait 等待用户响应
-    3. 用户选「是」→ ack 已持久化 → 重试原请求并返回结果
-    4. 用户选「否」→ 返回包含 need_ack=true 的错误响应（caller 用 _ok 处理）
+    If the backend returns need_ack=true (first enable not yet confirmed), auto-trigger
+    the desktop topmost native dialog flow:
+    1. POST /system/request-windivert-ack creates a pending request + shows a native Yes/No dialog
+    2. Long-poll /system/windivert-ack-request/{rid}/wait for user response
+    3. User picks "Yes" -> ack persisted -> retry original request and return result
+    4. User picks "No" -> return an error response containing need_ack=true (caller handles via _ok)
 
-    非 Windows 平台 / 已 ack 时后端不会返回 need_ack，本函数等同 _api。
+    On non-Windows platforms / already acked, the backend will not return need_ack, so this
+    function behaves identically to _api.
     """
     res = _api(method, path, body, timeout=timeout)
-    # 检测是否需要 WinDivert 风险提示确认
+    # Detect whether WinDivert risk acknowledgement is required
     if not (res.get("need_ack") is True or
             (isinstance(res.get("data"), dict) and res["data"].get("need_ack"))):
         return res
-    # 触发原生弹窗流程
+    # Trigger the native dialog flow
     ack_res = _api("POST", "/system/request-windivert-ack", timeout=10.0)
     if ack_res.get("code") != 0:
         return ack_res
     ack_data = ack_res.get("data") or {}
-    # 非 Windows 或已 ack：后端返回 skipped=true，直接重试原请求
+    # Non-Windows or already acked: backend returns skipped=true, retry original request directly
     if ack_data.get("skipped"):
         return _api(method, path, body, timeout=timeout)
     rid = ack_data.get("request_id")
     if not rid:
         return res
-    # 长轮询：最多重试 3 次（每次 60s），覆盖 3 分钟窗口
+    # Long-poll: retry up to 3 times (60s each), covering a 3-minute window
     for _ in range(3):
         r = _api("GET", f"/system/windivert-ack-request/{rid}/wait", timeout=65.0)
         if r.get("code") != 0:
@@ -141,53 +143,53 @@ def _api_with_windivert_ack(method: str, path: str, body: Any = None,
         d = r.get("data") or {}
         status = d.get("status")
         if status == "accepted":
-            # 用户已确认：重试原请求
+            # User confirmed: retry original request
             return _api(method, path, body, timeout=timeout)
         elif status == "rejected":
-            # 用户拒绝：返回原错误响应让 caller 处理
+            # User rejected: return original error response for caller to handle
             return res
-        # status == "pending"，继续下一轮
-    # 超时：返回原错误响应
+        # status == "pending", continue to next round
+    # Timeout: return original error response
     return res
 
 
 def _hint_for_error(msg: str) -> str | None:
-    """根据错误信息生成 agent 可操作的修复建议。"""
+    """Generate an actionable fix suggestion for the agent based on the error message."""
     msg_l = msg.lower()
-    if "无法连接" in msg or "connection" in msg_l:
-        return "后端未启动？运行: cd src\\host && python -m telnix"
-    if "证书" in msg or "cert" in msg_l:
-        return "HTTPS 解密需要证书: 调用 cert_install 工具"
+    if "cannot connect" in msg_l or "connection" in msg_l:
+        return "Backend not started? Run: cd src\\host && python -m telnix"
+    if "cert" in msg_l:
+        return "HTTPS decryption requires a certificate: call the cert_install tool"
     if "pydivert" in msg_l:
-        return "TCP/UDP 抓包需要: pip install pydivert（并用管理员身份运行）"
-    if "管理员" in msg or "admin" in msg_l:
-        return "请用 system_restart_as_admin 工具以管理员身份重启"
-    if "会话" in msg and "不存在" in msg:
-        return "先调用 capture_start 创建会话"
-    if "not found" in msg_l or "找不到" in msg:
-        return "后端可能未重启，旧进程缺少新路由。调用 system_restart 重启后端"
+        return "TCP/UDP capture requires: pip install pydivert (and run as administrator)"
+    if "admin" in msg_l:
+        return "Use the system_restart_as_admin tool to restart as administrator"
+    if "session" in msg_l and ("not exist" in msg_l or "not found" in msg_l):
+        return "Call capture_start first to create a session"
+    if "not found" in msg_l:
+        return "Backend may not have been restarted; the old process is missing new routes. Call system_restart to restart the backend"
     return None
 
 
-# ---------- 输出处理 ----------
+# ---------- Output handling ----------
 
 def _to_text(obj: Any) -> str:
-    """把任意对象转成 JSON 文本，超长截断。"""
+    """Convert any object to JSON text, truncating if too long."""
     text = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
     if len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
-        # 截断到 MAX_OUTPUT_BYTES 字节（按字符近似）
+        # Truncate to MAX_OUTPUT_BYTES bytes (approximate by characters)
         cut = int(MAX_OUTPUT_BYTES * 0.9)
-        text = text[:cut] + f"\n\n... [输出已截断，原始大小 {len(text)} 字符，超过 {MAX_OUTPUT_BYTES} 字节上限]"
+        text = text[:cut] + f"\n\n... [output truncated, original size {len(text)} chars, exceeds {MAX_OUTPUT_BYTES} byte limit]"
     return text
 
 
 def _truncate_fields(obj: Any, fields: list[str], limit: int = MAX_FIELD_BYTES) -> Any:
-    """递归截断指定字段的值（如 response_body）。"""
+    """Recursively truncate values of specified fields (e.g. response_body)."""
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
             if k in fields and isinstance(v, str) and len(v.encode("utf-8")) > limit:
-                out[k] = v[:limit] + f"... [字段已截断，原始 {len(v)} 字符]"
+                out[k] = v[:limit] + f"... [field truncated, original {len(v)} chars]"
             else:
                 out[k] = _truncate_fields(v, fields, limit)
         return out
@@ -197,21 +199,21 @@ def _truncate_fields(obj: Any, fields: list[str], limit: int = MAX_FIELD_BYTES) 
 
 
 def _result(obj: Any) -> str:
-    """标准成功结果。"""
+    """Standard success result."""
     return _to_text(obj)
 
 
 def _error(msg: str, **extra) -> str:
-    """标准错误结果。"""
+    """Standard error result."""
     err = {"ok": False, "error": msg}
     err.update(extra)
     return _to_text(err)
 
 
-# ---------- 匹配表达式解析（复用 cli.py 逻辑，去掉 sys.exit 副作用） ----------
+# ---------- Match expression parsing (reuses cli.py logic, drops sys.exit side effects) ----------
 
 def parse_match(expr: str) -> dict:
-    """解析匹配表达式 'key op value && ...'，返回 {pattern, match_mode, filters, *_filter}。"""
+    """Parse match expression 'key op value && ...', returns {pattern, match_mode, filters, *_filter}."""
     filters: list[tuple[str, str, str]] = []
     url_pattern_parts: list[str] = []
     for tok in expr.split("&&"):
@@ -233,7 +235,7 @@ def parse_match(expr: str) -> dict:
                         url_pattern_parts.append(f"*{v}*")
                 break
         else:
-            raise ValueError(f"无法解析匹配条件: {tok}")
+            raise ValueError(f"Cannot parse match condition: {tok}")
     if url_pattern_parts:
         seen = []
         for p in url_pattern_parts:
@@ -269,7 +271,7 @@ def parse_match(expr: str) -> dict:
 
 
 def flow_matches(flow: dict, filters: list[tuple[str, str, str]]) -> bool:
-    """客户端过滤（用于 dry-run 预览）。"""
+    """Client-side filtering (used for dry-run preview)."""
     for k, op, v in filters:
         fv = _get_flow_field(flow, k)
         if fv is None:
@@ -324,50 +326,50 @@ def _num_cmp(a: str, b: str, op: str) -> bool:
     return False
 
 
-# ---------- 动作解析（复用 cli.py 逻辑） ----------
+# ---------- Action parsing (reuses cli.py logic) ----------
 
 def parse_action(spec: str) -> dict:
-    """解析动作规范字符串，返回后端规则字段。"""
+    """Parse action spec string, returns backend rule fields."""
     parts = _split_action(spec)
     if not parts:
-        raise ValueError("动作规范不能为空")
+        raise ValueError("Action spec cannot be empty")
     name = parts[0].lower()
     args = parts[1:]
 
-    # ---- 改响应 ----
+    # ---- Modify response ----
     if name == "replace-header":
         if len(args) < 2:
-            raise ValueError("replace-header 需要: K V")
+            raise ValueError("replace-header requires: K V")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_header", "op": "replace", "key": args[0], "value": args[1]}]}
     if name == "set-json":
         if len(args) < 2:
-            raise ValueError("set-json 需要: key value")
+            raise ValueError("set-json requires: key value")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_body", "op": "replace", "key": args[0], "value": _auto_type(args[1])}]}
     if name == "set-json-path":
         if len(args) < 2:
-            raise ValueError("set-json-path 需要: path value")
+            raise ValueError("set-json-path requires: path value")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_body", "op": "replace", "key": args[0], "value": _auto_type(args[1])}]}
     if name == "remove-json":
         if len(args) < 1:
-            raise ValueError("remove-json 需要: key")
+            raise ValueError("remove-json requires: key")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_body", "op": "remove", "key": args[0]}]}
     if name == "remove-json-path":
         if len(args) < 1:
-            raise ValueError("remove-json-path 需要: path")
+            raise ValueError("remove-json-path requires: path")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_body", "op": "remove", "key": args[0]}]}
     if name == "replace-bytes":
         if len(args) < 1:
-            raise ValueError("replace-bytes 需要: offset:hex")
+            raise ValueError("replace-bytes requires: offset:hex")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_body", "op": "replace-bytes", "key": "", "value": args[0]}]}
     if name == "replace-bytes-regex":
         if len(args) < 2:
-            raise ValueError("replace-bytes-regex 需要: regex hex")
+            raise ValueError("replace-bytes-regex requires: regex hex")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "response_body", "op": "replace-bytes-regex", "key": args[0], "value": args[1]}]}
     if name == "mock":
@@ -386,54 +388,54 @@ def parse_action(spec: str) -> dict:
         ctype = args[1] if len(args) > 1 else "application/json"
         return {"action": "mock_request", "mock_body": body, "mock_headers": {"Content-Type": ctype}}
 
-    # ---- 改请求 ----
+    # ---- Modify request ----
     if name == "set-request-header":
         if len(args) < 2:
-            raise ValueError("set-request-header 需要: K V")
+            raise ValueError("set-request-header requires: K V")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "request_header", "op": "replace", "key": args[0], "value": args[1]}]}
     if name == "set-request-json":
         if len(args) < 2:
-            raise ValueError("set-request-json 需要: key value")
+            raise ValueError("set-request-json requires: key value")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "request_body", "op": "replace", "key": args[0], "value": _auto_type(args[1])}]}
     if name == "set-request-json-path":
         if len(args) < 2:
-            raise ValueError("set-request-json-path 需要: path value")
+            raise ValueError("set-request-json-path requires: path value")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "request_body", "op": "replace", "key": args[0], "value": _auto_type(args[1])}]}
     if name == "remove-request-json":
         if len(args) < 1:
-            raise ValueError("remove-request-json 需要: key")
+            raise ValueError("remove-request-json requires: key")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "request_body", "op": "remove", "key": args[0]}]}
     if name == "set-request-body-hex":
         if len(args) < 1:
-            raise ValueError("set-request-body-hex 需要: hex")
+            raise ValueError("set-request-body-hex requires: hex")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "request_body", "op": "replace", "key": "", "value": _hex_to_b64(args[0])}]}
     if name == "replace-request-bytes":
         if len(args) < 1:
-            raise ValueError("replace-request-bytes 需要: offset:hex")
+            raise ValueError("replace-request-bytes requires: offset:hex")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "request_body", "op": "replace-bytes", "key": "", "value": args[0]}]}
 
-    # ---- 时序动作 ----
+    # ---- Timing actions ----
     if name == "delay":
         if len(args) < 1:
-            raise ValueError("delay 需要: N（毫秒）")
+            raise ValueError("delay requires: N (milliseconds)")
         return {"action": "modify_response",
                 "modify_rules": [{"target": "delay", "op": "sleep", "value": int(args[0])}]}
     if name == "delay-request":
         if len(args) < 1:
-            raise ValueError("delay-request 需要: N（毫秒）")
+            raise ValueError("delay-request requires: N (milliseconds)")
         return {"action": "modify_request",
                 "modify_rules": [{"target": "delay-request", "op": "sleep", "value": int(args[0])}]}
 
-    # ---- Python 脚本 ----
+    # ---- Python script ----
     if name == "script":
         if not args:
-            raise ValueError("script 需要: '<inline source>' 或 script file <path>")
+            raise ValueError("script requires: '<inline source>' or script file <path>")
         if args[0] == "file" and len(args) >= 2:
             with open(args[1], "r", encoding="utf-8") as f:
                 source = f.read()
@@ -441,10 +443,10 @@ def parse_action(spec: str) -> dict:
             source = args[0]
         return {"action": "script", "modify_rules": source}
 
-    raise ValueError(f"未知动作: {name}（支持: set-json/set-json-path/remove-json/replace-header/"
+    raise ValueError(f"Unknown action: {name} (supported: set-json/set-json-path/remove-json/replace-header/"
                      f"replace-bytes/replace-bytes-regex/mock/status/drop/mock-request/"
                      f"set-request-header/set-request-json/set-request-json-path/remove-request-json/"
-                     f"set-request-body-hex/replace-request-bytes/delay/delay-request/script）")
+                     f"set-request-body-hex/replace-request-bytes/delay/delay-request/script)")
 
 
 def _split_action(spec: str) -> list[str]:
@@ -475,9 +477,9 @@ def _hex_to_b64(hex_str: str) -> str:
     return "base64:" + base64.b64encode(raw).decode("ascii")
 
 
-# 会话辅助
+# Session helper
 def _get_session_id(session: int = 0) -> tuple[int, Optional[str]]:
-    """获取会话 ID。成功返回 (sid, None)，失败返回 (0, error)。"""
+    """Get session ID. Returns (sid, None) on success, (0, error) on failure."""
     if session:
         return int(session), None
     env_session = os.environ.get("TELNIX_SESSION", "").strip()
@@ -485,26 +487,26 @@ def _get_session_id(session: int = 0) -> tuple[int, Optional[str]]:
         try:
             return int(env_session), None
         except ValueError:
-            return 0, f"TELNIX_SESSION 环境变量值无效: {env_session}"
+            return 0, f"Invalid TELNIX_SESSION env value: {env_session}"
     res = _api("GET", "/status")
     data, err = _ok(res)
     if err:
         return 0, err
     sid = data.get("session_id") if isinstance(data, dict) else None
     if not sid:
-        return 0, "无活动会话，请先 capture_start 或用 session 参数指定"
+        return 0, "No active session, call capture_start first or specify session parameter"
     return int(sid), None
 
 
 # ======================================================================
-# 工具集：状态 & 抓包控制
+# Toolset: Status & capture control
 # ======================================================================
 
 @mcp.tool()
 def get_status() -> str:
-    """获取 Telnix 后端状态（抓包状态、会话、代理、证书等）。
+    """Get Telnix backend status (capture state, session, proxy, cert, etc).
 
-    返回 JSON，包含 capturing/session_id/system_proxy_on/cert_installed 等字段。
+    Returns JSON containing capturing/session_id/system_proxy_on/cert_installed and other fields.
     """
     res = _api("GET", "/status")
     data, err = _ok(res)
@@ -521,14 +523,14 @@ def capture_start(
     port_filter: str = "",
     bpf_filter: str = "",
 ) -> str:
-    """开始抓包。返回 session_id。
+    """Start capturing. Returns session_id.
 
     Args:
-        layer: 抓包层 http=仅HTTP代理(默认), tcp=仅TCP/UDP(WinDivert需管理员), all=两者都抓
-        auto_stop_seconds: N 秒后自动停止抓包（0=不自动停，agent 不用自己 sleep+stop）
-        pid_filter: TCP/UDP 模式按 PID 过滤，逗号分隔
-        port_filter: TCP/UDP 模式按端口过滤，逗号分隔
-        bpf_filter: TCP/UDP 模式 WinDivert filter 字符串
+        layer: Capture layer; http=HTTP proxy only (default), tcp=TCP/UDP only (WinDivert, requires admin), all=capture both
+        auto_stop_seconds: Auto-stop capture after N seconds (0=no auto-stop, agent does not need to sleep+stop)
+        pid_filter: TCP/UDP mode PID filter, comma-separated
+        port_filter: TCP/UDP mode port filter, comma-separated
+        bpf_filter: TCP/UDP mode WinDivert filter string
     """
     body: dict = {}
     if auto_stop_seconds and auto_stop_seconds > 0:
@@ -540,7 +542,7 @@ def capture_start(
     out = {"session_id": data.get("session_id"), "capturing": True}
     if data.get("auto_stop_seconds"):
         out["auto_stop_seconds"] = data["auto_stop_seconds"]
-        out["hint"] = f"后端将在 {data['auto_stop_seconds']}s 后自动停止抓包"
+        out["hint"] = f"Backend will auto-stop capture after {data['auto_stop_seconds']}s"
     if layer in ("tcp", "all"):
         raw_body: dict = {}
         if pid_filter:
@@ -549,7 +551,7 @@ def capture_start(
             raw_body["port_filter"] = [int(p) for p in port_filter.split(",") if p.strip()]
         if bpf_filter:
             raw_body["filter_str"] = bpf_filter
-        # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+        # On first enable without WinDivert risk acknowledgement, auto-trigger desktop topmost native dialog
         raw_res = _api_with_windivert_ack("POST", "/raw/start", raw_body, timeout=10)
         if raw_res.get("code") == 0:
             out["raw_capture"] = "started"
@@ -562,10 +564,10 @@ def capture_start(
 
 @mcp.tool()
 def capture_stop(layer: str = "http") -> str:
-    """停止抓包（会话保留，代理仍运行）。
+    """Stop capturing (session is preserved, proxy keeps running).
 
     Args:
-        layer: 停止哪层 http=仅HTTP(默认), all=同时停TCP/UDP
+        layer: Which layer to stop; http=HTTP only (default), all=also stop TCP/UDP
     """
     res = _api("POST", "/capture/stop")
     _, err = _ok(res)
@@ -578,7 +580,7 @@ def capture_stop(layer: str = "http") -> str:
 
 @mcp.tool()
 def capture_clear() -> str:
-    """清空当前会话的所有流量记录。"""
+    """Clear all flow records of the current session."""
     res = _api("POST", "/capture/clear")
     _, err = _ok(res)
     if err:
@@ -588,18 +590,18 @@ def capture_clear() -> str:
 
 @mcp.tool()
 def capture_pause() -> str:
-    """暂停抓包（会话保留，代理仍跑，区别于 stop）。"""
+    """Pause capturing (session is preserved, proxy keeps running; differs from stop)."""
     res = _api("POST", "/capture/pause")
     data, err = _ok(res)
     if err:
         return _error(err)
     return _result({"paused": True, "session_id": data.get("session_id") if isinstance(data, dict) else None,
-                    "hint": "会话保留，代理仍跑。capture_resume 恢复，capture_stop 真正停止"})
+                    "hint": "Session preserved, proxy still running. capture_resume to resume, capture_stop to truly stop"})
 
 
 @mcp.tool()
 def capture_resume() -> str:
-    """恢复抓包记录。"""
+    """Resume capturing records."""
     res = _api("POST", "/capture/resume")
     data, err = _ok(res)
     if err:
@@ -608,7 +610,7 @@ def capture_resume() -> str:
 
 
 # ======================================================================
-# 工具集：流量查询
+# Toolset: Flow query
 # ======================================================================
 
 @mcp.tool()
@@ -622,17 +624,17 @@ def packets_list(
     method: str = "",
     protocol: str = "",
 ) -> str:
-    """列出当前会话的流量（默认 NDJSON 风格的 JSON 数组）。
+    """List flows of the current session (default NDJSON-style JSON array).
 
     Args:
-        session: 会话 ID（0=当前活动会话）
-        limit: 最多返回条数（默认100）
-        since_id: 增量查询，只返回 id > N 的流量（非阻塞轮询）
-        filter_expr: 过滤表达式 'key op value && ...'（key: host/method/path/url/status/pid/process, op: = ~= != >= <= > <）
-        host: 快捷按主机过滤
-        status_code: 快捷按状态码过滤
-        method: 快捷按方法过滤
-        protocol: 协议过滤 http|tcp|udp|ws|dns
+        session: Session ID (0=current active session)
+        limit: Maximum number of entries to return (default 100)
+        since_id: Incremental query, only return flows with id > N (non-blocking polling)
+        filter_expr: Filter expression 'key op value && ...' (key: host/method/path/url/status/pid/process, op: = ~= != >= <= > <)
+        host: Shortcut to filter by host
+        status_code: Shortcut to filter by status code
+        method: Shortcut to filter by method
+        protocol: Protocol filter http|tcp|udp|ws|dns
     """
     sid, err = _get_session_id(session)
     if err:
@@ -654,14 +656,14 @@ def packets_list(
     if err:
         return _error(err)
     flows = data.get("flows", []) if isinstance(data, dict) else data
-    # 客户端过滤
+    # Client-side filtering
     if filter_expr:
         try:
             filters = parse_match(filter_expr)["filters"]
             flows = [f for f in flows if flow_matches(f, filters)]
         except ValueError as e:
             return _error(str(e))
-    # 截断大字段
+    # Truncate large fields
     flows = _truncate_fields(flows, ["request_body", "response_body", "raw_data"])
     return _result({"flows": flows, "count": len(flows), "session_id": sid})
 
@@ -677,17 +679,17 @@ def packets_list_all(
     offset: int = 0,
     since_id: int = 0,
 ) -> str:
-    """列出跨所有会话的流量（全局分析用）。
+    """List flows across all sessions (for global analysis).
 
     Args:
-        host: 按主机过滤
-        process: 按进程名过滤
-        method: 按方法过滤
-        status_code: 按状态码过滤
-        protocol: 协议过滤 http|tcp|udp|ws|dns
-        limit: 最多返回条数
-        offset: 分页偏移
-        since_id: 增量查询
+        host: Filter by host
+        process: Filter by process name
+        method: Filter by method
+        status_code: Filter by status code
+        protocol: Protocol filter http|tcp|udp|ws|dns
+        limit: Maximum number of entries to return
+        offset: Pagination offset
+        since_id: Incremental query
     """
     params = [f"limit={limit}", f"offset={offset}"]
     if host:
@@ -717,11 +719,11 @@ def packets_get(
     flow_id: int,
     field: str = "",
 ) -> str:
-    """获取单个流量详情。
+    """Get a single flow's details.
 
     Args:
-        flow_id: 流量 ID
-        field: 只取指定字段 request_body|response_body|raw_data（空=全部）
+        flow_id: Flow ID
+        field: Only fetch a specific field request_body|response_body|raw_data (empty=all)
     """
     res = _api("GET", f"/flows/{flow_id}")
     data, err = _ok(res)
@@ -739,15 +741,15 @@ def packets_search(
     binary_hex: str = "",
     search_all: bool = False,
 ) -> str:
-    """正则搜索流量 body。
+    """Regex search flow bodies.
 
     Args:
-        body_regex: 正则表达式（搜索 request_body + response_body）
-        binary_hex: 二进制搜索（hex 字符串，与 body_regex 互斥）
-        search_all: true=跨所有会话搜索, false=仅当前会话
+        body_regex: Regex pattern (searches request_body + response_body)
+        binary_hex: Binary search (hex string, mutually exclusive with body_regex)
+        search_all: true=search across all sessions, false=current session only
     """
     if not body_regex and not binary_hex:
-        return _error("需要 body_regex 或 binary_hex 参数")
+        return _error("body_regex or binary_hex parameter required")
     body: dict = {}
     if body_regex:
         body["body_regex"] = body_regex
@@ -765,10 +767,10 @@ def packets_search(
 
 @mcp.tool()
 def packets_stats(session: int = 0) -> str:
-    """流量统计（按 host/method/status 分组计数）。
+    """Flow statistics (grouped counts by host/method/status).
 
     Args:
-        session: 会话 ID（0=当前活动会话）
+        session: Session ID (0=current active session)
     """
     sid, err = _get_session_id(session)
     if err:
@@ -782,11 +784,13 @@ def packets_stats(session: int = 0) -> str:
 
 @mcp.tool()
 def packets_overview() -> str:
-    """多维聚合统计概览（CoolUI 仪表盘数据源，跨会话全量）。
+    """Multi-dimensional aggregate statistics overview (CoolUI dashboard data source, cross-session full).
 
-    一次返回所有维度的聚合统计，包括：总数、总字节、入站/出站字节、成功/错误计数、
-    平均耗时，以及按协议/方法/状态码区间/Host/进程/IP属地 分组的计数列表（各 top 20）。
-    适用于生成流量监控仪表盘、全局概览报告。不需要会话 ID 参数。
+    Returns aggregate statistics for all dimensions at once, including: total count, total bytes,
+    inbound/outbound bytes, success/error counts, average duration, as well as grouped count lists
+    by protocol/method/status-code-range/host/process/IP-region (top 20 each).
+    Suitable for generating traffic monitoring dashboards and global overview reports.
+    No session ID parameter required.
     """
     res = _api("GET", "/flows/overview")
     data, err = _ok(res)
@@ -797,11 +801,11 @@ def packets_overview() -> str:
 
 @mcp.tool()
 def packets_delete(flow_id: int = 0, ids: str = "") -> str:
-    """删除流量。
+    """Delete flows.
 
     Args:
-        flow_id: 单个流量 ID
-        ids: 批量删除，逗号分隔的 ID 列表（优先于 flow_id）
+        flow_id: Single flow ID
+        ids: Batch delete, comma-separated ID list (takes precedence over flow_id)
     """
     if ids:
         id_list = [x.strip() for x in ids.split(",") if x.strip()]
@@ -811,7 +815,7 @@ def packets_delete(flow_id: int = 0, ids: str = "") -> str:
             return _error(err)
         return _result({"deleted": len(id_list)})
     if not flow_id:
-        return _error("需要 flow_id 或 ids 参数")
+        return _error("flow_id or ids parameter required")
     res = _api("DELETE", f"/flows/{flow_id}")
     _, err = _ok(res)
     if err:
@@ -821,11 +825,11 @@ def packets_delete(flow_id: int = 0, ids: str = "") -> str:
 
 @mcp.tool()
 def packets_clear(all_sessions: bool = False, before_id: int = 0) -> str:
-    """清空流量。
+    """Clear flows.
 
     Args:
-        all_sessions: true=清空所有会话流量, false=仅当前会话
-        before_id: 只清 id < N 的流量（0=清全部）
+        all_sessions: true=clear all session flows, false=current session only
+        before_id: Only clear flows with id < N (0=clear all)
     """
     if all_sessions:
         res = _api("POST", "/flows/clear-all")
@@ -847,7 +851,7 @@ def packets_clear(all_sessions: bool = False, before_id: int = 0) -> str:
 
 
 # ======================================================================
-# 工具集：拦截规则（自动修改）
+# Toolset: Intercept rules (auto-modify)
 # ======================================================================
 
 @mcp.tool()
@@ -858,27 +862,27 @@ def intercept_add(
     dry_run: bool = False,
     idempotent: bool = False,
 ) -> str:
-    """添加拦截规则（自动修改规则）。
+    """Add an intercept rule (auto-modify rule).
 
     Args:
-        match: 匹配表达式 'key op value && ...'（key: host/method/path/url/status/pid/process, op: = ~= != >= <= > <）
-            示例: 'host~=api.example.com && method=POST'
-        action: 动作规范。支持:
-            改响应: set-json key value | set-json-path path value | remove-json key | remove-json-path path |
+        match: Match expression 'key op value && ...' (key: host/method/path/url/status/pid/process, op: = ~= != >= <= > <)
+            Example: 'host~=api.example.com && method=POST'
+        action: Action spec. Supported:
+            Modify response: set-json key value | set-json-path path value | remove-json key | remove-json-path path |
                     replace-header K V | replace-bytes offset:hex | replace-bytes-regex regex hex |
                     mock CODE BODY | status CODE | drop | mock-request BODY [CTYPE]
-            改请求: set-request-header K V | set-request-json key value | set-request-json-path path value |
+            Modify request: set-request-header K V | set-request-json key value | set-request-json-path path value |
                     remove-request-json key | set-request-body-hex hex | replace-request-bytes offset:hex
-            时序: delay N | delay-request N (毫秒)
-            Python 脚本: script '<source>' | script file <path>
-                脚本定义 on_request(ctx)/on_response(ctx)，独立 worker 子进程运行
-                ctx 属性: host/path/method/url/scheme/pid/process_name/request_headers/request_body
-                          (on_response 额外: status_code/response_headers/response_body)
-                修改: ctx.set_request_header/set_request_body/set_response_header/set_response_body/set_status_code
-                返回 None=继续, {"drop": True}=拒绝, {"mock": True, "status": 200, "headers": {}, "body": b""}=伪造响应
-        note: 规则备注（必填，方便后续管理）
-        dry_run: true=预览会命中的流量但不创建规则
-        idempotent: true=幂等创建（已存在相同规则则不重复创建）
+            Timing: delay N | delay-request N (milliseconds)
+            Python script: script '<source>' | script file <path>
+                Script defines on_request(ctx)/on_response(ctx), runs in an independent worker subprocess
+                ctx attributes: host/path/method/url/scheme/pid/process_name/request_headers/request_body
+                          (on_response additionally: status_code/response_headers/response_body)
+                Modify: ctx.set_request_header/set_request_body/set_response_header/set_response_body/set_status_code
+                Return None=continue, {"drop": True}=reject, {"mock": True, "status": 200, "headers": {}, "body": b""}=fake response
+        note: Rule note (required, for easier management)
+        dry_run: true=preview flows that would be matched but do not create the rule
+        idempotent: true=idempotent create (do not duplicate if the same rule already exists)
     """
     if not note:
         note = f"MCP: {action}"
@@ -940,7 +944,7 @@ def intercept_add(
             if idem_data.get("hint"):
                 out["hint"] = idem_data["hint"]
             return _result(out)
-        # 降级：客户端遍历
+        # Fallback: client-side traversal
         list_res = _api("GET", "/auto-reply/rules")
         existing, _ = _ok(list_res)
         existing = existing if isinstance(existing, list) else []
@@ -952,7 +956,7 @@ def intercept_add(
                     and json.dumps(r.get("modify_rules", []), sort_keys=True) == new_sig):
                 return _result({"created": False, "idempotent": True, "rule_id": r.get("id"),
                                 "pattern": m["pattern"], "note": note,
-                                "hint": "已存在相同规则，未重复创建"})
+                                "hint": "Same rule already exists, not duplicated"})
 
     res = _api("POST", "/auto-reply/rules", rule)
     created, err = _ok(res)
@@ -968,7 +972,7 @@ def intercept_add(
 
 @mcp.tool()
 def intercept_list() -> str:
-    """列出所有拦截规则（含命中统计）。"""
+    """List all intercept rules (including hit statistics)."""
     res = _api("GET", "/auto-reply/rules")
     data, err = _ok(res)
     if err:
@@ -986,11 +990,11 @@ def intercept_list() -> str:
 
 @mcp.tool()
 def intercept_del(rule_id: int = 0, ids: str = "") -> str:
-    """删除拦截规则。
+    """Delete intercept rules.
 
     Args:
-        rule_id: 单个规则 ID
-        ids: 批量删除，逗号分隔（优先于 rule_id）
+        rule_id: Single rule ID
+        ids: Batch delete, comma-separated (takes precedence over rule_id)
     """
     if ids:
         id_list = [x.strip() for x in ids.split(",") if x.strip()]
@@ -1000,7 +1004,7 @@ def intercept_del(rule_id: int = 0, ids: str = "") -> str:
             return _error(err)
         return _result({"deleted": len(id_list)})
     if not rule_id:
-        return _error("需要 rule_id 或 ids 参数")
+        return _error("rule_id or ids parameter required")
     res = _api("DELETE", f"/auto-reply/rules/{rule_id}")
     _, err = _ok(res)
     if err:
@@ -1010,10 +1014,10 @@ def intercept_del(rule_id: int = 0, ids: str = "") -> str:
 
 @mcp.tool()
 def intercept_hits(rule_id: int) -> str:
-    """查看某规则的命中统计 + 最后命中的流量详情。
+    """View a rule's hit statistics + last hit flow details.
 
     Args:
-        rule_id: 规则 ID
+        rule_id: Rule ID
     """
     res = _api("GET", "/auto-reply/rules")
     data, err = _ok(res)
@@ -1026,7 +1030,7 @@ def intercept_hits(rule_id: int) -> str:
             rule = r
             break
     if not rule:
-        return _error(f"规则不存在: {rule_id}")
+        return _error(f"Rule not found: {rule_id}")
     out = {"rule_id": rule.get("id"), "pattern": rule.get("pattern"), "action": rule.get("action"),
            "hit_count": rule.get("hit_count", 0), "last_hit_at": rule.get("last_hit_at", ""),
            "last_hit_flow_id": rule.get("last_hit_flow_id")}
@@ -1042,11 +1046,11 @@ def intercept_hits(rule_id: int) -> str:
 
 @mcp.tool()
 def intercept_toggle(rule_id: int, enabled: bool) -> str:
-    """启用/禁用拦截规则。
+    """Enable/disable an intercept rule.
 
     Args:
-        rule_id: 规则 ID
-        enabled: true=启用, false=禁用
+        rule_id: Rule ID
+        enabled: true=enable, false=disable
     """
     res = _api("PUT", f"/auto-reply/rules/{rule_id}", {"enabled": enabled})
     _, err = _ok(res)
@@ -1069,18 +1073,24 @@ def replay(
     port: int = 0,
     headers: str = "",
     timeout: float = 0,
+    repeat: int = 0,
+    concurrency: int = 1,
+    interval_ms: int = 0,
 ) -> str:
-    """重放指定流量。可覆盖 body/method/url/headers。
+    """Replay a specific flow. Can override body/method/url/headers.
 
     Args:
-        flow_id: 要重放的流量 ID
-        body: 覆盖请求 body（空=用原 body）
-        method: 覆盖 HTTP 方法
-        url: 覆盖目标 URL
-        host: 覆盖目标 host
-        port: 覆盖目标端口
-        headers: 覆盖请求头，JSON 字符串如 '{"K":"V"}' 或 HTTP 文本格式 'K:V\\nK2:V2'
-        timeout: 超时秒数（0=自动：带body 120s，无body 30s）
+        flow_id: Flow ID to replay
+        body: Override request body (empty=use original body)
+        method: Override HTTP method
+        url: Override target URL
+        host: Override target host
+        port: Override target port
+        headers: Override request headers, JSON string like '{"K":"V"}' or HTTP text format 'K:V\\nK2:V2'
+        timeout: Timeout seconds (0=auto: 120s with body, 30s without body)
+        repeat: Repeat Advanced - total replay count (0/1=single replay; >1=batch replay via /repeat endpoint with stats)
+        concurrency: Repeat Advanced - concurrent workers (1-50, default 1; only used when repeat>1)
+        interval_ms: Repeat Advanced - delay between submissions in ms (0-60000, default 0=no delay; only used when repeat>1)
     """
     req_body: dict = {}
     if body:
@@ -1098,6 +1108,33 @@ def replay(
         if parsed_h:
             req_body["headers"] = parsed_h
     t = float(timeout) if timeout > 0 else (120.0 if body else 30.0)
+
+    # Repeat Advanced: offload to backend /repeat endpoint for unified concurrency/interval/stats
+    if repeat and repeat > 1:
+        if concurrency < 1 or concurrency > 50:
+            return _error("concurrency must be between 1 and 50")
+        if interval_ms < 0 or interval_ms > 60000:
+            return _error("interval_ms must be between 0 and 60000")
+        rp_body = {
+            "count": int(repeat),
+            "concurrency": int(concurrency),
+            "interval_ms": int(interval_ms),
+            "override": req_body if req_body else None,
+        }
+        # 服务端耗时按 count * 单次最大耗时估算
+        srv_timeout = max(t * repeat / max(concurrency, 1), 60.0)
+        res = _api("POST", f"/flows/{flow_id}/repeat", rp_body, timeout=srv_timeout)
+        data, err = _ok(res)
+        if err:
+            return _error(err)
+        # 截断每条结果的响应体，避免输出过长
+        if isinstance(data, dict) and isinstance(data.get("results"), list):
+            for r in data["results"]:
+                if isinstance(r, dict):
+                    r.pop("response_body", None)
+                    r.pop("response_headers", None)
+        return _result(data)
+
     res = _api("POST", f"/flows/{flow_id}/replay", req_body if req_body else None, timeout=t + 5)
     data, err = _ok(res)
     if err:
@@ -1114,19 +1151,19 @@ def send_request(
     body: str = "",
     timeout: float = 30,
 ) -> str:
-    """从零发包（Composer 功能），不依赖已有 flow。
+    """Send a request from scratch (Composer feature), does not depend on existing flow.
 
     Args:
-        method: HTTP 方法（GET/POST/PUT/DELETE 等）
-        url: 目标 URL（必须以 http:// 或 https:// 开头）
-        headers: 请求头，JSON 字符串 '{"K":"V"}' 或 HTTP 文本 'K:V\\nK2:V2'
-        body: 请求 body
-        timeout: 超时秒数
+        method: HTTP method (GET/POST/PUT/DELETE etc.)
+        url: Target URL (must start with http:// or https://)
+        headers: Request headers, JSON string '{"K":"V"}' or HTTP text 'K:V\\nK2:V2'
+        body: Request body
+        timeout: Timeout seconds
     """
     if not url:
-        return _error("url 必填")
+        return _error("url is required")
     if not url.startswith(("http://", "https://")):
-        return _error("url 必须以 http:// 或 https:// 开头")
+        return _error("url must start with http:// or https://")
     req_body: dict = {"method": method.upper(), "url": url, "timeout": float(timeout)}
     if headers:
         parsed_h = _parse_headers(headers)
@@ -1150,13 +1187,13 @@ def replay_batch(
     parallel: int = 1,
     preserve_timing: bool = False,
 ) -> str:
-    """批量时序重放指定会话的全部流量。
+    """Batch timed replay of all flows in the specified session.
 
     Args:
-        session: 会话 ID（必填）
-        filter_expr: 客户端过滤表达式，只重放匹配的流量
-        parallel: 并发数（1=串行）
-        preserve_timing: true=按原始时间间隔重放（测限流/风控）
+        session: Session ID (required)
+        filter_expr: Client-side filter expression, only replay matching flows
+        parallel: Concurrency (1=serial)
+        preserve_timing: true=replay with original time intervals (for rate-limit/risk-control testing)
     """
     res = _api("GET", f"/sessions/{session}/flows?limit=50000&offset=0", timeout=60)
     data, err = _ok(res)
@@ -1220,7 +1257,7 @@ def replay_batch(
 
 
 def _parse_headers(raw_h: str) -> dict:
-    """健壮解析 headers（JSON 字符串或 HTTP 文本格式）。"""
+    """Robustly parse headers (JSON string or HTTP text format)."""
     headers = {}
     if not raw_h or not isinstance(raw_h, str):
         return headers
@@ -1243,7 +1280,7 @@ def _parse_headers(raw_h: str) -> dict:
 
 @mcp.tool()
 def breakpoint_status() -> str:
-    """查看断点状态（是否开启、pending 流量列表）。"""
+    """View breakpoint status (whether enabled, pending flow list)."""
     res = _api("GET", "/breakpoint/status")
     data, err = _ok(res)
     if err:
@@ -1253,11 +1290,11 @@ def breakpoint_status() -> str:
 
 @mcp.tool()
 def breakpoint_on(bp_type: str = "request", timeout_seconds: int = 0) -> str:
-    """开启断点。
+    """Enable breakpoint.
 
     Args:
-        bp_type: 断点类型 request|response
-        timeout_seconds: N 秒未放行自动 release（0=不自动超时）
+        bp_type: Breakpoint type request|response
+        timeout_seconds: Auto-release after N seconds without pass-through (0=no auto timeout)
     """
     body = {"enabled": True}
     if timeout_seconds and timeout_seconds > 0:
@@ -1269,16 +1306,16 @@ def breakpoint_on(bp_type: str = "request", timeout_seconds: int = 0) -> str:
     out = {f"break_on_{bp_type}": True}
     if timeout_seconds and timeout_seconds > 0:
         out["timeout_seconds"] = timeout_seconds
-        out["hint"] = f"断点 {bp_type} 已开启，{timeout_seconds}s 未放行自动 release"
+        out["hint"] = f"Breakpoint {bp_type} enabled, auto-release after {timeout_seconds}s without pass-through"
     return _result(out)
 
 
 @mcp.tool()
 def breakpoint_off(bp_type: str = "request") -> str:
-    """关闭断点。
+    """Disable breakpoint.
 
     Args:
-        bp_type: 断点类型 request|response
+        bp_type: Breakpoint type request|response
     """
     res = _api("POST", f"/breakpoint/{bp_type}", {"enabled": False})
     _, err = _ok(res)
@@ -1289,12 +1326,12 @@ def breakpoint_off(bp_type: str = "request") -> str:
 
 @mcp.tool()
 def breakpoint_release(flow_id: int = 0, action: str = "release", all_pending: bool = False) -> str:
-    """放行/丢弃断点暂停的流量。
+    """Release/drop flows paused by breakpoint.
 
     Args:
-        flow_id: 单个流量 ID（与 all_pending 互斥）
-        action: release=放行, drop=丢弃
-        all_pending: true=批量操作所有 pending 断点
+        flow_id: Single flow ID (mutually exclusive with all_pending)
+        action: release=pass-through, drop=discard
+        all_pending: true=batch operate on all pending breakpoints
     """
     if all_pending:
         res = _api("GET", "/breakpoint/status")
@@ -1308,7 +1345,7 @@ def breakpoint_release(flow_id: int = 0, action: str = "release", all_pending: b
             if fid:
                 ids.append(int(fid))
         if not ids:
-            return _result({"action": action, "total": 0, "hint": "无 pending 断点"})
+            return _result({"action": action, "total": 0, "hint": "No pending breakpoints"})
         res = _api("POST", "/flows/batch-release", {"ids": ids, "action": action})
         data, err = _ok(res)
         if err:
@@ -1316,7 +1353,7 @@ def breakpoint_release(flow_id: int = 0, action: str = "release", all_pending: b
         return _result({"action": action, "total": len(ids),
                         "released": data.get("released", 0) if isinstance(data, dict) else 0})
     if not flow_id:
-        return _error("需要 flow_id 或 all_pending=true")
+        return _error("flow_id or all_pending=true required")
     res = _api("POST", f"/flows/{flow_id}/release", {"action": action})
     data, err = _ok(res)
     if err:
@@ -1330,7 +1367,7 @@ def breakpoint_release(flow_id: int = 0, action: str = "release", all_pending: b
 
 @mcp.tool()
 def proxy_status() -> str:
-    """查看系统代理状态。"""
+    """View system proxy status."""
     res = _api("GET", "/status")
     data, err = _ok(res)
     if err:
@@ -1341,7 +1378,7 @@ def proxy_status() -> str:
 
 @mcp.tool()
 def proxy_on() -> str:
-    """开启系统代理（让所有应用流量走 Telnix）。"""
+    """Enable system proxy (route all application traffic through Telnix)."""
     res = _api("POST", "/system/enable-proxy")
     _, err = _ok(res)
     if err:
@@ -1351,7 +1388,7 @@ def proxy_on() -> str:
 
 @mcp.tool()
 def proxy_off() -> str:
-    """关闭系统代理。"""
+    """Disable system proxy."""
     res = _api("POST", "/system/clear-proxy")
     _, err = _ok(res)
     if err:
@@ -1361,7 +1398,7 @@ def proxy_off() -> str:
 
 @mcp.tool()
 def cert_status() -> str:
-    """查看 HTTPS 证书安装状态。"""
+    """View HTTPS certificate installation status."""
     res = _api("GET", "/cert/status")
     data, err = _ok(res)
     if err:
@@ -1371,7 +1408,7 @@ def cert_status() -> str:
 
 @mcp.tool()
 def cert_install() -> str:
-    """安装 HTTPS 根证书（需要 UAC 提权）。"""
+    """Install HTTPS root certificate (requires UAC elevation)."""
     res = _api("POST", "/cert/install", timeout=60)
     data, err = _ok(res)
     if err:
@@ -1381,7 +1418,7 @@ def cert_install() -> str:
 
 @mcp.tool()
 def focus_status() -> str:
-    """查看专注模式状态。"""
+    """View focus mode status."""
     res = _api("GET", "/focus")
     data, err = _ok(res)
     if err:
@@ -1391,13 +1428,13 @@ def focus_status() -> str:
 
 @mcp.tool()
 def focus_on(pids: str = "", process_names: str = "", hosts: str = "", include_children: bool = True) -> str:
-    """开启专注模式（只抓指定进程/host 的流量）。
+    """Enable focus mode (only capture traffic of specified processes/hosts).
 
     Args:
-        pids: PID 列表，逗号分隔
-        process_names: 进程名列表，逗号分隔
-        hosts: host 通配符列表，逗号分隔
-        include_children: 是否包含子进程
+        pids: PID list, comma-separated
+        process_names: Process name list, comma-separated
+        hosts: Host wildcard list, comma-separated
+        include_children: Whether to include child processes
     """
     body = {"enabled": True, "pids": [], "process_names": [], "hosts": [],
             "include_children": include_children}
@@ -1408,7 +1445,7 @@ def focus_on(pids: str = "", process_names: str = "", hosts: str = "", include_c
     if hosts:
         body["hosts"] = [h.strip() for h in hosts.split(",") if h.strip()]
     if not body["pids"] and not body["process_names"] and not body["hosts"]:
-        return _error("需要 pids 或 process_names 或 hosts 参数")
+        return _error("pids or process_names or hosts parameter required")
     res = _api("POST", "/focus", body)
     data, err = _ok(res)
     if err:
@@ -1418,7 +1455,7 @@ def focus_on(pids: str = "", process_names: str = "", hosts: str = "", include_c
 
 @mcp.tool()
 def focus_off() -> str:
-    """关闭专注模式。"""
+    """Disable focus mode."""
     res = _api("POST", "/focus", {"enabled": False, "pids": []})
     _, err = _ok(res)
     if err:
@@ -1428,33 +1465,33 @@ def focus_off() -> str:
 
 @mcp.tool()
 def raw_capture_status() -> str:
-    """查看 TCP/UDP 抓包状态。"""
+    """View TCP/UDP capture status."""
     res = _api("GET", "/raw/status")
     data, err = _ok(res)
     if err:
         return _error(err)
     if not data.get("pydivert_installed"):
-        data["hint"] = "运行 raw_capture_install 安装 pydivert"
+        data["hint"] = "Run raw_capture_install to install pydivert"
     elif not data.get("is_admin"):
-        data["hint"] = "需要管理员权限。调用 system_restart_as_admin"
+        data["hint"] = "Administrator privilege required. Call system_restart_as_admin"
     return _result(data)
 
 
 @mcp.tool()
 def raw_capture_start(pid_filter: str = "", port_filter: str = "", bpf_filter: str = "") -> str:
-    """启动 TCP/UDP 抓包（需管理员权限 + pydivert）。
+    """Start TCP/UDP capture (requires administrator privilege + pydivert).
 
     Args:
-        pid_filter: 按 PID 过滤，逗号分隔
-        port_filter: 按端口过滤，逗号分隔
-        bpf_filter: WinDivert filter 字符串
+        pid_filter: Filter by PID, comma-separated
+        port_filter: Filter by port, comma-separated
+        bpf_filter: WinDivert filter string
 
-    非 Windows 平台：WinDivert 是 Windows 专属驱动，直接返回"不支持"错误。
+    Non-Windows platforms: WinDivert is a Windows-only driver, returns "not supported" error directly.
     """
     # 非 Windows 平台：WinDivert 不可用，提前返回错误
     if not sys.platform.startswith("win"):
-        return _error("TCP/UDP 抓包仅 Windows 支持（WinDivert 驱动）",
-                      hint="macOS/Linux 可使用 HTTP 代理抓包功能（capture_start layer=http）")
+        return _error("TCP/UDP capture is supported only on Windows (WinDivert driver)",
+                      hint="macOS/Linux can use the HTTP proxy capture feature (capture_start layer=http)")
     body: dict = {}
     if pid_filter:
         body["pid_filter"] = [int(p) for p in pid_filter.split(",") if p.strip()]
@@ -1472,7 +1509,7 @@ def raw_capture_start(pid_filter: str = "", port_filter: str = "", bpf_filter: s
 
 @mcp.tool()
 def raw_capture_stop() -> str:
-    """停止 TCP/UDP 抓包。"""
+    """Stop TCP/UDP capture."""
     res = _api("POST", "/raw/stop")
     data, err = _ok(res)
     if err:
@@ -1481,26 +1518,8 @@ def raw_capture_stop() -> str:
 
 
 @mcp.tool()
-def raw_capture_install() -> str:
-    """安装 pydivert（TCP/UDP 抓包依赖）。
-
-    非 Windows 平台：pydivert 是 Windows 专属包，直接返回"不支持"错误。
-    """
-    # 非 Windows 平台：pydivert 是 Windows 专属包，提前返回错误
-    if not sys.platform.startswith("win"):
-        return _error("pydivert 是 Windows 专属包，macOS/Linux 无法安装",
-                      hint="macOS/Linux 可使用 HTTP 代理抓包功能（capture_start layer=http）")
-    # 复用 /system/install-dep 端点（统一的 pip 安装基础设施：锁、状态、日志、取消）
-    res = _api("POST", "/system/install-dep", body={"package": "pydivert"}, timeout=180)
-    data, err = _ok(res)
-    if err:
-        return _error(err)
-    return _result(data)
-
-
-@mcp.tool()
 def system_restart() -> str:
-    """重启 Telnix 后端（同进程内 os.execv 重启）。"""
+    """Restart Telnix backend (in-process os.execv restart)."""
     res = _api("POST", "/system/restart")
     _, err = _ok(res)
     if err:
@@ -1510,7 +1529,7 @@ def system_restart() -> str:
 
 @mcp.tool()
 def system_quit() -> str:
-    """退出 Telnix（清系统代理 + 退出）。"""
+    """Quit Telnix (clears system proxy + exits)."""
     res = _api("POST", "/system/quit")
     _, err = _ok(res)
     if err:
@@ -1518,52 +1537,17 @@ def system_quit() -> str:
     return _result({"quitting": True})
 
 
-@mcp.tool()
-def system_install_dep(package: str = "mitmproxy") -> str:
-    """触发 pip 安装可选依赖（如 mitmproxy）。
-
-    异步任务：本工具返回 status=running 后需轮询 system_install_dep_status 查询进度。
-    安装完成后需调用 system_restart 让新引擎加载到当前进程。
-
-    Args:
-        package: 包名，目前仅支持 "mitmproxy"
-
-    Returns:
-        {"status": "running", "package": "mitmproxy"}
-    """
-    res = _api("POST", "/system/install-dep", body={"package": package}, timeout=30)
-    data, err = _ok(res)
-    if err:
-        return _error(err)
-    return _result(data)
-
-
-@mcp.tool()
-def system_install_dep_status() -> str:
-    """查询 install_dep 任务状态。
-
-    Returns:
-        {"status": "idle|running|success|failed", "package": ..., "log": ..., ...}
-        status=success 且 package=mitmproxy 时额外返回 mitmproxy_available 字段。
-    """
-    res = _api("GET", "/system/install-dep/status")
-    data, err = _ok(res)
-    if err:
-        return _error(err)
-    return _result(data)
-
-
 # ---------- 设置管理 ----------
 
 @mcp.tool()
 def settings_get(key: str = "") -> str:
-    """读取所有设置或单个 key 的值。
+    """Read all settings or the value of a single key.
 
     Args:
-        key: 可选。指定时只返回该 key 的值；省略则返回全部设置。
+        key: Optional. When specified, only returns the value of that key; when omitted, returns all settings.
 
     Returns:
-        全部设置 dict，或 {"key": ..., "value": ...}
+        All settings dict, or {"key": ..., "value": ...}
     """
     res = _api("GET", "/settings")
     data, err = _ok(res)
@@ -1576,15 +1560,15 @@ def settings_get(key: str = "") -> str:
 
 @mcp.tool()
 def settings_set(key: str, value: str) -> str:
-    """写入单个设置项。value 字符串会自动尝试 JSON 反序列化（bool/数字/list/dict）。
+    """Write a single setting item. The value string will be auto-deserialized as JSON (bool/number/list/dict).
 
     Args:
-        key: 设置项 key（如 "proxy_engine"）
-        value: 设置项 value。传 "true"/"false" 会被解析成 bool，
-               传 "123" 会被解析成数字，传 "[1,2]" 会被解析成 list。
+        key: Setting key (e.g. "proxy_engine")
+        value: Setting value. "true"/"false" will be parsed as bool,
+               "123" will be parsed as a number, "[1,2]" will be parsed as a list.
 
     Returns:
-        更新后的设置 dict。
+        The updated settings dict.
     """
     import json as _json
     parsed_value: Any = value
@@ -1603,17 +1587,17 @@ def settings_set(key: str, value: str) -> str:
 
 @mcp.tool()
 def settings_proxy_engine(name: str = "") -> str:
-    """查看或切换代理引擎（builtin / async / mitmproxy）。
+    """View or switch the proxy engine (builtin / async / mitmproxy).
 
     Args:
-        name: 引擎名。省略则仅查看当前引擎，不修改。
-            - builtin：内置线程代理（默认，零依赖，稳定）
-            - async：asyncio 代理（实验性，高并发无 GIL 瓶颈）
-            - mitmproxy：mitmproxy 引擎（需先 system_install_dep 安装）
+        name: Engine name. When omitted, only views the current engine without modifying.
+            - builtin: built-in threaded proxy (default, zero-dependency, stable)
+            - async: asyncio proxy (experimental, high-concurrency no GIL bottleneck)
+            - mitmproxy: mitmproxy engine (bundled as dependency)
 
     Returns:
         {"proxy_engine": "builtin|async|mitmproxy", "previous": ..., "mitmproxy_available": bool, ...}
-        切换后需调用 system_restart 让新引擎加载到当前进程。
+        After switching, call system_restart to load the new engine into the current process.
     """
     VALID = {"builtin", "async", "mitmproxy"}
     # 先读当前状态
@@ -1629,17 +1613,17 @@ def settings_proxy_engine(name: str = "") -> str:
             "proxy_engine": current,
             "mitmproxy_available": mitm_available,
             "available_engines": sorted(VALID),
-            "hint": "切换引擎: settings_proxy_engine(name='async'); 切换后需 system_restart",
+            "hint": "Switch engine: settings_proxy_engine(name='async'); system_restart required after switching",
         })
 
     n = name.lower().strip()
     if n not in VALID:
-        return _error(f"不支持的代理引擎: {n}（可选: {', '.join(sorted(VALID))}）")
+        return _error(f"Unsupported proxy engine: {n} (options: {', '.join(sorted(VALID))})")
 
     if n == "mitmproxy" and not mitm_available:
         return _error(
-            "mitmproxy 未安装，无法切换到该引擎",
-            hint="先调用 system_install_dep 安装 mitmproxy，再切换引擎",
+            "mitmproxy not available, cannot switch to this engine",
+            hint="mitmproxy is bundled as a dependency; if unavailable, reinstall Telnix dependencies",
         )
 
     res = _api("PUT", "/settings", body={"proxy_engine": n})
@@ -1651,69 +1635,346 @@ def settings_proxy_engine(name: str = "") -> str:
         "proxy_engine": n,
         "previous": current,
         "mitmproxy_available": mitm_available,
-        "hint": "需调用 system_restart 让新引擎生效",
+        "hint": "Call system_restart to apply the new engine",
     })
+
+
+# ---------- 代理工具 ----------
+
+@mcp.tool()
+def proxy_tools_status() -> str:
+    """Get proxy tools configuration (no-caching, force-cors, block-list, allow-list).
+
+    Returns JSON with no_caching, force_cors, block_list_enabled, block_list,
+    allow_list_enabled, allow_list fields.
+    """
+    res = _api("GET", "/proxy-tools")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_no_cache(enable: bool = True) -> str:
+    """Toggle No-Caching: inject Cache-Control: no-cache to all requests.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"no_caching": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_force_cors(enable: bool = True) -> str:
+    """Toggle Force-CORS: inject Access-Control-Allow-Origin: * to all responses.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"force_cors": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_block_list_add(pattern: str, mode: str = "wildcard") -> str:
+    """Add a pattern to the block list (blocked requests return 403).
+
+    Args:
+        pattern: Pattern to match (host or URL). Wildcards: * matches any, ? matches single char.
+        mode: Match mode - "wildcard" (default), "exact", or "regex".
+    """
+    res = _api("POST", "/proxy-tools/block-list", {"pattern": pattern, "mode": mode})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_block_list_remove(index: int) -> str:
+    """Remove a rule from the block list by index.
+
+    Args:
+        index: Rule index (0-based, from proxy_tools_status).
+    """
+    res = _api("DELETE", f"/proxy-tools/block-list/{index}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_block_list_enable(enable: bool = True) -> str:
+    """Enable or disable the block list.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"block_list_enabled": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_allow_list_add(pattern: str, mode: str = "wildcard") -> str:
+    """Add a pattern to the allow list (whitelisted requests bypass block list).
+
+    Args:
+        pattern: Pattern to match (host or URL). Wildcards: * matches any, ? matches single char.
+        mode: Match mode - "wildcard" (default), "exact", or "regex".
+    """
+    res = _api("POST", "/proxy-tools/allow-list", {"pattern": pattern, "mode": mode})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_allow_list_remove(index: int) -> str:
+    """Remove a rule from the allow list by index.
+
+    Args:
+        index: Rule index (0-based, from proxy_tools_status).
+    """
+    res = _api("DELETE", f"/proxy-tools/allow-list/{index}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_allow_list_enable(enable: bool = True) -> str:
+    """Enable or disable the allow list.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"allow_list_enabled": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+# ---------- Map Local / Map Remote ----------
+
+@mcp.tool()
+def proxy_tools_map_local_add(pattern: str, file_path: str, mode: str = "wildcard",
+                              status: int = 0, content_type: str = "") -> str:
+    """Add a Map Local rule: matched requests return a local file instead of forwarding.
+
+    Args:
+        pattern: Pattern to match (host or URL). Wildcards: * matches any, ? matches single char.
+        file_path: Absolute path to the local file to serve.
+        mode: Match mode - "wildcard" (default), "exact", or "regex".
+        status: HTTP status code to return (0 = default 200).
+        content_type: Override Content-Type (empty = infer from file extension).
+    """
+    body = {"pattern": pattern, "mode": mode, "file_path": file_path}
+    if status:
+        body["status"] = status
+    if content_type:
+        body["content_type"] = content_type
+    res = _api("POST", "/proxy-tools/map-local", body)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_map_local_remove(index: int) -> str:
+    """Remove a Map Local rule by index.
+
+    Args:
+        index: Rule index (0-based, from proxy_tools_status).
+    """
+    res = _api("DELETE", f"/proxy-tools/map-local/{index}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_map_local_enable(enable: bool = True) -> str:
+    """Enable or disable Map Local.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"map_local_enabled": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_map_remote_add(pattern: str, target_url: str, mode: str = "wildcard") -> str:
+    """Add a Map Remote rule: redirect matched requests to another remote URL.
+
+    Args:
+        pattern: Pattern to match (host or URL). Wildcards: * matches any, ? matches single char.
+        target_url: Target URL to redirect to (e.g. https://other.example.com/api/v2).
+        mode: Match mode - "wildcard" (default), "exact", or "regex".
+    """
+    res = _api("POST", "/proxy-tools/map-remote", {
+        "pattern": pattern, "mode": mode, "target_url": target_url})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_map_remote_remove(index: int) -> str:
+    """Remove a Map Remote rule by index.
+
+    Args:
+        index: Rule index (0-based, from proxy_tools_status).
+    """
+    res = _api("DELETE", f"/proxy-tools/map-remote/{index}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_map_remote_enable(enable: bool = True) -> str:
+    """Enable or disable Map Remote.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"map_remote_enabled": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+# ---------- Mirror ----------
+
+@mcp.tool()
+def proxy_tools_mirror_add(pattern: str, save_dir: str, mode: str = "wildcard") -> str:
+    """Add a Mirror rule: automatically save matched responses to a local directory.
+
+    Args:
+        pattern: Pattern to match (host or URL). Wildcards: * matches any, ? matches single char.
+        save_dir: Directory path to save response files.
+        mode: Match mode - "wildcard" (default), "exact", or "regex".
+    """
+    res = _api("POST", "/proxy-tools/mirror", {
+        "pattern": pattern, "mode": mode, "save_dir": save_dir})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_mirror_remove(index: int) -> str:
+    """Remove a Mirror rule by index.
+
+    Args:
+        index: Rule index (0-based, from proxy_tools_status).
+    """
+    res = _api("DELETE", f"/proxy-tools/mirror/{index}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def proxy_tools_mirror_enable(enable: bool = True) -> str:
+    """Enable or disable Mirror.
+
+    Args:
+        enable: True to enable, False to disable.
+    """
+    res = _api("PUT", "/proxy-tools", {"mirror_enabled": enable})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
 
 
 @mcp.tool()
 def system_restart_as_admin() -> str:
-    """以管理员身份重启 Telnix（UAC 提权，用于 TCP/UDP 抓包）。
+    """Restart Telnix as administrator (UAC elevation, for TCP/UDP capture).
 
-    会触发 GUI 用户确认流程：后端创建 pending 请求 → 弹原生 Windows 顶层弹窗 →
-    用户同意 → UAC 提权 → 返回 accepted；用户拒绝 → 返回 rejected。
-    最多等待 3 分钟（3 次 60s 长轮询）。
+    Triggers a GUI user confirmation flow: backend creates a pending request -> shows a native Windows topmost dialog ->
+    user agrees -> UAC elevation -> returns accepted; user rejects -> returns rejected.
+    Waits up to 3 minutes (3 rounds of 60s long-polling).
 
-    非 Windows 平台：UAC 是 Windows 专属机制，直接返回"不支持"错误，
-    提示用户用 sudo 手动以 root 身份运行。
+    Non-Windows platforms: UAC is a Windows-only mechanism, returns "not supported" error directly,
+    prompting the user to manually run as root with sudo.
     """
     # 非 Windows 平台：UAC 是 Windows 专属，提前返回错误避免无效请求
     if not sys.platform.startswith("win"):
-        return _error("restart-as-admin 仅 Windows 支持（UAC 提权）",
-                      hint="macOS/Linux 请用 sudo 手动以 root 身份运行 Telnix")
+        return _error("restart-as-admin is supported only on Windows (UAC elevation)",
+                      hint="macOS/Linux: please run Telnix as root manually with sudo")
     res = _api("POST", "/system/request-admin-restart", timeout=10.0)
     data, err = _ok(res)
     if err:
         return _error(err)
     rid = data.get("request_id")
     if not rid:
-        return _error("后端未返回 request_id")
+        return _error("Backend did not return request_id")
     final_status = None
     final_msg = None
     for _ in range(3):
         r = _api("GET", f"/system/admin-request/{rid}/wait", timeout=65.0)
         if r.get("code") != 0:
-            return _error(r.get("msg") or "请求不存在或已处理")
+            return _error(r.get("msg") or "Request does not exist or has been processed")
         d = r.get("data") or {}
         status = d.get("status")
         if status == "accepted":
             final_status = "accepted"
-            final_msg = r.get("msg") or "用户已批准，正在以管理员身份重启"
+            final_msg = r.get("msg") or "User approved, restarting as administrator"
             break
         elif status == "rejected":
             final_status = "rejected"
-            final_msg = r.get("msg") or "用户拒绝了管理员重启请求"
+            final_msg = r.get("msg") or "User rejected the admin restart request"
             break
     if final_status is None:
-        return _error("等待用户响应超时（3 分钟无响应）")
+        return _error("Timed out waiting for user response (no response within 3 minutes)")
     if final_status == "accepted":
         return _result({"restarting": True, "as_admin": True, "approved": True, "message": final_msg})
     return _error(final_msg, rejected_by_user=True,
-                  hint="用户拒绝了管理员重启请求。可在 GUI 中手动重启，或请用户同意后重试")
+                  hint="User rejected the admin restart request. You can restart manually in the GUI, or retry after the user agrees")
 
 
 @mcp.tool()
 def system_windivert_warning_status() -> str:
-    """查询 WinDivert 风险提示状态。
+    """Query WinDivert risk warning status.
 
-    返回:
-      needed: 是否需要提示（仅 Windows 平台 + 未确认时为 true）
-      message: 风险说明文本
-      ack: 当前是否已确认
-      platform: 当前平台
+    Returns:
+      needed: Whether a warning is needed (true only on Windows platform + not yet acknowledged)
+      message: Risk description text
+      ack: Whether currently acknowledged
+      platform: Current platform
 
-    说明：raw_capture_start / transparent_proxy_start / dns_hijack_start 等触发 WinDivert
-    加载的工具会自动处理 ack 流程（首次未确认时弹桌面置顶原生弹窗）。本工具仅供 agent
-    主动查询当前状态（如检查是否已确认、是否在 Windows 平台）。
+    Note: Tools that trigger WinDivert loading such as raw_capture_start / transparent_proxy_start / dns_hijack_start
+    automatically handle the ack flow (show a desktop topmost native dialog on first unacknowledged use).
+    This tool is only for the agent to actively query the current status (e.g. check whether acknowledged,
+    whether on Windows platform).
     """
     res = _api("GET", "/system/windivert-warning")
     data, err = _ok(res)
@@ -1724,13 +1985,14 @@ def system_windivert_warning_status() -> str:
 
 @mcp.tool()
 def system_windivert_warning_ack() -> str:
-    """标记 WinDivert 风险提示为已确认（永久不再提示）。
+    """Mark the WinDivert risk warning as acknowledged (permanently no longer prompted).
 
-    调用后 settings.json 的 windivert_warning_acknowledged 设为 1，
-    后续 raw_capture_start / transparent_proxy_start / dns_hijack_start 不再被拦截。
+    After calling, settings.json's windivert_warning_acknowledged is set to 1,
+    and subsequent raw_capture_start / transparent_proxy_start / dns_hijack_start calls will no longer be blocked.
 
-    注意：通常无需手动调用——上述 start 工具首次调用时会自动触发桌面原生弹窗让用户确认。
-    本工具用于 agent 在用户已通过其他渠道（如读 README）知情后主动跳过弹窗的场景。
+    Note: Usually no need to call manually -- the start tools above will automatically trigger a native desktop
+    dialog on first call for the user to confirm. This tool is for scenarios where the agent wants to skip the
+    dialog after the user has been informed through other channels (e.g. reading the README).
     """
     res = _api("POST", "/system/windivert-warning/ack")
     data, err = _ok(res)
@@ -1745,7 +2007,7 @@ def system_windivert_warning_ack() -> str:
 
 @mcp.tool()
 def sessions_list() -> str:
-    """列出所有会话。"""
+    """List all sessions."""
     res = _api("GET", "/sessions")
     data, err = _ok(res)
     if err:
@@ -1756,10 +2018,10 @@ def sessions_list() -> str:
 
 @mcp.tool()
 def sessions_show(session_id: int) -> str:
-    """查看会话详情。
+    """View session details.
 
     Args:
-        session_id: 会话 ID
+        session_id: Session ID
     """
     res = _api("GET", f"/sessions/{session_id}")
     data, err = _ok(res)
@@ -1770,10 +2032,10 @@ def sessions_show(session_id: int) -> str:
 
 @mcp.tool()
 def sessions_switch(session_id: int) -> str:
-    """切换到指定会话（后续操作默认在此会话）。
+    """Switch to the specified session (subsequent operations default to this session).
 
     Args:
-        session_id: 会话 ID
+        session_id: Session ID
     """
     res = _api("POST", f"/sessions/{session_id}/switch")
     data, err = _ok(res)
@@ -1784,10 +2046,10 @@ def sessions_switch(session_id: int) -> str:
 
 @mcp.tool()
 def sessions_delete(session_id: int) -> str:
-    """删除会话。
+    """Delete a session.
 
     Args:
-        session_id: 会话 ID
+        session_id: Session ID
     """
     res = _api("DELETE", f"/sessions/{session_id}")
     data, err = _ok(res)
@@ -1797,14 +2059,42 @@ def sessions_delete(session_id: int) -> str:
 
 
 @mcp.tool()
-def sessions_create(name: str = "") -> str:
-    """创建新会话并切换为活动会话。
+def sessions_create(name: str = "", color: str = "") -> str:
+    """Create a new session and switch to it as the active session.
 
     Args:
-        name: 会话名称（可选）
+        name: Session name (optional)
+        color: Session color in hex format (e.g. "#FF5733")
     """
-    body = {"name": name} if name else {}
-    res = _api("POST", "/sessions", body)
+    body = {}
+    if name:
+        body["name"] = name
+    if color:
+        body["color"] = color
+    res = _api("POST", "/sessions", body if body else None)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def sessions_update(session_id: int, name: str = "", color: str = "") -> str:
+    """Update session name and/or color.
+
+    Args:
+        session_id: Session ID
+        name: New session name (optional)
+        color: New session color hex (optional, e.g. "#FF5733")
+    """
+    body = {}
+    if name:
+        body["name"] = name
+    if color:
+        body["color"] = color
+    if not body:
+        return _error("name or color required")
+    res = _api("PATCH", f"/sessions/{session_id}", body)
     data, err = _ok(res)
     if err:
         return _error(err)
@@ -1825,14 +2115,14 @@ def _agent_backup_path() -> str:
 
 @mcp.tool()
 def agent_start() -> str:
-    """开启 agent 工作区：保存当前状态（规则/专注/断点）→ 禁用规则 → 关闭专注/断点 →
-    把 agent 进程加入忽略列表。
+    """Start agent workspace: save current state (rules/focus/breakpoint) -> disable rules -> turn off focus/breakpoint ->
+    add agent processes to the ignore list.
 
-    完成工作后必须调 agent_end 恢复原状。重复 start 会报错（避免覆盖未恢复的备份）。
+    After finishing work, you must call agent_end to restore the original state. Repeated start will fail (to avoid overwriting unrestored backups).
     """
     backup_path = _agent_backup_path()
     if os.path.exists(backup_path):
-        return _error("已有未恢复的 agent 工作区备份，请先调用 agent_end 恢复后再 agent_start")
+        return _error("An unrestored agent workspace backup exists. Please call agent_end to restore it before calling agent_start again")
 
     res = _api("GET", "/snapshot")
     snapshot, err = _ok(res)
@@ -1861,7 +2151,7 @@ def agent_start() -> str:
         with open(backup_path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
     except OSError as e:
-        return _error(f"保存备份失败: {e}")
+        return _error(f"Failed to save backup: {e}")
 
     rules = snapshot.get("rules", []) or []
     rule_ids = [r.get("id") for r in rules if isinstance(r, dict) and r.get("id")]
@@ -1880,25 +2170,25 @@ def agent_start() -> str:
         "agent_workspace": "started", "backup_path": backup_path,
         "rules_disabled": rules_disabled, "focus_cleared": True, "breakpoint_cleared": True,
         "ignored_processes_added": agent_added,
-        "hint": "工作区已清空。完成工作后请调 agent_end 恢复原状。",
+        "hint": "Workspace cleared. After finishing work, call agent_end to restore the original state.",
     })
 
 
 @mcp.tool()
 def agent_end() -> str:
-    """恢复 agent_start 之前保存的状态（规则/专注/断点/忽略列表）。
+    """Restore the state saved before agent_start (rules/focus/breakpoint/ignore list).
 
-    注意：自动修改规则需要 Telnix 运行才生效，因此系统代理未关闭、Telnix 未退出。
-    请询问用户是否关闭 Telnix；用户同意后再调 system_quit。
+    Note: Auto-modify rules require Telnix to be running to take effect, so the system proxy is not closed and Telnix is not exited.
+    Please ask the user whether to close Telnix; only call system_quit after the user agrees.
     """
     backup_path = _agent_backup_path()
     if not os.path.exists(backup_path):
-        return _error("没有未恢复的 agent 工作区备份（可能已 agent_end 或从未 agent_start）")
+        return _error("No unrestored agent workspace backup (may have already called agent_end or never called agent_start)")
     try:
         with open(backup_path, "r", encoding="utf-8") as f:
             snapshot = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        return _error(f"读取备份失败: {e}")
+        return _error(f"Failed to read backup: {e}")
 
     restore_body = {
         "rules": snapshot.get("rules", []) or [],
@@ -1940,17 +2230,17 @@ def agent_end() -> str:
         "focus_set": result.get("focus_set", False) if isinstance(result, dict) else False,
         "breakpoint_set": result.get("breakpoint_set", False) if isinstance(result, dict) else False,
         "ignored_processes_removed": ignored_removed,
-        "hint": "工作区已恢复。请询问用户是否关闭 Telnix；用户同意后调 system_quit。",
+        "hint": "Workspace restored. Please ask the user whether to close Telnix; call system_quit after the user agrees.",
     })
 
 
 @mcp.tool()
 def agent_status() -> str:
-    """查看 agent 工作区状态。"""
+    """View agent workspace status."""
     backup_path = _agent_backup_path()
     if not os.path.exists(backup_path):
         return _result({"agent_workspace": "inactive",
-                        "hint": "没有活跃的 agent 工作区（可调 agent_start 开始）"})
+                        "hint": "No active agent workspace (call agent_start to begin)"})
     try:
         with open(backup_path, "r", encoding="utf-8") as f:
             snapshot = json.load(f)
@@ -1960,10 +2250,10 @@ def agent_status() -> str:
             "focus_was_enabled": bool((snapshot.get("focus") or {}).get("enabled")),
             "break_on_request_was_on": bool((snapshot.get("breakpoint") or {}).get("break_on_request")),
             "break_on_response_was_on": bool((snapshot.get("breakpoint") or {}).get("break_on_response")),
-            "hint": "工作区已清空，调 agent_end 恢复。",
+            "hint": "Workspace cleared, call agent_end to restore.",
         })
     except (OSError, json.JSONDecodeError) as e:
-        return _error(f"备份文件损坏: {e}")
+        return _error(f"Backup file corrupted: {e}")
 
 
 # ======================================================================
@@ -1972,12 +2262,12 @@ def agent_status() -> str:
 
 @mcp.tool()
 def log_tail(limit: int = 100, level: str = "", category: str = "") -> str:
-    """查看最近日志。
+    """View recent logs.
 
     Args:
-        limit: 返回条数
-        level: 日志级别过滤（DEBUG/INFO/WARN/ERROR）
-        category: 日志分类过滤
+        limit: Number of entries to return
+        level: Log level filter (DEBUG/INFO/WARN/ERROR)
+        category: Log category filter
     """
     params = f"?limit={limit}&level={level}&category={category}"
     res = _api("GET", f"/logs{params}")
@@ -1990,7 +2280,7 @@ def log_tail(limit: int = 100, level: str = "", category: str = "") -> str:
 
 @mcp.tool()
 def log_clear() -> str:
-    """清空所有日志。"""
+    """Clear all logs."""
     res = _api("DELETE", "/logs")
     _, err = _ok(res)
     if err:
@@ -2000,12 +2290,12 @@ def log_clear() -> str:
 
 @mcp.tool()
 def log_export(level: str = "", category: str = "", keyword: str = "") -> str:
-    """导出日志为 JSONL 文本（直接返回内容，不写文件）。
+    """Export logs as JSONL text (returns content directly, does not write a file).
 
     Args:
-        level: 日志级别过滤
-        category: 日志分类过滤
-        keyword: 关键词过滤
+        level: Log level filter
+        category: Log category filter
+        keyword: Keyword filter
     """
     params = []
     if level:
@@ -2016,16 +2306,16 @@ def log_export(level: str = "", category: str = "", keyword: str = "") -> str:
         params.append(f"keyword={urllib.parse.quote(keyword)}")
     qs = "&".join(params)
     url = f"{BASE_URL}/api/logs/export" + (f"?{qs}" if qs else "")
-    req = urllib.request.Request(url, headers={"Accept": "application/x-jsonlines"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            content = resp.read().decode("utf-8", errors="replace")
+        with httpx.Client(timeout=httpx.Timeout(30.0), trust_env=False) as client:
+            resp = client.get(url, headers={"Accept": "application/x-jsonlines"})
+            content = resp.text
     except Exception as e:  # noqa: BLE001
-        return _error(f"导出日志失败: {e}")
+        return _error(f"Failed to export logs: {e}")
     # 截断
     if len(content.encode("utf-8")) > MAX_OUTPUT_BYTES:
         cut = int(MAX_OUTPUT_BYTES * 0.9)
-        content = content[:cut] + f"\n... [已截断，原始 {len(content)} 字符]"
+        content = content[:cut] + f"\n... [truncated, original {len(content)} chars]"
     return content
 
 
@@ -2035,7 +2325,7 @@ def log_export(level: str = "", category: str = "", keyword: str = "") -> str:
 
 @mcp.tool()
 def cert_remove() -> str:
-    """移除已安装的 HTTPS 根证书。"""
+    """Remove the installed HTTPS root certificate."""
     res = _api("POST", "/cert/remove", timeout=60)
     data, err = _ok(res)
     if err:
@@ -2049,10 +2339,10 @@ def cert_remove() -> str:
 
 @mcp.tool()
 def breakpoint_timeout(seconds: int) -> str:
-    """设置断点自动放行超时（N 秒未放行自动 release）。
+    """Set breakpoint auto-release timeout (auto-release after N seconds without pass-through).
 
     Args:
-        seconds: 超时秒数（0=禁用自动超时）
+        seconds: Timeout seconds (0=disable auto timeout)
     """
     res = _api("POST", "/breakpoint/timeout", {"timeout": seconds})
     data, err = _ok(res)
@@ -2066,7 +2356,7 @@ def breakpoint_timeout(seconds: int) -> str:
 # ======================================================================
 
 def _path_template(path: str, keep_query: bool = False) -> tuple[str, list[str]]:
-    """path 模板归一化：把数字、UUID、长 hex 段替换为 {id}。"""
+    """Path template normalization: replace numbers, UUIDs, long hex segments with {id}."""
     if not path:
         return "/", []
     raw_path, _, query_str = path.partition("?")
@@ -2099,7 +2389,7 @@ def _path_template(path: str, keep_query: bool = False) -> tuple[str, list[str]]
 
 
 def _percentiles(values: list) -> dict:
-    """计算 p50/p95/max/min。"""
+    """Compute p50/p95/max/min."""
     if not values:
         return {"p50": 0, "p95": 0, "max": 0, "min": 0, "count": 0}
     s = sorted(values)
@@ -2109,7 +2399,7 @@ def _percentiles(values: list) -> dict:
 
 
 def _walk_json_leaves(obj, prefix: str = ""):
-    """递归遍历 JSON，输出 (path, leaf_value)。"""
+    """Recursively traverse JSON, yielding (path, leaf_value)."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             p = f"{prefix}.{k}" if prefix else str(k)
@@ -2122,7 +2412,7 @@ def _walk_json_leaves(obj, prefix: str = ""):
 
 
 def _classify_charset(s: str) -> str:
-    """分类字符串字符集（用于签名字段检测）。"""
+    """Classify string charset (for signature field detection)."""
     if not s:
         return "empty"
     if re.match(r"^\d+$", s):
@@ -2139,7 +2429,7 @@ def _classify_charset(s: str) -> str:
 
 
 def _extract_trace_values(body: str, min_length: int = 4) -> list[dict]:
-    """从响应 body 提取可追踪字符串值。"""
+    """Extract traceable string values from response body."""
     out = []
     seen = set()
     if not body or body.startswith("base64:"):
@@ -2167,7 +2457,7 @@ def _extract_trace_values(body: str, min_length: int = 4) -> list[dict]:
 
 
 def _fetch_flows_for_analysis(session: int = 0, limit: int = 2000, host: str = "") -> tuple[list[dict], Optional[str]]:
-    """拉取流量用于分析（endpoints/timeline/stats 公共逻辑）。"""
+    """Fetch flows for analysis (shared logic for endpoints/timeline/stats)."""
     if limit == 0:
         limit = 50000
     if session:
@@ -2192,11 +2482,11 @@ def _fetch_flows_for_analysis(session: int = 0, limit: int = 2000, host: str = "
 
 @mcp.tool()
 def packets_export(flow_id: int, fmt: str = "json") -> str:
-    """导出单个流量为指定格式。
+    """Export a single flow to the specified format.
 
     Args:
-        flow_id: 流量 ID
-        fmt: 格式 curl|python-requests|postman|json|csv
+        flow_id: Flow ID
+        fmt: Format curl|python-requests|postman|json|csv
     """
     res = _api("GET", f"/flows/{flow_id}")
     flow, err = _ok(res)
@@ -2226,7 +2516,12 @@ def packets_export(flow_id: int, fmt: str = "json") -> str:
 
 
 def _build_curl(flow: dict) -> str:
-    """构建 curl 命令。"""
+    """Build a curl command.
+
+    安全：URL/Header/Body 均经 shlex.quote 转义，防止用户复制执行导出的 curl
+    命令时，因抓包数据中含引号/反引号/分号/$() 等 shell 元字符而触发命令注入
+    （与 api/export.py 的 _build_curl 实现保持一致）。
+    """
     method = flow.get("method", "GET")
     url = flow.get("url") or flow.get("request_url") or ""
     headers = _parse_headers(flow.get("request_headers") or "")
@@ -2234,25 +2529,27 @@ def _build_curl(flow: dict) -> str:
         if k.lower() in ("host", "content-length", "connection"):
             del headers[k]
     body = flow.get("request_body") or ""
-    parts = ["curl", "-X", method]
+    if body and body.startswith("base64:"):
+        # 二进制 body：echo + base64 -d 管道，避免内联原始字节
+        b64 = body[7:]
+        prefix = f'echo {shlex.quote(b64)} | base64 -d | '
+        parts = ["curl", "-X", shlex.quote(method)]
+        for k, v in headers.items():
+            parts += ["-H", shlex.quote(f'{k}: {v}')]
+        parts += ["--data-binary", "@-"]
+        parts.append(shlex.quote(url))
+        return prefix + " ".join(parts)
+    parts = ["curl", "-X", shlex.quote(method)]
     for k, v in headers.items():
-        parts += ["-H", f'"{k}: {v}"']
+        parts += ["-H", shlex.quote(f'{k}: {v}')]
     if body:
-        if body.startswith("base64:"):
-            import base64
-            try:
-                raw = base64.b64decode(body[7:])
-                parts += ["--data-binary", f'@<(echo {raw!r})']
-            except Exception:  # noqa: BLE001
-                parts += ["--data", body]
-        else:
-            parts += ["--data", body]
-    parts.append(f'"{url}"')
+        parts += ["--data", shlex.quote(body)]
+    parts.append(shlex.quote(url))
     return " ".join(parts)
 
 
 def _flow_to_python_requests(flow: dict) -> str:
-    """转 python-requests 脚本。"""
+    """Convert to python-requests script."""
     method = flow.get("method", "GET")
     url = flow.get("url") or ""
     headers = _parse_headers(flow.get("request_headers") or "")
@@ -2282,7 +2579,7 @@ def _flow_to_python_requests(flow: dict) -> str:
 
 
 def _flow_to_postman(flow: dict) -> dict:
-    """转 Postman Collection v2.1 单 item。"""
+    """Convert to Postman Collection v2.1 single item."""
     method = flow.get("method", "GET")
     url = flow.get("url") or ""
     headers = _parse_headers(flow.get("request_headers") or "")
@@ -2313,16 +2610,16 @@ def packets_tag(
     clear_note: bool = False,
     list_all: bool = False,
 ) -> str:
-    """流量标签管理。
+    """Flow tag management.
 
     Args:
-        flow_id: 流量 ID（list_all=true 时可省略）
-        add: 添加标签
-        remove: 移除标签
-        clear: 清空所有标签
-        note: 设置备注
-        clear_note: 清除备注
-        list_all: 列出全局所有标签及每标签的 flow 数
+        flow_id: Flow ID (can be omitted when list_all=true)
+        add: Add a tag
+        remove: Remove a tag
+        clear: Clear all tags
+        note: Set a note
+        clear_note: Clear the note
+        list_all: List all global tags and the flow count per tag
     """
     if list_all:
         res = _api("GET", "/flows/tags")
@@ -2332,13 +2629,13 @@ def packets_tag(
         tags = data.get("tags", []) if isinstance(data, dict) else data
         return _result(tags)
     if not flow_id:
-        return _error("需要 flow_id 或 list_all=true")
+        return _error("flow_id or list_all=true required")
     res = _api("GET", f"/flows/{flow_id}")
     flow, err = _ok(res)
     if err:
         return _error(err)
     if not isinstance(flow, dict):
-        return _error("无法获取 flow")
+        return _error("Cannot fetch flow")
     existing_tags = [t.strip() for t in (flow.get("tags") or "").split(",") if t.strip()]
     if clear:
         new_tags = []
@@ -2367,12 +2664,12 @@ def packets_tag(
 
 @mcp.tool()
 def packets_diff(flow_id1: int, flow_id2: int, field: str = "response_body") -> str:
-    """对比两条流量的指定字段，输出 unified diff。
+    """Compare a specified field of two flows, output unified diff.
 
     Args:
-        flow_id1: 第一条流量 ID
-        flow_id2: 第二条流量 ID
-        field: 对比字段 response_body|request_body|request_headers|response_headers
+        flow_id1: First flow ID
+        flow_id2: Second flow ID
+        field: Field to compare response_body|request_body|request_headers|response_headers
     """
     import difflib
     res1 = _api("GET", f"/flows/{flow_id1}")
@@ -2412,14 +2709,14 @@ def packets_endpoints(
     keep_query: bool = False,
     sample_strategy: str = "first",
 ) -> str:
-    """唯一 endpoint 提取（path 模板归一化，画 API 地图）。
+    """Unique endpoint extraction (path template normalization, draws an API map).
 
     Args:
-        session: 会话 ID（0=跨会话）
-        limit: 拉取流量上限（0=不限）
-        host: 按主机过滤
-        keep_query: 保留 query 参数名
-        sample_strategy: 采样策略 first|last|random
+        session: Session ID (0=cross-session)
+        limit: Max flows to fetch (0=no limit)
+        host: Filter by host
+        keep_query: Keep query parameter names
+        sample_strategy: Sampling strategy first|last|random
     """
     flows, err = _fetch_flows_for_analysis(session, limit, host)
     if err:
@@ -2464,13 +2761,13 @@ def packets_timeline(
     host: str = "",
     gap_seconds: float = 1.0,
 ) -> str:
-    """流量时间线（按时间排序，标注大间隔段落）。
+    """Flow timeline (sorted by time, marking large-gap segments).
 
     Args:
-        session: 会话 ID（0=跨会话）
-        limit: 拉取流量上限
-        host: 按主机过滤
-        gap_seconds: 大间隔阈值（秒），超过此值算新段落
+        session: Session ID (0=cross-session)
+        limit: Max flows to fetch
+        host: Filter by host
+        gap_seconds: Large gap threshold (seconds); gaps exceeding this start a new segment
     """
     flows, err = _fetch_flows_for_analysis(session, limit, host)
     if err:
@@ -2510,24 +2807,24 @@ def packets_trace(
     limit: int = 500,
     search_all: bool = False,
 ) -> str:
-    """请求依赖链 trace：从指定 flow 的响应提取字符串值，在后续流量的请求里搜索。
+    """Request dependency chain trace: extract string values from the specified flow's response, search within subsequent flows' requests.
 
     Args:
-        flow_id: 源流量 ID
-        min_length: 最小字符串长度（过滤短串减少误报）
-        limit: 拉取后续流量上限
-        search_all: true=跨会话扫描, false=仅当前会话
+        flow_id: Source flow ID
+        min_length: Minimum string length (filters short strings to reduce false positives)
+        limit: Max subsequent flows to fetch
+        search_all: true=scan across sessions, false=current session only
     """
     res = _api("GET", f"/flows/{flow_id}")
     src, err = _ok(res)
     if err:
         return _error(err)
     if not isinstance(src, dict):
-        return _error("无法获取源 flow")
+        return _error("Cannot fetch source flow")
     values = _extract_trace_values(src.get("response_body") or "", min_length=min_length)
     if not values:
         return _result({"traced": True, "source_flow": flow_id, "dependencies": [],
-                        "hint": "源 flow 响应无可追踪字符串"})
+                        "hint": "Source flow response has no traceable strings"})
     if search_all:
         res = _api("GET", f"/flows/all?limit={limit}&offset=0&since_id={flow_id}", timeout=60)
     else:
@@ -2566,17 +2863,17 @@ def packets_analyze(
     search_all: bool = False,
     limit: int = 500,
 ) -> str:
-    """签名字段自动检测：对比多条同接口请求的 JSON body，找可疑签名/token 字段。
+    """Signature field auto-detection: compare JSON bodies of multiple requests to the same API to find suspicious signature/token fields.
 
     Args:
-        flow_ids: 流量 ID 列表，逗号分隔（至少 2 条；search_all 时至少 1 条作为源）
-        search_all: true=以第一个 ID 为源，从 /flows/all 拉后续流量
-        limit: search_all 模式下拉取流量上限
+        flow_ids: Flow ID list, comma-separated (at least 2; for search_all at least 1 as the source)
+        search_all: true=use the first ID as source, pull subsequent flows from /flows/all
+        limit: Max flows to fetch in search_all mode
     """
     ids = [int(x.strip()) for x in flow_ids.split(",") if x.strip()] if flow_ids else []
     if search_all:
         if not ids:
-            return _error("analyze search_all 至少需要 1 个源 flow ID")
+            return _error("analyze search_all requires at least 1 source flow ID")
         src_id = ids[0]
         res = _api("GET", f"/flows/all?limit={limit}&offset=0&since_id={src_id}", timeout=60)
         data, err = _ok(res)
@@ -2590,7 +2887,7 @@ def packets_analyze(
             flows = [src_flow] + [f for f in flows if f.get("id") != src_id]
     else:
         if len(ids) < 2:
-            return _error("analyze 至少需要 2 个 flow ID（或用 search_all=true）")
+            return _error("analyze requires at least 2 flow IDs (or use search_all=true)")
         flows = []
         for fid in ids:
             res = _api("GET", f"/flows/{fid}")
@@ -2598,7 +2895,7 @@ def packets_analyze(
             if isinstance(flow, dict):
                 flows.append(flow)
     if len(flows) < 2:
-        return _error("成功拉取的 flow 不足 2 条，无法对比")
+        return _error("Fewer than 2 flows fetched successfully, cannot compare")
 
     field_values: dict[str, list] = {}
     for f in flows:
@@ -2647,15 +2944,15 @@ def intercept_update(
     enable: bool = False,
     disable: bool = False,
 ) -> str:
-    """修改现有规则（不删除重建）。
+    """Modify an existing rule (without delete and recreate).
 
     Args:
-        rule_id: 规则 ID
-        match: 新的匹配表达式（空=不改）
-        action: 新的动作规范（空=不改）
-        note: 新备注（空=不改）
-        enable: 启用规则
-        disable: 禁用规则
+        rule_id: Rule ID
+        match: New match expression (empty=do not change)
+        action: New action spec (empty=do not change)
+        note: New note (empty=do not change)
+        enable: Enable the rule
+        disable: Disable the rule
     """
     res = _api("GET", "/auto-reply/rules")
     rules, err = _ok(res)
@@ -2668,7 +2965,7 @@ def intercept_update(
             target = r
             break
     if not target:
-        return _error(f"规则不存在: {rule_id}")
+        return _error(f"Rule does not exist: {rule_id}")
     body = dict(target)
     body.pop("id", None)
     updated_fields = []
@@ -2714,7 +3011,7 @@ def intercept_update(
 
 @mcp.tool()
 def intercept_export() -> str:
-    """导出所有规则为 JSON（直接返回内容，不写文件）。"""
+    """Export all rules as JSON (returns content directly, does not write a file)."""
     res = _api("GET", "/auto-reply/rules")
     rules, err = _ok(res)
     if err:
@@ -2730,19 +3027,19 @@ def intercept_import(
     rules_json: str,
     mode: str = "merge",
 ) -> str:
-    """从 JSON 字符串导入规则。
+    """Import rules from a JSON string.
 
     Args:
-        rules_json: JSON 字符串，格式 {"rules": [...]} 或 [...]（直接用 intercept_export 的输出）
-        mode: merge=追加, replace=先清空再导入
+        rules_json: JSON string, format {"rules": [...]} or [...] (use the output of intercept_export directly)
+        mode: merge=append, replace=clear first then import
     """
     try:
         data = json.loads(rules_json)
     except json.JSONDecodeError as e:
-        return _error(f"JSON 解析失败: {e}")
+        return _error(f"JSON parse failed: {e}")
     rules = data.get("rules") if isinstance(data, dict) else data
     if not isinstance(rules, list):
-        return _error("JSON 格式错误：缺少 rules 数组")
+        return _error("Invalid JSON format: missing rules array")
     deleted = 0
     if mode == "replace":
         res = _api("GET", "/auto-reply/rules")
@@ -2756,7 +3053,7 @@ def intercept_import(
     results = []
     for idx, r in enumerate(rules):
         if not isinstance(r, dict):
-            results.append({"index": idx, "ok": False, "error": "非对象"})
+            results.append({"index": idx, "ok": False, "error": "not an object"})
             continue
         body = {k: v for k, v in r.items() if k != "id"}
         body["enabled"] = r.get("enabled", True)
@@ -2765,7 +3062,7 @@ def intercept_import(
             created += 1
             results.append({"index": idx, "ok": True, "pattern": body.get("pattern", "")})
         else:
-            results.append({"index": idx, "ok": False, "error": res.get("msg", "API失败"),
+            results.append({"index": idx, "ok": False, "error": res.get("msg", "API failed"),
                             "pattern": body.get("pattern", "")})
     return _result({"imported": True, "mode": mode, "created": created, "deleted_old": deleted,
                     "failed": len(rules) - created, "total_in_file": len(rules), "results": results})
@@ -2773,7 +3070,7 @@ def intercept_import(
 
 @mcp.tool()
 def intercept_template_list() -> str:
-    """列出所有内置规则模板。"""
+    """List all built-in rule templates."""
     res = _api("GET", "/templates")
     data, err = _ok(res)
     if err:
@@ -2792,17 +3089,17 @@ def intercept_template_apply(
     pid_filter: str = "",
     process_filter: str = "",
 ) -> str:
-    """应用规则模板创建规则。
+    """Apply a rule template to create a rule.
 
     Args:
-        name: 模板名称
-        match: 匹配表达式
-        note: 备注
-        disabled: true=创建为禁用状态
-        method_filter: 方法过滤
-        status_filter: 状态码过滤
-        pid_filter: PID 过滤
-        process_filter: 进程名过滤
+        name: Template name
+        match: Match expression
+        note: Note
+        disabled: true=create in disabled state
+        method_filter: Method filter
+        status_filter: Status code filter
+        pid_filter: PID filter
+        process_filter: Process name filter
     """
     body: dict = {"pattern": match, "match_mode": "wildcard",
                   "note": note, "enabled": not disabled}
@@ -2828,13 +3125,13 @@ def processes_list(
     tree: bool = False,
     include_listen: bool = False,
 ) -> str:
-    """列出有网络连接的进程。
+    """List processes with network connections.
 
     Args:
-        name: 按名称模糊过滤
-        with_connections: 包含连接快照
-        tree: 进程树模式
-        include_listen: 包含监听端口
+        name: Filter by name (fuzzy)
+        with_connections: Include connection snapshot
+        tree: Process tree mode
+        include_listen: Include listening ports
     """
     params = {}
     if with_connections:
@@ -2864,14 +3161,14 @@ def processes_list(
 
 @mcp.tool()
 def processes_ignore(pid: int = 0, name: str = "") -> str:
-    """添加忽略进程（不抓该进程的流量）。
+    """Add an ignored process (do not capture this process's traffic).
 
     Args:
-        pid: 进程 PID（与 name 二选一或都填）
-        name: 进程名（如 chrome.exe）
+        pid: Process PID (choose one of pid/name, or fill both)
+        name: Process name (e.g. chrome.exe)
     """
     if not pid and not name:
-        return _error("需要 pid 或 name 参数")
+        return _error("pid or name parameter required")
     body = {"pid": pid if pid else None, "name": name}
     res = _api("POST", "/processes/ignore", body)
     data, err = _ok(res)
@@ -2882,10 +3179,10 @@ def processes_ignore(pid: int = 0, name: str = "") -> str:
 
 @mcp.tool()
 def processes_unignore(row_id: int) -> str:
-    """取消忽略进程。
+    """Unignore a process.
 
     Args:
-        row_id: 忽略列表中的行 ID
+        row_id: Row ID in the ignore list
     """
     res = _api("DELETE", f"/processes/ignore/{row_id}")
     data, err = _ok(res)
@@ -2896,7 +3193,7 @@ def processes_unignore(row_id: int) -> str:
 
 @mcp.tool()
 def processes_ignored_list() -> str:
-    """列出已忽略的进程。"""
+    """List ignored processes."""
     res = _api("GET", "/processes/ignored")
     data, err = _ok(res)
     if err:
@@ -2907,10 +3204,10 @@ def processes_ignored_list() -> str:
 
 @mcp.tool()
 def processes_ignore_host(host: str) -> str:
-    """添加忽略 host 通配符（如 *.example.com）。
+    """Add an ignored host wildcard (e.g. *.example.com).
 
     Args:
-        host: host 通配符
+        host: Host wildcard
     """
     res = _api("POST", "/processes/ignore-host", {"host": host})
     data, err = _ok(res)
@@ -2921,10 +3218,10 @@ def processes_ignore_host(host: str) -> str:
 
 @mcp.tool()
 def processes_unignore_host(row_id: int) -> str:
-    """取消忽略 host。
+    """Unignore a host.
 
     Args:
-        row_id: 忽略 host 列表中的行 ID
+        row_id: Row ID in the ignored host list
     """
     res = _api("DELETE", f"/processes/ignore-host/{row_id}")
     data, err = _ok(res)
@@ -2935,7 +3232,7 @@ def processes_unignore_host(row_id: int) -> str:
 
 @mcp.tool()
 def processes_ignored_hosts_list() -> str:
-    """列出已忽略的 host。"""
+    """List ignored hosts."""
     res = _api("GET", "/processes/ignored-hosts")
     data, err = _ok(res)
     if err:
@@ -2953,11 +3250,11 @@ def session_export(
     session: int = 0,
     fmt: str = "har",
 ) -> str:
-    """导出会话为指定格式（直接返回内容，不写文件）。
+    """Export a session to the specified format (returns content directly, does not write a file).
 
     Args:
-        session: 会话 ID（0=当前活动会话）
-        fmt: 格式 har|json|csv|python-requests|postman|curl
+        session: Session ID (0=current active session)
+        fmt: Format har|json|csv|python-requests|postman|curl|pcap
     """
     sid, err = _get_session_id(session)
     if err:
@@ -2967,12 +3264,129 @@ def session_export(
     if err:
         return _error(err)
     content = data.get("content") if isinstance(data, dict) else data
+    # pcap 格式：后端返回 base64 编码的二进制，MCP 直接返回 base64 字符串
+    if fmt == "pcap" and isinstance(content, str):
+        return f"[base64-encoded pcap data, {len(content)} chars]\n{content}"
     if isinstance(content, str):
         if len(content.encode("utf-8")) > MAX_OUTPUT_BYTES:
             cut = int(MAX_OUTPUT_BYTES * 0.9)
-            content = content[:cut] + f"\n... [已截断，原始 {len(content)} 字符]"
+            content = content[:cut] + f"\n... [truncated, original {len(content)} chars]"
         return content
     return _to_text(content)
+
+
+# ======================================================================
+# 工具集：触发式捕获 / 热力图 / 拓扑图 / 时序回放
+# ======================================================================
+
+@mcp.tool()
+def trigger_capture_set(dsl: str = "") -> str:
+    """Configure trigger capture conditions. Only flows matching conditions will be recorded.
+
+    Args:
+        dsl: Trigger condition DSL, e.g. 'host=example.com & status>=500'.
+             Supported fields: host/method/status/status>=N/path/process/url/protocol.
+             Joined by & or AND (all must match). Empty string disables trigger capture.
+
+    Once triggered (a matching flow appears), all subsequent flows are recorded.
+    """
+    res = _api("PUT", "/capture/trigger", {"dsl": dsl})
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def trigger_capture_get() -> str:
+    """Get current trigger capture state (enabled/triggered/conditions)."""
+    res = _api("GET", "/capture/trigger")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def trigger_capture_reset() -> str:
+    """Reset trigger state (clears the 'triggered' flag, keeps conditions).
+
+    Use this to re-arm the trigger after it has fired.
+    """
+    res = _api("POST", "/capture/trigger/reset")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def flows_heatmap(
+    group_by: str = "host",
+    bucket_seconds: int = 60,
+    max_buckets: int = 120,
+    top_n: int = 20,
+    host: str = "",
+    process: str = "",
+) -> str:
+    """2D traffic heatmap aggregation (time bucket x dimension).
+
+    Args:
+        group_by: Dimension to group by: host|process|method|status_range|ip_region
+        bucket_seconds: Time bucket size in seconds (default 60)
+        max_buckets: Max time buckets to return, newest first (default 120)
+        top_n: Top N dimensions by total count (default 20)
+        host: Filter by host (fuzzy match, optional)
+        process: Filter by process (fuzzy match, optional)
+
+    Returns buckets (time axis labels), dimensions (top N), and a matrix where
+    matrix[dim_idx][bucket_idx] = count. Useful for spotting traffic anomalies
+    across time and dimensions.
+    """
+    params: dict = {
+        "group_by": group_by,
+        "bucket_seconds": bucket_seconds,
+        "max_buckets": max_buckets,
+        "top_n": top_n,
+    }
+    if host:
+        params["host"] = host
+    if process:
+        params["process"] = process
+    res = _api("GET", "/flows/heatmap", params)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
+
+
+@mcp.tool()
+def flows_topology(
+    host: str = "",
+    process: str = "",
+    max_nodes: int = 100,
+) -> str:
+    """Network topology: process -> remote IP -> host connection graph.
+
+    Args:
+        host: Filter by host (fuzzy match, optional)
+        process: Filter by process (fuzzy match, optional)
+        max_nodes: Max nodes to return (default 100)
+
+    Returns nodes (id/label/type/count, type=process|ip|host) and edges
+    (source/target/count/size). Useful for security audit: discover which
+    processes connect to which external servers.
+    """
+    params: dict = {"max_nodes": max_nodes}
+    if host:
+        params["host"] = host
+    if process:
+        params["process"] = process
+    res = _api("GET", "/flows/topology", params)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data)
 
 
 # ======================================================================
@@ -2981,12 +3395,12 @@ def session_export(
 
 @mcp.tool()
 def transparent_proxy_status() -> str:
-    """查看透明代理状态（运行中/已重定向包数/NAT 表大小/错误）。
+    """View transparent proxy status (running/redirected packet count/NAT table size/errors).
 
-    透明代理用 WinDivert NETWORK 层重定向出站 HTTP(80)/HTTPS(443) 流量到本地代理，
-    应用无需配置代理即可被抓包。返回字段：
-    running（是否运行中）、redirected_count（已重定向包数）、nat_table_size（NAT 表大小）、
-    last_error（最近错误）、supported（平台是否支持）。
+    The transparent proxy uses the WinDivert NETWORK layer to redirect outbound HTTP(80)/HTTPS(443) traffic
+    to a local proxy, so applications can be captured without configuring a proxy. Returns fields:
+    running (whether running), redirected_count (redirected packet count), nat_table_size (NAT table size),
+    last_error (most recent error), supported (whether the platform supports it).
     """
     res = _api("GET", "/transparent-proxy/status")
     data, err = _ok(res)
@@ -2994,37 +3408,37 @@ def transparent_proxy_status() -> str:
         return _error(err)
     if isinstance(data, dict):
         if not data.get("supported"):
-            data["hint"] = "透明代理仅 Windows 可用（依赖 WinDivert）"
+            data["hint"] = "Transparent proxy is available only on Windows (depends on WinDivert)"
         elif not data.get("running") and data.get("last_error"):
             le = data.get("last_error", "")
-            if "管理员" in le or "admin" in le.lower():
-                data["hint"] = "需要管理员权限。调用 system_restart_as_admin 以管理员身份重启后端"
+            if "admin" in le.lower():
+                data["hint"] = "Administrator privilege required. Call system_restart_as_admin to restart the backend as administrator"
     return _result(data)
 
 
 @mcp.tool()
 def transparent_proxy_start() -> str:
-    """启动透明代理（WinDivert NETWORK 层重定向，需管理员权限）。
+    """Start transparent proxy (WinDivert NETWORK layer redirection, requires administrator privilege).
 
-    将出站 HTTP(80)/HTTPS(443) 流量重定向到本地代理端口，应用无需配置代理即可被抓包。
-    需要 Windows + 管理员权限 + pydivert。
-    失败时返回明确错误（如未提权会提示调用 system_restart_as_admin）。
-    首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗。
+    Redirects outbound HTTP(80)/HTTPS(443) traffic to a local proxy port, so applications can be captured without configuring a proxy.
+    Requires Windows + administrator privilege + pydivert.
+    On failure, returns a clear error (e.g. if not elevated, it will prompt to call system_restart_as_admin).
+    On first use without WinDivert risk acknowledgement, automatically triggers a desktop topmost native dialog.
     """
     # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
     res = _api_with_windivert_ack("POST", "/transparent-proxy/start")
     data, err = _ok(res)
     if err:
-        if "管理员" in err or "admin" in err.lower():
+        if "admin" in err.lower():
             return _error(err,
-                          hint="需要管理员权限。调用 system_restart_as_admin 以管理员身份重启后端")
+                          hint="Administrator privilege required. Call system_restart_as_admin to restart the backend as administrator")
         return _error(err)
     return _result(data)
 
 
 @mcp.tool()
 def transparent_proxy_stop() -> str:
-    """停止透明代理。"""
+    """Stop transparent proxy."""
     res = _api("POST", "/transparent-proxy/stop")
     data, err = _ok(res)
     if err:
@@ -3038,10 +3452,10 @@ def transparent_proxy_stop() -> str:
 
 @mcp.tool()
 def auto_reply_list() -> str:
-    """列出所有自动修改规则（含命中统计）。
+    """List all auto-modify rules (including hit statistics).
 
-    与 intercept_list 等价，返回所有规则。每条规则含：
-    id/rule_id、pattern、action、enabled、hit_count、last_hit_at、last_hit_flow_id 等。
+    Equivalent to intercept_list, returns all rules. Each rule contains:
+    id/rule_id, pattern, action, enabled, hit_count, last_hit_at, last_hit_flow_id, etc.
     """
     res = _api("GET", "/auto-reply/rules")
     data, err = _ok(res)
@@ -3056,10 +3470,10 @@ def auto_reply_list() -> str:
 
 @mcp.tool()
 def auto_reply_get(rule_id: str) -> str:
-    """查看规则详情。
+    """View rule details.
 
     Args:
-        rule_id: 规则 ID
+        rule_id: Rule ID
     """
     res = _api("GET", "/auto-reply/rules")
     data, err = _ok(res)
@@ -3069,7 +3483,7 @@ def auto_reply_get(rule_id: str) -> str:
     for r in rules:
         if isinstance(r, dict) and str(r.get("id")) == str(rule_id):
             return _result(r)
-    return _error(f"规则不存在: {rule_id}")
+    return _error(f"Rule does not exist: {rule_id}")
 
 
 @mcp.tool()
@@ -3087,26 +3501,26 @@ def auto_reply_create(
     process_filter: str = "",
     disabled: bool = False,
 ) -> str:
-    """创建自动修改规则（支持从本地 .py 文件加载 Python 脚本）。
+    """Create an auto-modify rule (supports loading Python scripts from a local .py file).
 
-    与 intercept_add 互补：本工具专注 Python 脚本规则的创建，
-    通过 script_path 参数从本地 .py 文件加载脚本内容，方便 agent 操作。
+    Complementary to intercept_add: this tool focuses on creating Python script rules,
+    loading script content from a local .py file via the script_path parameter, making it agent-friendly.
 
     Args:
-        pattern: URL 匹配 pattern（如 *api.example.com*/v1/*）
-        action: 动作类型: script=Python脚本, mock=伪造响应, modify_response=改响应,
-            modify_request=改请求, mock_request=写死请求转发
-        script_path: action=script 时，从本地 .py 文件加载脚本内容（agent 友好，与 script 互斥）
-        script: action=script 时，内联 Python 脚本源码（与 script_path 互斥）
-        action_spec: 非 script 动作时，动作规范字符串（如 'set-json key value' / 'mock 200 {}'），
-            复用 intercept_add 的语法
-        match_mode: 匹配模式 wildcard|exact|regex（默认 wildcard）
-        note: 规则备注
-        method_filter: 方法过滤（逗号分隔）
-        status_filter: 状态码过滤（逗号分隔）
-        pid_filter: PID 过滤
-        process_filter: 进程名过滤
-        disabled: true=创建为禁用状态
+        pattern: URL match pattern (e.g. *api.example.com*/v1/*)
+        action: Action type: script=Python script, mock=fake response, modify_response=modify response,
+            modify_request=modify request, mock_request=hardcoded request forwarding
+        script_path: When action=script, load script content from a local .py file (agent-friendly, mutually exclusive with script)
+        script: When action=script, inline Python script source code (mutually exclusive with script_path)
+        action_spec: For non-script actions, the action spec string (e.g. 'set-json key value' / 'mock 200 {}'),
+            reuses the syntax of intercept_add
+        match_mode: Match mode wildcard|exact|regex (default wildcard)
+        note: Rule note
+        method_filter: Method filter (comma-separated)
+        status_filter: Status code filter (comma-separated)
+        pid_filter: PID filter
+        process_filter: Process name filter
+        disabled: true=create in disabled state
     """
     body: dict = {
         "enabled": not disabled,
@@ -3125,18 +3539,18 @@ def auto_reply_create(
                 with open(script_path, "r", encoding="utf-8") as f:
                     source = f.read()
             except OSError as e:
-                return _error(f"读取脚本文件失败: {e}")
+                return _error(f"Failed to read script file: {e}")
             body["modify_rules"] = source
         elif script:
             body["modify_rules"] = script
         else:
-            return _error("action=script 时需要 script_path 或 script 参数")
+            return _error("action=script requires the script_path or script parameter")
         body["mock_status"] = None
         body["mock_headers"] = {}
         body["mock_body"] = ""
     else:
         if not action_spec:
-            return _error(f"action={action} 时需要 action_spec 参数（如 'set-json key value'）")
+            return _error(f"action={action} requires the action_spec parameter (e.g. 'set-json key value')")
         try:
             a = parse_action(action_spec)
         except ValueError as e:
@@ -3158,10 +3572,10 @@ def auto_reply_create(
 
 @mcp.tool()
 def auto_reply_enable(rule_id: str) -> str:
-    """启用规则。
+    """Enable a rule.
 
     Args:
-        rule_id: 规则 ID
+        rule_id: Rule ID
     """
     res = _api("PUT", f"/auto-reply/rules/{rule_id}", {"enabled": True})
     _, err = _ok(res)
@@ -3172,10 +3586,10 @@ def auto_reply_enable(rule_id: str) -> str:
 
 @mcp.tool()
 def auto_reply_disable(rule_id: str) -> str:
-    """禁用规则。
+    """Disable a rule.
 
     Args:
-        rule_id: 规则 ID
+        rule_id: Rule ID
     """
     res = _api("PUT", f"/auto-reply/rules/{rule_id}", {"enabled": False})
     _, err = _ok(res)
@@ -3186,10 +3600,10 @@ def auto_reply_disable(rule_id: str) -> str:
 
 @mcp.tool()
 def auto_reply_delete(rule_id: str) -> str:
-    """删除规则。
+    """Delete a rule.
 
     Args:
-        rule_id: 规则 ID
+        rule_id: Rule ID
     """
     res = _api("DELETE", f"/auto-reply/rules/{rule_id}")
     _, err = _ok(res)
@@ -3213,49 +3627,49 @@ def auto_reply_test_script(
     mock_resp_headers: dict = None,
     mock_resp_body: str = "",
 ) -> str:
-    """测试 Python 脚本执行（不创建规则，用 mock 数据走 worker 子进程）。
+    """Test Python script execution (does not create a rule, uses mock data through a worker subprocess).
 
-    agent 在用 auto_reply_create 创建脚本规则前，可先用本工具验证脚本逻辑：
-    用 mock 请求/响应数据调用 on_request / on_response 钩子，查看脚本执行结果、
-    是否报错、是否对请求/响应做了修改。
+    Before using auto_reply_create to create a script rule, the agent can use this tool to validate the script logic:
+    calls on_request / on_response hooks with mock request/response data, and shows the script execution result,
+    whether errors occurred, and whether the request/response was modified.
 
     Args:
-        script: 内联 Python 脚本源码（与 script_path 互斥）
-        script_path: 从本地 .py 文件加载脚本（与 script 互斥，agent 友好）
-        mock_host: mock 请求 host
-        mock_path: mock 请求 path
-        mock_method: mock 请求方法（GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS）
-        mock_scheme: mock 请求 scheme（http/https）
-        mock_http_version: mock HTTP 版本（HTTP/1.1）
-        mock_headers: mock 请求 headers（dict）
-        mock_body: mock 请求 body 字符串
-        mock_resp_status: mock 响应状态码（提供则同时调用 on_response 钩子）
-        mock_resp_headers: mock 响应 headers（dict）
-        mock_resp_body: mock 响应 body 字符串
+        script: Inline Python script source code (mutually exclusive with script_path)
+        script_path: Load script from a local .py file (mutually exclusive with script, agent-friendly)
+        mock_host: Mock request host
+        mock_path: Mock request path
+        mock_method: Mock request method (GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS)
+        mock_scheme: Mock request scheme (http/https)
+        mock_http_version: Mock HTTP version (HTTP/1.1)
+        mock_headers: Mock request headers (dict)
+        mock_body: Mock request body string
+        mock_resp_status: Mock response status code (if provided, also calls the on_response hook)
+        mock_resp_headers: Mock response headers (dict)
+        mock_resp_body: Mock response body string
 
     Returns:
-        测试结果 JSON：{ok, duration_ms, error, traceback, request_phase, response_phase}
-        - ok: 脚本是否执行成功
-        - duration_ms: 总耗时（毫秒）
-        - error: 错误信息（如有）
-        - traceback: 异常 traceback（如有）
-        - request_phase: on_request 阶段结果（action/modified/headers/body/error）
-        - response_phase: on_response 阶段结果（仅当提供 mock_resp_* 时返回）
+        Test result JSON: {ok, duration_ms, error, traceback, request_phase, response_phase}
+        - ok: Whether the script executed successfully
+        - duration_ms: Total duration (milliseconds)
+        - error: Error message (if any)
+        - traceback: Exception traceback (if any)
+        - request_phase: on_request phase result (action/modified/headers/body/error)
+        - response_phase: on_response phase result (returned only when mock_resp_* is provided)
     """
     # 优先用 script_path 加载本地文件
     if script_path:
         import os
         if not os.path.isfile(script_path):
-            return _error(f"脚本文件不存在: {script_path}")
+            return _error(f"Script file does not exist: {script_path}")
         try:
             with open(script_path, "r", encoding="utf-8") as f:
                 script_source = f.read()
         except OSError as e:
-            return _error(f"读取脚本文件失败: {e}")
+            return _error(f"Failed to read script file: {e}")
     elif script:
         script_source = script
     else:
-        return _error("需要提供 script 或 script_path 参数")
+        return _error("script or script_path parameter required")
 
     body = {
         "script": script_source,
@@ -3284,13 +3698,296 @@ def auto_reply_test_script(
 
 
 # ======================================================================
+# 工具集：Cookie 管理
+# ======================================================================
+
+@mcp.tool()
+def cookies_list(host: str = "") -> str:
+    """List all cookies grouped by host, aggregated from captured flows.
+
+    Args:
+        host: Optional fuzzy host filter (case-insensitive substring).
+    """
+    qs = f"?host={urllib.parse.quote(host)}" if host else ""
+    res = _api("GET", f"/cookies{qs}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def cookies_clear_host(host: str) -> str:
+    """Clear cookies for a specific host (strips Cookie/Set-Cookie headers from stored flows).
+
+    Args:
+        host: The host name to clear cookies for (exact match, case-insensitive).
+    """
+    res = _api("DELETE", f"/cookies/{urllib.parse.quote(host)}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def cookies_clear_all() -> str:
+    """Clear all cookies from all hosts (strips Cookie/Set-Cookie headers from all stored flows)."""
+    res = _api("DELETE", "/cookies")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+# ======================================================================
+# 工具集：站点地图
+# ======================================================================
+
+@mcp.tool()
+def site_map() -> str:
+    """Get the site map tree structure of all visited URLs (Burp Suite-style).
+
+    Returns a nested tree grouped by host and URL path segments.
+    """
+    res = _api("GET", "/site-map")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+# ======================================================================
+# 工具集：录制/回放
+# ======================================================================
+
+@mcp.tool()
+def record_scripts_list() -> str:
+    """List all recorded scripts (without flow details)."""
+    res = _api("GET", "/record-scripts")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_scripts_create(name: str, flow_ids: list[int], note: str = "") -> str:
+    """Create a new recorded script from specified flow IDs.
+
+    Args:
+        name: Script name.
+        flow_ids: List of flow IDs to include in the script.
+        note: Optional note for the script.
+    """
+    body = {"name": name, "flow_ids": flow_ids, "note": note}
+    res = _api("POST", "/record-scripts", body)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_scripts_get(script_id: str) -> str:
+    """Get details of a recorded script (including flow data).
+
+    Args:
+        script_id: The script ID.
+    """
+    res = _api("GET", f"/record-scripts/{urllib.parse.quote(script_id)}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_scripts_delete(script_id: str) -> str:
+    """Delete a recorded script.
+
+    Args:
+        script_id: The script ID to delete.
+    """
+    res = _api("DELETE", f"/record-scripts/{urllib.parse.quote(script_id)}")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_scripts_replay(script_id: str) -> str:
+    """Replay a recorded script (concurrent replay of all flows).
+
+    Args:
+        script_id: The script ID to replay.
+    """
+    res = _api("POST", f"/record-scripts/{urllib.parse.quote(script_id)}/replay")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_start() -> str:
+    """Start recording: subsequent flows will be captured into the recording session."""
+    res = _api("POST", "/record-scripts/start-recording")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_stop(name: str = "", note: str = "") -> str:
+    """Stop recording and save the captured flows as a script.
+
+    Args:
+        name: Optional script name (auto-generated if empty).
+        note: Optional note.
+    """
+    body = {"name": name, "note": note}
+    res = _api("POST", "/record-scripts/stop-recording", body)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def record_status() -> str:
+    """Query current recording status and flow count."""
+    res = _api("GET", "/record-scripts/recording-status")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+# ======================================================================
+# 工具集：被动扫描
+# ======================================================================
+
+# ======================================================================
+# 工具集：DNS 劫持
+# ======================================================================
+
+@mcp.tool()
+def dns_hijack_status() -> str:
+    """Get DNS hijack status (running state, rules, stats, and recent logs).
+
+    Cross-platform: Windows uses WinDivert to modify A records in local DNS responses;
+    Linux/macOS use iptables/pf NAT redirection.
+    """
+    res = _api("GET", "/dns-hijack/status")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    if isinstance(data, dict):
+        if not data.get("running") and data.get("last_error"):
+            le = data.get("last_error", "")
+            if "administrator" in le.lower() or "admin" in le.lower() or "root" in le.lower() or "privilege" in le.lower():
+                data["hint"] = "Administrator/root privileges required. Call system_restart_as_admin to restart the backend as administrator"
+    return _result(data or res)
+
+
+@mcp.tool()
+def dns_hijack_start(rules: dict = None, default_ip: str = "") -> str:
+    """Start DNS hijacking (modifies A records in local DNS responses).
+
+    Cross-platform: Windows uses WinDivert (requires admin + pydivert); Linux/macOS use
+    iptables/pf NAT redirection (requires root). On first use without WinDivert risk
+    acknowledgement, automatically triggers a desktop topmost native dialog.
+
+    Args:
+        rules: Optional initial rules mapping domain -> IP (e.g. {"example.com": "127.0.0.1"}).
+        default_ip: Optional default IP for domains not in rules.
+    """
+    body: dict = {}
+    if rules:
+        body["rules"] = rules
+    if default_ip:
+        body["default_ip"] = default_ip.strip()
+    # 首次启用未确认 WinDivert 风险提示时，自动触发桌面置顶原生弹窗
+    res = _api_with_windivert_ack("POST", "/dns-hijack/start", body or None)
+    data, err = _ok(res)
+    if err:
+        if "admin" in err.lower():
+            return _error(err,
+                          hint="Administrator/root privileges required. Call system_restart_as_admin to restart the backend as administrator")
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def dns_hijack_stop() -> str:
+    """Stop DNS hijacking."""
+    res = _api("POST", "/dns-hijack/stop")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def dns_hijack_rules_get() -> str:
+    """Get current DNS hijack rules and default IP."""
+    res = _api("GET", "/dns-hijack/status")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    if isinstance(data, dict):
+        return _result({"rules": data.get("rules", {}), "default_ip": data.get("default_ip", "")})
+    return _result(data or res)
+
+
+@mcp.tool()
+def dns_hijack_rules_set(rules: dict, default_ip: str = "") -> str:
+    """Update DNS hijack rules (replaces all rules).
+
+    To add rules, provide the full desired ruleset. To delete a rule, omit it from the
+    rules dict (the API replaces all rules atomically).
+
+    Args:
+        rules: Rules mapping domain -> IP (e.g. {"example.com": "127.0.0.1"}).
+        default_ip: Optional default IP for domains not in rules (empty to clear).
+    """
+    body = {"rules": rules, "default_ip": default_ip.strip() if default_ip else ""}
+    res = _api("PUT", "/dns-hijack/rules", body)
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+@mcp.tool()
+def dns_hijack_clear_log() -> str:
+    """Clear DNS hijack logs and stat counters."""
+    res = _api("POST", "/dns-hijack/clear-log")
+    data, err = _ok(res)
+    if err:
+        return _error(err)
+    return _result(data or res)
+
+
+# ======================================================================
+# 工具集：Intruder 爆破攻击（Burp Intruder 风格）
+# ======================================================================
+
+# ======================================================================
+# 工具集：主动扫描器（漏洞扫描 + 轻量爬虫）
+# ======================================================================
+
+# ======================================================================
 # 主入口
 # ======================================================================
 
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Telnix MCP Server")
-    p.add_argument("--base-url", default="", help="后端 API 地址（默认从 TELNIX_API 环境变量或 127.0.0.1:18901）")
+    p.add_argument("--base-url", default="", help="Backend API address (defaults to TELNIX_API env var or 127.0.0.1:18901)")
     args = p.parse_args()
     if args.base_url:
         global BASE_URL

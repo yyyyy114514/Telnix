@@ -1,11 +1,16 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import i18n from '../i18n'
 import { api, type Status, type BpStatus } from '../api/client'
 import { clearFlowCache, useFlowsStore } from './flows'
 
 /** 抓包状态 store：抓包/证书/断点状态，2 秒轮询 */
 export const useCaptureStore = defineStore('capture', () => {
-  const status = ref<Status>({ capturing: false, proxy_port: 8888, session_id: 0, cert_installed: false })
+  // 从 localStorage 恢复上次的证书状态（避免启动时闪现"未安装"提示，
+  // 后端 certutil 后台检测需 1-2s，期间前端用缓存值乐观显示）
+  const _cachedCertInstalled = localStorage.getItem('telnix_cert_installed')
+  const status = ref<Status>({ capturing: false, proxy_port: 8888, session_id: 0, cert_installed: _cachedCertInstalled === 'true' })
   const bpStatus = ref<BpStatus>({ break_on_request: false, break_on_response: false })
   const polling = ref(false)
   let timer: number | null = null
@@ -22,8 +27,17 @@ export const useCaptureStore = defineStore('capture', () => {
         const prev = localStorage.getItem('telnix_backend_started_at')
         if (prev && prev !== String(s.started_at)) {
           clearFlowCache()
+          // 通知 flows store 后端已重启，跳过缓存恢复
+          window.dispatchEvent(new CustomEvent('telnix:backend-restarted'))
+        } else {
+          // 后端未重启或首次启动：通知 flows store 可以恢复缓存
+          window.dispatchEvent(new CustomEvent('telnix:backend-confirmed'))
         }
         localStorage.setItem('telnix_backend_started_at', String(s.started_at))
+      }
+      // 缓存证书状态到 localStorage（下次启动时乐观恢复）
+      if (s.cert_installed !== undefined) {
+        localStorage.setItem('telnix_cert_installed', String(s.cert_installed))
       }
       // 抓包切换保护期：保护期内不覆盖 capturing（避免后端尚未完成状态切换时
       // 把乐观更新的 capturing=true 覆盖回 false，导致"闪一下变回去"）
@@ -70,12 +84,12 @@ export const useCaptureStore = defineStore('capture', () => {
     try {
       if (wasCapturing) {
         status.value.capturing = false
-        _captureGuardUntil = Date.now() + 1500
+        _captureGuardUntil = Date.now() + 3000
         await api.captureStop()
         fetchStatus()  // 异步同步完整状态，不阻塞返回
       } else {
         status.value.capturing = true
-        _captureGuardUntil = Date.now() + 1500
+        _captureGuardUntil = Date.now() + 3000
         await api.captureStart()
         fetchStatus()
       }
@@ -123,12 +137,13 @@ export const useCaptureStore = defineStore('capture', () => {
         await api.batchReleaseFlows(ids, 'release')
         // 同步更新 flows store 的断点状态（避免流量列表仍显示断点闪烁/菜单）
         useFlowsStore().patchFlows(ids, (f) => { f.breakpoint_status = null })
-      } catch {
-        /* skip */
+        // 仅在成功时清空 pending 列表，避免失败时 UI 误显示已放行
+        bpStatus.value = { ...bpStatus.value, pending_flows: [] }
+      } catch (e: any) {
+        ElMessage.error(i18n.global.t('capture.releaseFailed') + (e?.message || e))
       }
     }
-    // 立即清空 pending 列表让 BreakpointBar 按钮消失，再异步刷新真实状态
-    bpStatus.value = { ...bpStatus.value, pending_flows: [] }
+    // 异步刷新真实状态（无论成功失败，让后端状态最终一致）
     fetchBpStatus()
   }
 
@@ -140,11 +155,11 @@ export const useCaptureStore = defineStore('capture', () => {
       try {
         await api.batchReleaseFlows(ids, 'drop')
         useFlowsStore().patchFlows(ids, (f) => { f.breakpoint_status = null })
-      } catch {
-        /* skip */
+        bpStatus.value = { ...bpStatus.value, pending_flows: [] }
+      } catch (e: any) {
+        ElMessage.error(i18n.global.t('capture.releaseFailed') + (e?.message || e))
       }
     }
-    bpStatus.value = { ...bpStatus.value, pending_flows: [] }
     fetchBpStatus()
   }
 

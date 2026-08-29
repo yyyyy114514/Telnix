@@ -1,0 +1,118 @@
+{
+  "findings": [
+    {
+      "file": "src/host/telnix/api/decode.py",
+      "line": 482,
+      "severity": "high",
+      "type": "注入",
+      "description": "apply_decoder_plugin 接口直接使用用户传入的 plugin_path 构造 import 语句，存在路径遍历和任意文件读取风险。",
+      "attack_scenario": "攻击者传入 plugin_path='../../../etc/passwd' 或 plugin_path='C:\\\\Windows\\\\System32\\\\config\\\\SAM'，即可将任意文件作为 Python 模块导入。",
+      "fix_suggestion": "添加 plugin_path 白名单校验：仅允许预定义的插件目录（如 ~/.telnix/plugins/）下的 .py 文件，禁止传入绝对路径或包含 .. 的路径。"
+    },
+    {
+      "file": "src/host/telnix/api/proxy_tools.py",
+      "line": 99,
+      "severity": "medium",
+      "type": "路径遍历",
+      "description": "Map Local 规则的 file_path 未做路径遍历校验。",
+      "attack_scenario": "恶意用户添加 file_path='../../../telnix_data/telnix.db' 可读取数据库文件。",
+      "fix_suggestion": "添加路径白名单校验，resolve 真实路径后检查是否在 data_dir/cert_dir/ui_dir 下。"
+    },
+    {
+      "file": "src/host/telnix/api/settings.py",
+      "line": 98,
+      "severity": "medium",
+      "type": "路径遍历",
+      "description": "list_dirs 接口未限制目录访问范围，可能导致目录枚举攻击。",
+      "attack_scenario": "用户传入 path='C:/' 或 path='/etc' 可枚举系统目录。",
+      "fix_suggestion": "Windows 上限制只能列出 data_dir/cert_dir/ui_dir，禁止访问系统根目录。"
+    },
+    {
+      "file": "src/host/telnix/api/sessions.py",
+      "line": 469,
+      "severity": "medium",
+      "type": "输入验证",
+      "description": "batch_delete_flows 接口未校验 ids 是否属于当前会话。",
+      "attack_scenario": "用户可删除其他会话的流量（如果会话隔离失效）。",
+      "fix_suggestion": "删除前校验所有 flow_id 确实属于调用方当前 session。"
+    },
+    {
+      "file": "src/host/telnix/api/export.py",
+      "line": 136,
+      "severity": "medium",
+      "type": "敏感信息",
+      "description": "导出 HAR 时 Authorization/Cookie/Token 等敏感头原样导出。",
+      "attack_scenario": "用户导出 HAR 后分享给其他人，凭证泄露。",
+      "fix_suggestion": "自动剔除 Authorization/Cookie/Proxy-Authorization/X-API-Token 等敏感头。"
+    },
+    {
+      "file": "src/host/telnix/api/import_flows.py",
+      "line": 147,
+      "severity": "medium",
+      "type": "输入验证",
+      "description": "导入 HAR/JSON 时未做大小限制，恶意超大文件可能导致 OOM。",
+      "attack_scenario": "攻击者构造包含数 GB base64 数据的 HAR 文件导致 OOM。",
+      "fix_suggestion": "设置每个 body 字段上限（如 100MB），超限时截断或拒绝导入。"
+    },
+    {
+      "file": "src/host/telnix/api/proxy_tools.py",
+      "line": 158,
+      "severity": "medium",
+      "type": "SSRF",
+      "description": "map_remote_add 的 target_url 未校验是否指向内网地址。",
+      "attack_scenario": "target_url='http://192.168.1.1/admin' 可探测内网服务。",
+      "fix_suggestion": "添加 SSRF 校验，参照 send.py 的 _resolve_safe_target 实现。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 1429,
+      "severity": "medium",
+      "type": "注入",
+      "description": "导出的 curl/python 脚本中 body 使用 repr() 或 JSON 嵌入，可能导致命令注入。",
+      "attack_scenario": "恶意响应 body 内容经过 repr() 转义后可能被 eval() 执行。",
+      "fix_suggestion": "不要将导出的 Python 脚本设计为 eval-able，改用 ast.literal_eval 或显式 base64 解码。"
+    },
+    {
+      "file": "src/host/telnix/api/auto_reply.py",
+      "line": 687,
+      "severity": "low",
+      "type": "拒绝服务",
+      "description": "test_script 接口允许任意代码执行，可能导致资源耗尽。",
+      "attack_scenario": "用户在脚本中执行 time.sleep(5) 耗尽 worker 超时。",
+      "fix_suggestion": "禁止 import os/subprocess/threading 等模块；限制执行时间更短（如 2s）。"
+    },
+    {
+      "file": "src/host/telnix/api/search.py",
+      "line": 78,
+      "severity": "low",
+      "type": "拒绝服务",
+      "description": "body_regex 参数超长正则可能导致正则回溯攻击（ReDoS）。",
+      "attack_scenario": "用户传入 body_regex='(a+)+b' 这类有 ReDoS 漏洞的正则，CPU 跑满。",
+      "fix_suggestion": "限制正则长度（如最多 500 字符）；使用 timeout 包装 re.search 调用。"
+    },
+    {
+      "file": "src/host/telnix/api/clash.py",
+      "line": 97,
+      "severity": "low",
+      "type": "敏感信息",
+      "description": "clash_secret 明文存储在 settings.json。",
+      "attack_scenario": "恶意软件读取 settings.json 获取 secret，可接管 Mihomo。",
+      "fix_suggestion": "使用 Fernet 对称加密存储；日志中不要明文记录 secret 值。"
+    },
+    {
+      "file": "src/host/telnix/api/ai.py",
+      "line": 74,
+      "severity": "low",
+      "type": "敏感信息",
+      "description": "deepseek_api_key 明文存储在 settings.json。",
+      "attack_scenario": "恶意软件读取 settings.json 获取 api_key。",
+      "fix_suggestion": "敏感密钥使用 Fernet 对称加密存储；不要在日志中打印 api_key。"
+    }
+  ],
+  "summary": {
+    "total": 12,
+    "high": 1,
+    "medium": 7,
+    "low": 4
+  }
+}

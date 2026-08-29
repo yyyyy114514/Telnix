@@ -71,6 +71,27 @@ if (-not (Test-Path $exePath)) {
     exit 1
 }
 
+# ---------- 同步到 <root>\dist\Telnix\ 供 Inno Setup 使用 ----------
+# telnix.iss 期望读取 <root>\dist\Telnix\Telnix_host.exe（首字母大写），
+# 而 PyInstaller 产出在 src\host\dist\telnix_host\telnix_host.exe（全小写）。
+# 这里复制并重命名 exe 以匹配安装器配置，避免修改 telnix.iss。
+Write-Host ""
+Write-Host "Syncing to project dist\Telnix\ for Inno Setup..." -ForegroundColor Yellow
+$innoDistDir = Join-Path $projectRoot "dist\Telnix"
+if (Test-Path $innoDistDir) { Remove-Item -Recurse -Force $innoDistDir }
+New-Item -ItemType Directory -Force -Path (Split-Path $innoDistDir) | Out-Null
+Copy-Item -Path (Join-Path $distDir "telnix_host") -Destination $innoDistDir -Recurse -Force
+# 重命名 exe 为 Telnix_host.exe（首字母大写，匹配 telnix.iss 的 [Icons]/[Run] 段引用）
+$srcExe = Join-Path $innoDistDir "telnix_host.exe"
+if (Test-Path $srcExe) {
+    Rename-Item -Path $srcExe -NewName "Telnix_host.exe" -Force
+    Write-Host "  Renamed: telnix_host.exe -> Telnix_host.exe" -ForegroundColor Gray
+} else {
+    Write-Host "  ERROR: 未找到源 exe（Copy-Item 可能失败）: $srcExe" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Synced: $innoDistDir" -ForegroundColor Green
+
 # ---------- 统计 ----------
 $distSize = (Get-ChildItem (Join-Path $distDir "telnix_host") -Recurse | Measure-Object -Property Length -Sum).Sum
 $distSizeMB = [math]::Round($distSize / 1MB, 2)

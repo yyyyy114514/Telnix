@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useFlowsStore } from '../stores/flows'
-import { api, type AiChat, type AiMessage, type Flow, type Settings } from '../api/client'
+import { api, type AiChat, type AiMessage, type Flow, type Settings, type AiUsageStats } from '../api/client'
 import { saveFlowSnapshot, getFlowSnapshot } from '../utils/aiFlowSnapshot'
 
 const router = useRouter()
 
 // AI 分析视图：左侧聊天记录列表 + 中间聊天界面 + 右侧包信息面板
 const flowsStore = useFlowsStore()
+const { t } = useI18n()
 
 const chats = ref<AiChat[]>([])
 const currentChat = ref<AiChat | null>(null)
@@ -31,6 +33,19 @@ const expandedFlowId = ref<number | null>(null)
 // 右侧面板是否可见（用户可折叠）
 const contextPanelVisible = ref(true)
 
+// AI 使用统计
+const aiUsage = ref<AiUsageStats>({
+  all_time: { requests: 0, input_tokens: 0, output_tokens: 0, total_cost: 0 },
+  month: { requests: 0, input_tokens: 0, output_tokens: 0, total_cost: 0 },
+  today: { requests: 0, input_tokens: 0, output_tokens: 0, total_cost: 0 },
+  by_service: [],
+})
+const usageStatsVisible = ref(false)  // 侧边栏使用统计可见性
+
+// 流式响应状态
+const streamingContent = ref('')  // 当前流式响应的累积内容
+const streamingMessageId = ref<number | null>(null)  // 当前流式消息 ID
+
 const md = new MarkdownIt({
   html: false,
   breaks: true,
@@ -45,6 +60,13 @@ const md = new MarkdownIt({
     return `<pre class="hljs"><code>${md.utils.escapeHtml(str)}</code></pre>`
   },
 })
+// 安全：仅允许安全协议链接，阻断 javascript:/data:/vbscript: 等，防止 AI 输出恶意链接点击后 XSS
+md.validateLink = (url: string): boolean => {
+  const s = url.trim().toLowerCase()
+  // 允许相对/锚点/查询链接与安全协议
+  if (/^(#|\/|\.\/|\.\.\/|\?)/.test(s) || !/^[a-z][a-z0-9+.-]*:/.test(s)) return true
+  return /^(https?|mailto|tel):/.test(s)
+}
 
 const hasSelection = computed(() => flowsStore.aiFlowIds.length > 0)
 
@@ -57,6 +79,19 @@ async function loadSettings() {
   } catch {
     /* ignore */
   }
+}
+
+async function loadAiUsage() {
+  try {
+    aiUsage.value = await api.aiGetUsage()
+  } catch {
+    /* ignore */
+  }
+}
+
+function formatCost(cost: number): string {
+  if (cost < 0.0001) return '$0.0000'
+  return '$' + cost.toFixed(4)
 }
 
 async function loadChats() {
@@ -114,14 +149,14 @@ async function loadChatFlows(flowIds: number[]) {
 }
 
 async function startAnalyze() {
-  if (!settings.value.deepseek_api_key) {
-    ElMessage.warning('请先在设置页配置 DeepSeek API Key')
+  if (!hasAiKey()) {
+    ElMessage.warning(t('ai.pleaseConfigureApiKey'))
     return
   }
   analyzing.value = true
   // 立即提示，避免像卡死
   const waitMsg = ElMessage({
-    message: '已发送请求，等待响应...',
+    message: t('ai.requestSentWaiting'),
     type: 'info',
     duration: 0,
   })
@@ -134,24 +169,52 @@ async function startAnalyze() {
     flowsStore.aiFlowIds = []
     pendingFlows.value = []
     waitMsg?.close()
-    ElMessage.success('分析完成')
+    ElMessage.success(t('ai.analysisComplete'))
+    // 刷新使用统计
+    loadAiUsage()
   } catch (e: any) {
     waitMsg?.close()
     const msg = e?.message || String(e)
     if (msg === 'not found') {
-      ElMessage.error('后端未找到 AI 分析接口，请重启后端（python -m telnix）后再试')
+      ElMessage.error(t('ai.backendNotFound'))
     } else {
-      ElMessage.error('分析失败：' + msg)
+      ElMessage.error(t('ai.analysisFailed', { msg }))
     }
   } finally {
     analyzing.value = false
   }
 }
 
+function hasAiKey(): boolean {
+  const service = settings.value.ai_service || 'deepseek'
+  switch (service) {
+    case 'deepseek': return !!settings.value.deepseek_api_key
+    case 'anthropic': return !!settings.value.anthropic_api_key
+    case 'openai': return !!settings.value.openai_api_key
+    case 'gemini': return !!settings.value.gemini_api_key
+    case 'ollama': return !!settings.value.ollama_endpoint
+    default: return !!settings.value.deepseek_api_key
+  }
+}
+
+function handleUsageDropdown() {
+  // 点击空白区域时刷新统计
+  loadAiUsage()
+}
+
+async function onModelChange(val: string) {
+  try {
+    await api.saveSettings({ ai_service: val } as Settings)
+    ElMessage.success(t('settings.aiServiceChanged'))
+  } catch (e: any) {
+    ElMessage.error(t('settings.saveFailed', { msg: e?.message }))
+  }
+}
+
 // 无流量直接开始自由对话（不调 API，只创建空聊天记录，等用户先发消息）
 async function startFreeChat() {
-  if (!settings.value.deepseek_api_key) {
-    ElMessage.warning('请先在设置页配置 DeepSeek API Key')
+  if (!hasAiKey()) {
+    ElMessage.warning(t('ai.pleaseConfigureApiKey'))
     return
   }
   analyzing.value = true
@@ -159,13 +222,13 @@ async function startFreeChat() {
     const res = await api.aiAnalyze({ flow_ids: [] })
     await loadChats()
     await openChat(res.chat_id)
-    ElMessage.success('已创建自由对话，请直接输入问题')
+    ElMessage.success(t('ai.freeChatCreated'))
   } catch (e: any) {
     const msg = e?.message || String(e)
     if (msg === 'not found') {
-      ElMessage.error('后端未找到 AI 分析接口，请重启后端（python -m telnix）后再试')
+      ElMessage.error(t('ai.backendNotFound'))
     } else {
-      ElMessage.error('创建失败：' + msg)
+      ElMessage.error(t('ai.createFailed', { msg }))
     }
   } finally {
     analyzing.value = false
@@ -185,7 +248,7 @@ async function openChat(chatId: number) {
     // 加载关联流量详情（用于右侧包信息面板）
     await loadChatFlows(res.chat.flow_ids || [])
   } catch (e: any) {
-    ElMessage.error('加载失败：' + (e?.message || e))
+    ElMessage.error(t('ai.loadFailed', { msg: e?.message || e }))
   }
 }
 
@@ -195,7 +258,7 @@ const sendToExistingChatId = ref<number | null>(null)
 const pendingQuoteFlowIds = ref<number[]>([])
 async function sendToExistingChat() {
   if (!sendToExistingChatId.value) {
-    ElMessage.warning('请先选择一个已有对话')
+    ElMessage.warning(t('ai.pleaseSelectExistingChat'))
     return
   }
   const ids = pendingFlows.value.map(f => f.id)
@@ -203,12 +266,12 @@ async function sendToExistingChat() {
   await openChat(sendToExistingChatId.value)
   // 在输入框预填引用待分析流量的消息，用户可编辑后发送
   if (ids.length) {
-    inputText.value = `请分析以下流量：${ids.map(id => `#${id}`).join(' ')}\n`
+    inputText.value = t('ai.analyzeFlowsPrompt', { ids: ids.map(id => `#${id}`).join(' ') }) + '\n'
     // 记下要带上的流量 ID，sendMessage 时一起发给后端
     pendingQuoteFlowIds.value = ids
   }
   sendToExistingChatId.value = null
-  ElMessage.success('已打开对话并预填流量引用，编辑后发送即可')
+  ElMessage.success(t('ai.chatOpenedPrefilled'))
 }
 
 async function sendMessage() {
@@ -217,8 +280,9 @@ async function sendMessage() {
   inputText.value = ''
   // 用唯一 tempId 标记临时消息，错误回滚时仅按 id 删除，避免误删同内容的历史消息
   const tempId = -Date.now()
+  const userMsgId = -Date.now() - 1
   messages.value.push({
-    id: tempId,
+    id: userMsgId,
     chat_id: currentChat.value.id,
     role: 'user',
     content: msg,
@@ -231,23 +295,44 @@ async function sendMessage() {
   // 取出待追加的流量 ID（从"发送到已有会话"预填而来），用完即清空
   const quoteIds = pendingQuoteFlowIds.value.slice()
   pendingQuoteFlowIds.value = []
+  
+  // 创建助手消息占位（用于流式更新）
+  const assistantMsgId = -Date.now() - 2
+  const assistantMsg: AiMessage = {
+    id: assistantMsgId,
+    chat_id: currentChat.value.id,
+    role: 'assistant',
+    content: '',
+    created_at: new Date().toISOString(),
+  }
+  messages.value.push(assistantMsg)
+  streamingContent.value = ''
+  streamingMessageId.value = assistantMsgId
+  
   try {
-    const res = await api.aiChat({
+    // 尝试流式响应
+    const streaming = await api.aiChatStream({
       chat_id: currentChat.value.id,
       message: msg,
       flow_ids: quoteIds.length ? quoteIds : undefined,
+    }, (chunk) => {
+      // 逐步累积内容
+      streamingContent.value += chunk
+      assistantMsg.content = streamingContent.value
+      // 渐进渲染：只更新累积的 Markdown
+      nextTick(() => scrollToBottom())
     })
-    messages.value.push({
-      id: -Date.now() - 1,
-      chat_id: currentChat.value.id,
-      role: 'assistant',
-      content: res.result,
-      created_at: new Date().toISOString(),
-    })
+    
+    // 流式完成后更新消息
+    assistantMsg.content = streamingContent.value
     await nextTick()
     scrollToBottom()
+    // 刷新使用统计
+    loadAiUsage()
   } catch (e: any) {
-    ElMessage.error('回复失败：' + (e?.message || e))
+    // 流式失败时删除占位消息
+    messages.value = messages.value.filter((m) => m.id !== assistantMsgId)
+    ElMessage.error(t('ai.replyFailed', { msg: e?.message || e }))
     // 仅删除本次创建的临时消息，避免误删历史消息
     messages.value = messages.value.filter((m) => m.id !== tempId)
     inputText.value = msg
@@ -255,6 +340,8 @@ async function sendMessage() {
     pendingQuoteFlowIds.value = quoteIds
   } finally {
     chatting.value = false
+    streamingContent.value = ''
+    streamingMessageId.value = null
   }
 }
 
@@ -265,8 +352,8 @@ function scrollToBottom() {
 
 async function deleteChat(chatId: number) {
   try {
-    await ElMessageBox.confirm('确定删除这条分析记录？', '删除', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('ai.confirmDeleteRecord'), t('ai.delete'), {
+      confirmButtonText: t('ai.delete'), cancelButtonText: t('ai.cancel'), type: 'warning',
     })
   } catch {
     return
@@ -279,20 +366,20 @@ async function deleteChat(chatId: number) {
       chatFlows.value = []
     }
     await loadChats()
-    ElMessage.success('已删除')
+    ElMessage.success(t('ai.deleted'))
   } catch (e: any) {
-    ElMessage.error('删除失败：' + (e?.message || e))
+    ElMessage.error(t('ai.deleteFailed', { msg: e?.message || e }))
   }
 }
 
 // 重命名对话
 async function renameChat(chatId: number, oldTitle: string) {
   try {
-    const { value } = await ElMessageBox.prompt('请输入新的对话名称', '重命名', {
-      confirmButtonText: '保存',
-      cancelButtonText: '取消',
+    const { value } = await ElMessageBox.prompt(t('ai.pleaseEnterNewName'), t('ai.rename'), {
+      confirmButtonText: t('ai.save'),
+      cancelButtonText: t('ai.cancel'),
       inputValue: oldTitle,
-      inputValidator: (v: string) => !!v?.trim() || '名称不能为空',
+      inputValidator: (v: string) => !!v?.trim() || t('ai.nameCannotBeEmpty'),
     })
     const title = value.trim()
     if (title === oldTitle) return
@@ -301,10 +388,10 @@ async function renameChat(chatId: number, oldTitle: string) {
     const c = chats.value.find(x => x.id === chatId)
     if (c) c.title = title
     if (currentChat.value?.id === chatId) currentChat.value.title = title
-    ElMessage.success('已重命名')
+    ElMessage.success(t('ai.renamed'))
   } catch (e: any) {
     if (e === 'cancel' || e?.toString?.().includes('cancel')) return
-    ElMessage.error('重命名失败：' + (e?.message || e))
+    ElMessage.error(t('ai.renameFailed', { msg: e?.message || e }))
   }
 }
 
@@ -414,13 +501,14 @@ function viewInCapture(flowId: number) {
 
 // 引用流量到输入框
 function quoteFlowInInput(f: Flow) {
-  inputText.value = (inputText.value || '') + `请详细分析流量 #${f.id}（${f.method} ${f.host}${f.path}）：`
+  inputText.value = (inputText.value || '') + t('ai.quoteFlowPrompt', { id: f.id, method: f.method, host: f.host, path: f.path })
 }
 
 onMounted(() => {
   loadSettings()
   loadChats()
   loadPendingFlows()
+  loadAiUsage()
 })
 watch(() => flowsStore.aiFlowIds, loadPendingFlows)
 </script>
@@ -433,11 +521,11 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
         <div class="sidebar-title-row">
           <span class="sidebar-title">
             <el-icon class="sidebar-title-icon"><MagicStick /></el-icon>
-            分析记录
+            {{ t('ai.analysisRecords') }}
           </span>
         </div>
         <el-button type="primary" size="small" :loading="analyzing" @click="startFreeChat" class="new-chat-btn">
-          <el-icon><ChatDotRound /></el-icon>&nbsp;自由对话
+          <el-icon><ChatDotRound /></el-icon>&nbsp;{{ t('ai.freeChat') }}
         </el-button>
       </div>
       <div class="chat-list flex-1 overflow-auto">
@@ -456,7 +544,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
                 <el-icon><Connection /></el-icon>
                 {{ c.flow_ids.length }}
               </span>
-              <span v-else class="chat-item-free">自由</span>
+              <span v-else class="chat-item-free">{{ t('ai.free') }}</span>
             </div>
           </div>
           <div class="chat-item-actions">
@@ -464,7 +552,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
               link
               size="small"
               class="chat-item-rename"
-              title="重命名"
+              :title="t('ai.rename')"
               @click.stop="renameChat(c.id, c.title)"
             >
               <el-icon><Edit /></el-icon>
@@ -482,8 +570,8 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
         </div>
         <div v-if="!chats.length" class="empty-text text-dim">
           <el-icon :size="32" class="empty-icon"><ChatDotRound /></el-icon>
-          <div>暂无分析记录</div>
-          <div class="empty-hint">选中流量后点击「新对话分析」</div>
+          <div>{{ t('ai.noRecords') }}</div>
+          <div class="empty-hint">{{ t('ai.selectFlowHint') }}</div>
         </div>
       </div>
     </div>
@@ -497,8 +585,8 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
             <el-icon><MagicStick /></el-icon>
           </div>
           <div class="pending-header-text">
-            <div class="pending-header-title">已选中 {{ pendingFlows.length }} 条流量</div>
-            <div class="pending-header-sub text-dim">点击「新对话分析」让 AI 自动解读这些流量</div>
+            <div class="pending-header-title">{{ t('ai.flowsSelected', { n: pendingFlows.length }) }}</div>
+            <div class="pending-header-sub text-dim">{{ t('ai.clickNewChatAnalysisHint') }}</div>
           </div>
         </div>
         <div class="pending-flows">
@@ -511,20 +599,20 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
         </div>
         <div class="pending-actions">
           <el-button type="primary" :loading="analyzing" @click="startAnalyze">
-            <el-icon><Cpu /></el-icon>&nbsp;新对话分析
+            <el-icon><Cpu /></el-icon>&nbsp;{{ t('ai.newChatAnalysis') }}
           </el-button>
-          <el-button @click="clearPending">取消</el-button>
+          <el-button @click="clearPending">{{ t('ai.cancel') }}</el-button>
         </div>
         <!-- 发送到已有对话：选择一个已有对话，预填引用消息 -->
         <div v-if="chats.length" class="pending-existing">
-          <div class="text-dim" style="font-size: 12px; margin-bottom: 6px">或发送到已有对话：</div>
+          <div class="text-dim" style="font-size: 12px; margin-bottom: 6px">{{ t('ai.orSendToExisting') }}</div>
           <div class="existing-row">
             <el-select
               v-model="sendToExistingChatId"
               size="small"
               filterable
               clearable
-              placeholder="选择一个已有对话"
+              :placeholder="t('ai.selectExistingChatPlaceholder')"
               style="flex: 1; min-width: 200px"
             >
               <el-option
@@ -535,7 +623,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
               />
             </el-select>
             <el-button size="small" :disabled="!sendToExistingChatId" @click="sendToExistingChat">
-              发送
+              {{ t('ai.send') }}
             </el-button>
           </div>
         </div>
@@ -551,11 +639,11 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
           <span class="chat-header-meta">
             <span v-if="currentChat.flow_ids.length" class="meta-chip meta-chip-purple">
               <el-icon><Connection /></el-icon>
-              {{ currentChat.flow_ids.length }} 条流量
+              {{ t('ai.flowsCount', { n: currentChat.flow_ids.length }) }}
             </span>
             <span v-else class="meta-chip meta-chip-neutral">
               <el-icon><ChatDotRound /></el-icon>
-              自由对话
+              {{ t('ai.freeChat') }}
             </span>
             <span class="meta-chip meta-chip-neutral">
               <el-icon><Clock /></el-icon>
@@ -564,14 +652,67 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
           </span>
         </div>
         <div class="chat-header-actions">
+          <!-- 使用统计下拉 -->
+          <el-dropdown trigger="click" @command="handleUsageDropdown">
+            <el-button size="small" :title="t('ai.usageStats')">
+              <el-icon><DataLine /></el-icon>
+              <span class="usage-total">{{ formatCost(aiUsage.all_time.total_cost) }}</span>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu style="width: 320px; padding: 12px">
+                <div class="usage-dropdown">
+                  <div class="usage-section">
+                    <div class="usage-section-title">
+                      <el-icon><Coin /></el-icon>
+                      {{ t('ai.todayUsage') }}
+                    </div>
+                    <div class="usage-stat-row">
+                      <span class="usage-stat-label">{{ t('ai.requests') }}</span>
+                      <span class="usage-stat-value">{{ aiUsage.today.requests }}</span>
+                    </div>
+                    <div class="usage-stat-row">
+                      <span class="usage-stat-label">{{ t('ai.inputTokens') }}</span>
+                      <span class="usage-stat-value">{{ aiUsage.today.input_tokens.toLocaleString() }}</span>
+                    </div>
+                    <div class="usage-stat-row">
+                      <span class="usage-stat-label">{{ t('ai.outputTokens') }}</span>
+                      <span class="usage-stat-value">{{ aiUsage.today.output_tokens.toLocaleString() }}</span>
+                    </div>
+                    <div class="usage-stat-row">
+                      <span class="usage-stat-label">{{ t('ai.cost') }}</span>
+                      <span class="usage-stat-value">{{ formatCost(aiUsage.today.total_cost) }}</span>
+                    </div>
+                  </div>
+                  <div class="usage-section">
+                    <div class="usage-section-title">
+                      <el-icon><Calendar /></el-icon>
+                      {{ t('ai.monthUsage') }}
+                    </div>
+                    <div class="usage-stat-row">
+                      <span class="usage-stat-label">{{ t('ai.requests') }}</span>
+                      <span class="usage-stat-value">{{ aiUsage.month.requests }}</span>
+                    </div>
+                    <div class="usage-stat-row">
+                      <span class="usage-stat-label">{{ t('ai.cost') }}</span>
+                      <span class="usage-stat-value">{{ formatCost(aiUsage.month.total_cost) }}</span>
+                    </div>
+                  </div>
+                  <div class="usage-total-card">
+                    <div class="usage-total-amount">{{ formatCost(aiUsage.all_time.total_cost) }}</div>
+                    <div class="usage-total-label">{{ t('ai.totalCost') }}</div>
+                  </div>
+                </div>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button
             size="small"
             :class="{ 'panel-toggle-active': contextPanelVisible }"
             @click="contextPanelVisible = !contextPanelVisible"
             v-if="chatFlows.length"
-            title="切换包信息面板"
+            :title="t('ai.togglePacketPanel')"
           >
-            <el-icon><Document /></el-icon>&nbsp;包信息
+            <el-icon><Document /></el-icon>&nbsp;{{ t('ai.packetInfo') }}
           </el-button>
         </div>
       </div>
@@ -579,10 +720,17 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
         <div class="chat-header-icon icon-badge icon-badge-purple">
           <el-icon><MagicStick /></el-icon>
         </div>
-        <span class="text-dim">请从左侧选择记录，或开始新的分析</span>
+        <!-- 模型选择器 -->
+        <el-select v-model="settings.ai_service" size="small" style="width: 130px" @change="onModelChange" :placeholder="t('ai.selectModel')">
+          <el-option value="claude" label="Claude" />
+          <el-option value="openai" label="GPT-4o" />
+          <el-option value="gemini" label="Gemini" />
+          <el-option value="ollama" label="Ollama" />
+        </el-select>
+        <span class="text-dim" style="margin-left: 12px">{{ t('ai.selectRecordOrStart') }}</span>
         <div class="chat-header-actions">
           <el-button type="primary" size="small" :loading="analyzing" @click="startFreeChat">
-            <el-icon><ChatDotRound /></el-icon>&nbsp;自由对话
+            <el-icon><ChatDotRound /></el-icon>&nbsp;{{ t('ai.freeChat') }}
           </el-button>
         </div>
       </div>
@@ -593,21 +741,21 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
           <div class="empty-chat-icon icon-badge icon-badge-purple" style="width: 56px; height: 56px;">
             <el-icon :size="28"><ChatDotRound /></el-icon>
           </div>
-          <div class="empty-chat-title">AI 流量分析助手</div>
-          <p class="text-dim">选中流量后自动跳转到这里</p>
-          <p class="text-dim">或点击上方「自由对话」直接聊天</p>
+          <div class="empty-chat-title">{{ t('ai.aiAssistantTitle') }}</div>
+          <p class="text-dim">{{ t('ai.autoJumpHint') }}</p>
+          <p class="text-dim">{{ t('ai.orClickFreeChat') }}</p>
           <div class="empty-chat-hint">
             <div class="hint-row">
               <el-icon class="hint-icon"><Cpu /></el-icon>
-              <span>分析请求/响应字段含义、Token、鉴权信息</span>
+              <span>{{ t('ai.hintAnalyzeFields') }}</span>
             </div>
             <div class="hint-row">
               <el-icon class="hint-icon"><SetUp /></el-icon>
-              <span>说「帮我设置自动修改把 xxx 改成 yyy」</span>
+              <span>{{ t('ai.hintSetAutoModify') }}</span>
             </div>
             <div class="hint-row">
               <el-icon class="hint-icon"><Delete /></el-icon>
-              <span>说「删除所有规则」「列出规则」管理自动修改</span>
+              <span>{{ t('ai.hintManageRules') }}</span>
             </div>
           </div>
         </div>
@@ -634,7 +782,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
               <span class="thinking-dot"></span>
               <span class="thinking-dot"></span>
               <span class="thinking-dot"></span>
-              <span class="text-dim" style="margin-left: 6px">正在思考</span>
+              <span class="text-dim" style="margin-left: 6px">{{ t('ai.thinking') }}</span>
             </div>
           </div>
         </div>
@@ -646,7 +794,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
           v-model="inputText"
           type="textarea"
           :rows="2"
-          placeholder="输入问题，如「这个 remainingUses 字段是什么意思？」（Enter 发送，Shift+Enter 换行）"
+          :placeholder="t('ai.inputPlaceholder')"
           @keydown="onKeydown"
           :disabled="chatting"
         />
@@ -661,17 +809,17 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
       <div class="context-header">
         <div class="context-title">
           <el-icon class="context-title-icon"><Document /></el-icon>
-          <span>包信息</span>
+          <span>{{ t('ai.packetInfo') }}</span>
           <span class="context-count">{{ chatFlows.length }}</span>
         </div>
-        <el-button link size="small" @click="contextPanelVisible = false" title="折叠">
+        <el-button link size="small" @click="contextPanelVisible = false" :title="t('ai.collapse')">
           <el-icon><Close /></el-icon>
         </el-button>
       </div>
       <div class="context-body flex-1 overflow-auto">
         <div v-if="chatFlowsLoading" class="context-loading">
           <el-icon class="is-loading"><Loading /></el-icon>
-          <span style="margin-left: 6px">加载流量详情...</span>
+          <span style="margin-left: 6px">{{ t('ai.loadingFlowDetails') }}</span>
         </div>
         <div
           v-for="(f, idx) in chatFlows"
@@ -689,38 +837,38 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
           <div v-if="expandedFlowId === f.id" class="flow-card-body">
             <!-- 摘要信息 -->
             <div class="flow-section">
-              <div class="flow-section-title">摘要</div>
+              <div class="flow-section-title">{{ t('ai.summary') }}</div>
               <div class="flow-kv-grid">
                 <div class="flow-kv">
                   <span class="kv-key">ID</span>
                   <span class="kv-val mono">#{{ f.id }}</span>
                 </div>
                 <div class="flow-kv">
-                  <span class="kv-key">协议</span>
+                  <span class="kv-key">{{ t('ai.protocol') }}</span>
                   <span class="kv-val">{{ f.protocol || f.scheme || '-' }}<span v-if="f.http_version" class="kv-sub"> · {{ f.http_version }}</span></span>
                 </div>
                 <div class="flow-kv">
-                  <span class="kv-key">耗时</span>
+                  <span class="kv-key">{{ t('ai.duration') }}</span>
                   <span class="kv-val">{{ f.duration_ms != null ? f.duration_ms + ' ms' : '-' }}</span>
                 </div>
                 <div class="flow-kv">
-                  <span class="kv-key">大小</span>
+                  <span class="kv-key">{{ t('ai.size') }}</span>
                   <span class="kv-val">{{ formatSize(f.size) }}</span>
                 </div>
                 <div v-if="f.process_name" class="flow-kv">
-                  <span class="kv-key">进程</span>
+                  <span class="kv-key">{{ t('ai.process') }}</span>
                   <span class="kv-val">{{ f.process_name }}<span v-if="f.pid" class="kv-sub"> · PID {{ f.pid }}</span></span>
                 </div>
                 <div v-if="f.ip_region" class="flow-kv">
-                  <span class="kv-key">属地</span>
+                  <span class="kv-key">{{ t('ai.region') }}</span>
                   <span class="kv-val">{{ f.ip_region }}</span>
                 </div>
                 <div v-if="f.remote_ip" class="flow-kv">
-                  <span class="kv-key">对端 IP</span>
+                  <span class="kv-key">{{ t('ai.remoteIp') }}</span>
                   <span class="kv-val mono">{{ f.remote_ip }}<span v-if="f.dst_port" class="kv-sub">:{{ f.dst_port }}</span></span>
                 </div>
                 <div v-if="contentType(f)" class="flow-kv">
-                  <span class="kv-key">Content-Type</span>
+                  <span class="kv-key">{{ t('ai.contentType') }}</span>
                   <span class="kv-val">{{ contentType(f) }}</span>
                 </div>
               </div>
@@ -735,7 +883,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
             <!-- 请求头 -->
             <div v-if="parseHeaders(f.request_headers).length" class="flow-section">
               <div class="flow-section-title">
-                请求头
+                {{ t('ai.requestHeaders') }}
                 <span class="flow-section-count">{{ parseHeaders(f.request_headers).length }}</span>
               </div>
               <div class="flow-headers">
@@ -749,7 +897,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
             <!-- 请求体大小 -->
             <div v-if="f.request_body" class="flow-section">
               <div class="flow-section-title">
-                请求体
+                {{ t('ai.requestBody') }}
                 <span class="flow-section-count">{{ formatSize(bodySize(f.request_body)) }}</span>
               </div>
               <div class="flow-body mono">{{ f.request_body.slice(0, 500) }}<span v-if="f.request_body.length > 500" class="body-trunc">…</span></div>
@@ -758,7 +906,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
             <!-- 响应头 -->
             <div v-if="parseHeaders(f.response_headers).length" class="flow-section">
               <div class="flow-section-title">
-                响应头
+                {{ t('ai.responseHeaders') }}
                 <span class="flow-section-count">{{ parseHeaders(f.response_headers).length }}</span>
               </div>
               <div class="flow-headers">
@@ -772,7 +920,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
             <!-- 响应体大小 -->
             <div v-if="f.response_body" class="flow-section">
               <div class="flow-section-title">
-                响应体
+                {{ t('ai.responseBody') }}
                 <span class="flow-section-count">{{ formatSize(bodySize(f.response_body)) }}</span>
               </div>
               <div class="flow-body mono">{{ f.response_body.slice(0, 500) }}<span v-if="f.response_body.length > 500" class="body-trunc">…</span></div>
@@ -780,11 +928,11 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
 
             <!-- 操作 -->
             <div class="flow-actions">
-              <el-button size="small" @click="quoteFlowInInput(f)" title="在输入框引用此流量">
-                <el-icon><ChatLineSquare /></el-icon>&nbsp;引用
+              <el-button size="small" @click="quoteFlowInInput(f)" :title="t('ai.quoteFlowTitle')">
+                <el-icon><ChatLineSquare /></el-icon>&nbsp;{{ t('ai.quote') }}
               </el-button>
-              <el-button size="small" @click="viewInCapture(f.id)" title="跳转抓包页查看">
-                <el-icon><Aim /></el-icon>&nbsp;查看
+              <el-button size="small" @click="viewInCapture(f.id)" :title="t('ai.viewInCaptureTitle')">
+                <el-icon><Aim /></el-icon>&nbsp;{{ t('ai.view') }}
               </el-button>
             </div>
           </div>
@@ -799,26 +947,53 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
   background: var(--on-bg);
   background-image:
     radial-gradient(circle at 0% 0%, var(--on-purple-glow) 0%, transparent 35%),
-    radial-gradient(circle at 100% 100%, var(--on-indigo-glow) 0%, transparent 35%);
+    radial-gradient(circle at 100% 100%, var(--on-indigo-glow) 0%, transparent 35%),
+    radial-gradient(circle at 50% 100%, rgba(255,255,255,0.015) 0%, transparent 50%);
   background-attachment: fixed;
 }
 
 /* ============ 左侧 ============ */
 .chat-sidebar {
-  width: 260px; border-right: 1px solid var(--on-border-light);
-  display: flex; flex-direction: column; background: var(--on-bg-elevated);
+  width: 260px;
+  border-right: 1px solid var(--on-border-light);
+  display: flex;
+  flex-direction: column;
+  background: var(--on-bg-elevated);
   position: relative;
+  box-shadow: inset -1px 0 0 rgba(255,255,255,0.02), 4px 0 16px rgba(0, 0, 0, 0.03);
 }
 .chat-sidebar::after {
-  content: ''; position: absolute; top: 0; right: 0; bottom: 0; width: 1px;
-  background: linear-gradient(180deg, transparent 0%, var(--on-border-light) 20%, var(--on-border-light) 80%, transparent 100%);
+  content: '';
+  position: absolute;
+  top: 0;
+  right: -1px;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    var(--on-purple-glow) 12%,
+    var(--on-border-light) 40%,
+    var(--on-border-light) 60%,
+    var(--on-purple-glow) 88%,
+    transparent 100%
+  );
+  opacity: 0.5;
 }
 .sidebar-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 14px; border-bottom: 1px solid var(--on-border-light);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--on-border-light);
   gap: 8px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.025) 0%, transparent 100%);
 }
-.sidebar-title-row { display: flex; align-items: center; gap: 6px; }
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .sidebar-title {
   font-size: 13px; font-weight: 700;
   background: var(--on-gradient-purple);
@@ -970,6 +1145,71 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
   color: var(--on-purple) !important;
   background: var(--on-purple-glow) !important;
 }
+.usage-total {
+  margin-left: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-accent);
+}
+.el-dropdown-menu {
+  padding: 0 !important;
+}
+.usage-dropdown {
+  min-width: 300px;
+  padding: 12px;
+}
+.usage-section {
+  margin-bottom: 12px;
+}
+.usage-section:last-child {
+  margin-bottom: 0;
+}
+.usage-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-text);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.usage-stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.usage-stat-label {
+  color: var(--on-text-dim);
+}
+.usage-stat-value {
+  color: var(--on-text);
+  font-weight: 500;
+  font-family: var(--on-font-mono);
+}
+.usage-total-card {
+  background: var(--on-bg-hover);
+  border-radius: var(--on-radius-md);
+  padding: 12px;
+  margin-top: 8px;
+  text-align: center;
+}
+.usage-total-amount {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--on-accent);
+  font-family: var(--on-font-mono);
+}
+.usage-total-label {
+  font-size: 11px;
+  color: var(--on-text-dim);
+  margin-top: 4px;
+}
+.panel-toggle-active {
+  border-color: var(--on-purple) !important;
+  color: var(--on-purple) !important;
+  background: var(--on-purple-glow) !important;
+}
 
 /* 消息列表 */
 .chat-body { padding: 20px 24px; }
@@ -1030,7 +1270,7 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
 }
 /* msg-content 不设 flex:1，让 max-width 生效 */
 .msg-content { min-width: 0; }
-.msg-user .msg-content { display: flex; justify-content: flex-end; }
+.msg-user .msg-content { display: flex; justify-content: flex-end; max-width: 85%; }
 
 /* 用户消息：蓝色气泡，右对齐，右下小圆角 */
 /* width: fit-content 让短文本不撑满，max-width 限制超长文本换行 */
@@ -1039,8 +1279,9 @@ watch(() => flowsStore.aiFlowIds, loadPendingFlows)
   padding: 12px 16px;
   border-radius: var(--on-radius-xl) var(--on-radius-xl) var(--on-radius-sm) var(--on-radius-xl);
   font-size: 14px; line-height: 1.5;
-  width: fit-content; max-width: 70%;
+  width: fit-content; max-width: 100%;
   word-break: break-word; white-space: pre-wrap;
+  flex: 0 0 auto;
   font-family: var(--on-font-sans), 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', sans-serif;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }

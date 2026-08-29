@@ -1,9 +1,9 @@
-"""导入 API：支持 JSON 和 HAR 格式导入流量数据。
+"""Import API: supports importing flow data in JSON and HAR formats.
 
-JSON 格式（Telnix 原生导出）：
-    { "session": {...}, "flows": [...] }  或  [...]（纯 flows 数组）
+JSON format (Telnix native export):
+    { "session": {...}, "flows": [...] }  or  [...] (pure flows array)
 
-HAR 格式（HTTP Archive 1.2 标准）：
+HAR format (HTTP Archive 1.2 standard):
     { "log": { "entries": [...] } }
 """
 
@@ -14,6 +14,7 @@ from fastapi import APIRouter, Body
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from . import err, ok
 
 router = APIRouter()
@@ -21,12 +22,12 @@ router = APIRouter()
 
 class ImportRequest(BaseModel):
     format: str = "json"  # json | har
-    content: str = ""     # 文件内容（字符串）
-    session_name: str = ""  # 可选：导入到的会话名，空则自动生成
+    content: str = ""     # File content (string)
+    session_name: str = ""  # Optional: session name to import into, auto-generated if empty
 
 
 def _har_entry_to_flow(entry: dict, session_id: int) -> dict:
-    """HAR entry 转 flow 字典。"""
+    """Convert HAR entry to flow dict."""
     req = entry.get("request", {}) or {}
     resp = entry.get("response", {}) or {}
     method = req.get("method") or "GET"
@@ -89,7 +90,7 @@ def _har_entry_to_flow(entry: dict, session_id: int) -> dict:
 
 
 def _telnix_flow_to_flow(flow: dict, session_id: int) -> dict:
-    """Telnix 导出的 flow 字典（可能含 id/session_id 等额外字段）转可插入的 flow。"""
+    """Convert Telnix exported flow dict (may contain extra fields like id/session_id) to insertable flow."""
     # 允许缺失字段，用默认值补齐
     return {
         "session_id": session_id,
@@ -114,20 +115,20 @@ def _telnix_flow_to_flow(flow: dict, session_id: int) -> dict:
 
 @router.post("/import")
 async def import_flows(body: ImportRequest = Body(...)):
-    """导入流量数据（JSON 或 HAR 格式）。
+    """Import flow data (JSON or HAR format).
 
-    自动创建新会话，将所有流量插入。返回新会话 ID 和导入条数。
+    Auto-creates new session, inserts all flows. Returns new session ID and imported count.
     """
     if not body.content:
-        return err("内容为空")
+        return err("Content is empty")
     fmt = (body.format or "json").lower()
     try:
         data = json.loads(body.content)
     except json.JSONDecodeError as e:
-        return err(f"JSON 解析失败：{e}")
+        return err(f"JSON parse failed: {e}")
 
     # 创建新会话
-    sname = body.session_name or f"导入 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    sname = body.session_name or f"Import {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     session_id = db.create_session(sname)
 
     flows_to_insert: list[dict] = []
@@ -142,14 +143,14 @@ async def import_flows(body: ImportRequest = Body(...)):
         elif isinstance(data, list):
             flows_list = data
         else:
-            return err("JSON 格式不识别：需要 {session, flows} 或 flows 数组")
+            return err("Unrecognized JSON format: expected {session, flows} or flows array")
         for f in flows_list:
             flows_to_insert.append(_telnix_flow_to_flow(f, session_id))
 
     if not flows_to_insert:
         # 没有流量，删掉刚建的空会话
         db.delete_session(session_id)
-        return err("未找到可导入的流量")
+        return err("No flows found to import")
 
     # 批量插入（单事务 + SAVEPOINT 失败隔离，远快于逐条 insert + 逐条提交）
     inserted = db.insert_flows_batch(flows_to_insert)
@@ -159,4 +160,4 @@ async def import_flows(body: ImportRequest = Body(...)):
         "session_name": sname,
         "imported": inserted,
         "total": len(flows_to_insert),
-    }, msg=f"已导入 {inserted} 条流量到会话 #{session_id}")
+    }, msg=f"Imported {inserted} flows to session #{session_id}")

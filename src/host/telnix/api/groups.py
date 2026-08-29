@@ -1,36 +1,37 @@
-"""§3.13 流量分组：将多条流量归组管理。
+"""§3.13 Flow grouping: manage multiple flows in groups.
 
-端点：
-- POST /flows/groups          创建分组
-- GET  /flows/groups          列出分组
-- GET  /flows/groups/{id}     查看分组（含 flow 详情）
-- DELETE /flows/groups/{id}   删除分组
-- PUT  /flows/groups/{id}     更新分组（name / flow_ids）
+Endpoints:
+- POST /flows/groups          Create group
+- GET  /flows/groups          List groups
+- GET  /flows/groups/{id}     View group (with flow details)
+- DELETE /flows/groups/{id}   Delete group
+- PUT  /flows/groups/{id}     Update group (name / flow_ids)
 """
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from . import err, ok
 
 router = APIRouter()
 
 
 class CreateGroupBody(BaseModel):
-    """创建分组。"""
+    """Create group."""
     name: str
     flow_ids: list[int] = []
 
 
 class UpdateGroupBody(BaseModel):
-    """更新分组。任一字段为 None 表示不更新。"""
+    """Update group. Any field being None means no update."""
     name: str | None = None
     flow_ids: list[int] | None = None
 
 
 def _parse_flow_ids(flow_ids_str: str) -> list[int]:
-    """把逗号分隔的 flow_ids 字符串解析为 int 列表。"""
+    """Parse comma-separated flow_ids string into int list."""
     if not flow_ids_str:
         return []
     out = []
@@ -46,7 +47,7 @@ def _parse_flow_ids(flow_ids_str: str) -> list[int]:
 
 
 def _serialize_group(group: dict, include_flows: bool = False) -> dict:
-    """序列化分组。include_flows=True 时附带每条 flow 的详情。"""
+    """Serialize group. When include_flows=True, includes each flow's details."""
     out = dict(group)
     out["flow_ids"] = _parse_flow_ids(group.get("flow_ids", ""))
     if include_flows:
@@ -58,9 +59,9 @@ def _serialize_group(group: dict, include_flows: bool = False) -> dict:
 
 @router.post("/flows/groups")
 async def create_group(body: CreateGroupBody):
-    """创建流量分组。"""
+    """Create flow group."""
     if not body.name:
-        return err("name 不能为空")
+        return err("name cannot be empty")
     group_id = db.create_flow_group(body.name, body.flow_ids)
     group = db.get_flow_group(group_id)
     return ok(_serialize_group(group))
@@ -68,35 +69,35 @@ async def create_group(body: CreateGroupBody):
 
 @router.get("/flows/groups")
 async def list_groups():
-    """列出所有流量分组。"""
+    """List all flow groups."""
     groups = db.get_flow_groups()
     return ok([_serialize_group(g) for g in groups])
 
 
 @router.get("/flows/groups/{group_id}")
 async def get_group(group_id: int):
-    """查看分组详情（含每条 flow 的详情）。"""
+    """View group details (including each flow's details)."""
     group = db.get_flow_group(group_id)
     if not group:
-        return err("分组不存在")
+        return err("Group not found")
     return ok(_serialize_group(group, include_flows=True))
 
 
 @router.put("/flows/groups/{group_id}")
 async def update_group(group_id: int, body: UpdateGroupBody):
-    """更新分组。"""
+    """Update group."""
     group = db.get_flow_group(group_id)
     if not group:
-        return err("分组不存在")
+        return err("Group not found")
     db.update_flow_group(group_id, name=body.name, flow_ids=body.flow_ids)
     return ok(_serialize_group(db.get_flow_group(group_id)))
 
 
 @router.delete("/flows/groups/{group_id}")
 async def delete_group(group_id: int):
-    """删除分组（不删除组内的流量）。"""
+    """Delete group (does not delete flows inside the group)."""
     group = db.get_flow_group(group_id)
     if not group:
-        return err("分组不存在")
+        return err("Group not found")
     db.delete_flow_group(group_id)
     return ok({"deleted": True, "group_id": group_id})

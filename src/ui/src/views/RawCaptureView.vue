@@ -4,7 +4,7 @@ import { useVirtualList } from '../composables/useVirtualList'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, type RawStatus, type Flow } from '../api/client'
+import { api, type RawStatus, type Flow, type RawStats, type ActiveConnection } from '../api/client'
 import { useCaptureStore } from '../stores/capture'
 import { useFlowsStore } from '../stores/flows'
 import HexView from '../components/HexView.vue'
@@ -33,6 +33,72 @@ const maxFlowId = ref(0)
 // 管理员重启中
 const restartingAsAdmin = ref(false)
 
+// ========== P1 实时监控统计 ==========
+const rawStats = ref<RawStats | null>(null)
+const showMonitor = ref(true)  // 监控面板显示开关
+const connFilter = ref({ process: '', port: '' })
+const connPage = ref(1)
+const connPageSize = ref(20)
+const statsTimer = ref<number | null>(null)
+
+async function loadStats() {
+  if (!rawStatus.value.running) return
+  try {
+    rawStats.value = await api.rawStats()
+  } catch { /* ignore */ }
+}
+
+async function resetStats() {
+  try {
+    await api.rawStatsReset()
+    rawStats.value = null
+  } catch { /* ignore */ }
+}
+
+// 连接列表筛选后的数据
+const filteredConnections = computed(() => {
+  if (!rawStats.value?.active_connections) return []
+  let list = rawStats.value.active_connections
+  const pf = connFilter.value.process.trim().toLowerCase()
+  const portFilter = connFilter.value.port.trim()
+  if (pf) {
+    list = list.filter(c => (c.proc_name || '').toLowerCase().includes(pf))
+  }
+  if (portFilter) {
+    const ports = portFilter.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
+    if (ports.length > 0) {
+      list = list.filter(c => ports.includes(c.local_port) || ports.includes(c.remote_port))
+    }
+  }
+  return list
+})
+
+// 连接列表分页
+const paginatedConnections = computed(() => {
+  const start = (connPage.value - 1) * connPageSize.value
+  return filteredConnections.value.slice(start, start + connPageSize.value)
+})
+
+const connTotal = computed(() => filteredConnections.value.length)
+
+// 协议分布饼图数据（TCP/UDP 比例）
+const protoPieData = computed(() => {
+  if (!rawStats.value) return []
+  const tcp = rawStats.value.tcp_count || 0
+  const udp = rawStats.value.udp_count || 0
+  const total = tcp + udp
+  if (total === 0) return []
+  return [
+    { name: 'TCP', value: tcp, pct: Math.round(tcp / total * 100) },
+    { name: 'UDP', value: udp, pct: Math.round(udp / total * 100) },
+  ]
+})
+
+// 带宽趋势数据（用于折线图渲染）
+const bwTrendX = computed(() => rawStats.value?.trend.map(t => t.ts) || [])
+const bwTrendPps = computed(() => rawStats.value?.trend.map(t => t.pps) || [])
+const bwTrendMbps = computed(() => rawStats.value?.trend.map(t => t.mbps) || [])
+
 let pollTimer: number | null = null
 
 const selectedFlow = computed(() => flows.value.find(f => f.id === selectedId.value) || null)
@@ -57,6 +123,29 @@ function resetFilters() {
   pidFilter.value = ''
   portFilter.value = ''
   protoFilter.value = []
+}
+
+// ---------- 分隔线拖拽 ----------
+const leftRatio = ref(0.4)
+const dragging = ref(false)
+const rawBodyRef = ref<HTMLElement | null>(null)
+function onSplitDown(e: MouseEvent) {
+  e.preventDefault()
+  dragging.value = true
+  window.addEventListener('mousemove', onSplitMove)
+  window.addEventListener('mouseup', onSplitUp)
+}
+function onSplitMove(e: MouseEvent) {
+  const el = rawBodyRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const r = (e.clientX - rect.left) / rect.width
+  leftRatio.value = Math.min(0.7, Math.max(0.25, r))
+}
+function onSplitUp() {
+  dragging.value = false
+  window.removeEventListener('mousemove', onSplitMove)
+  window.removeEventListener('mouseup', onSplitUp)
 }
 
 // ---------- 统一悬浮窗管理（筛选/专注 互斥） ----------
@@ -425,6 +514,16 @@ const ctxMenu = ref<{ visible: boolean; x: number; y: number; flow: Flow | null 
   visible: false, x: 0, y: 0, flow: null,
 })
 const ctxMenuRef = ref<HTMLElement | null>(null)
+const showCopySubmenu = ref(false)
+const showIgnoreSubmenu = ref(false)
+
+function onSubmenuEnter(type: 'copy' | 'ignore') {
+  if (type === 'copy') { showCopySubmenu.value = true; showIgnoreSubmenu.value = false }
+  else { showCopySubmenu.value = false; showIgnoreSubmenu.value = true }
+}
+function onSubmenuLeave() {
+  showCopySubmenu.value = false; showIgnoreSubmenu.value = false
+}
 
 // 复制项（TCP/UDP 适用：端口、进程、协议、ID）
 const COPY_FIELDS = [
@@ -461,6 +560,7 @@ function closeCtxMenu() {
 
 function getFieldValue(f: any, field: string): string {
   if (field === 'ports') return `${f.src_port || '?'}→${f.dst_port || '?'}`
+  if (field === '_url') return `${f.src_addr || f.src_ip}:${f.src_port} → ${f.dst_addr || f.dst_ip}:${f.dst_port}`
   const v = f[field]
   return v === null || v === undefined ? '' : String(v)
 }
@@ -471,6 +571,49 @@ function copyField(field: string) {
   const text = getFieldValue(f, field)
   navigator.clipboard.writeText(text).catch(() => {})
   ElMessage.success(t('raw.copiedText', { text: text.length > 40 ? text.slice(0, 40) + '...' : text }))
+  closeCtxMenu()
+}
+
+function ctxCopyUrl() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const url = `${f.remote_ip || ''}:${f.src_port || ''} → ${f.host}:${f.dst_port || ''}`
+  navigator.clipboard.writeText(url).catch(() => {})
+  ElMessage.success(t('raw.copiedText', { text: url.length > 40 ? url.slice(0, 40) + '...' : url }))
+  closeCtxMenu()
+}
+
+function ctxCopyRequest() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const body = f.request_body || ''
+  navigator.clipboard.writeText(body).catch(() => {})
+  ElMessage.success(t('raw.copiedText', { text: body.length > 40 ? body.slice(0, 40) + '...' : body }))
+  closeCtxMenu()
+}
+
+function ctxCopyResponse() {
+  const f = ctxMenu.value.flow
+  if (!f) return
+  const body = f.response_body || ''
+  navigator.clipboard.writeText(body).catch(() => {})
+  ElMessage.success(t('raw.copiedText', { text: body.length > 40 ? body.slice(0, 40) + '...' : body }))
+  closeCtxMenu()
+}
+
+async function ctxIgnoreHost() {
+  const f = ctxMenu.value.flow
+  if (!f || !f.host) {
+    ElMessage.warning(t('raw.noHostInfo'))
+    closeCtxMenu()
+    return
+  }
+  try {
+    await api.ignoreHost(f.host)
+    ElMessage.success(t('raw.ignoredHost', { host: f.host }))
+  } catch (e: any) {
+    ElMessage.error(t('raw.ignoreFailed') + (e?.message || e))
+  }
   closeCtxMenu()
 }
 
@@ -740,15 +883,23 @@ onMounted(() => {
   loadStatus()
   loadFlows()
   // 增量轮询：用 since_id 只拉新流量，降低流量大时的开销
+  // 性能修复：页面不可见（切到其他标签/最小化）时跳过轮询，避免后台无谓请求
   pollTimer = window.setInterval(() => {
+    if (document.hidden) return
     loadStatus()
     if (rawStatus.value.running) pollNewFlows()
-  }, 2000)
+  }, 3000)
+  // P1 监控统计轮询（1 秒一次）
+  statsTimer.value = window.setInterval(() => {
+    if (document.hidden) return
+    if (rawStatus.value.running) loadStats()
+  }, 1000)
   document.addEventListener('click', onGlobalClick)
   window.addEventListener('telnix:flows-cache-cleared', onFlowsCleared)
 })
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (statsTimer.value) clearInterval(statsTimer.value)
   if (floatBarTimer !== null) clearTimeout(floatBarTimer)
   document.removeEventListener('click', onGlobalClick)
   window.removeEventListener('telnix:flows-cache-cleared', onFlowsCleared)
@@ -847,7 +998,168 @@ onUnmounted(() => {
           <el-icon><CircleCheck /></el-icon>
         </el-button>
       </el-tooltip>
+      <!-- P1 监控面板开关 -->
+      <el-tooltip :content="showMonitor ? t('raw.hideMonitor') : t('raw.showMonitor')" placement="bottom">
+        <el-button
+          size="small"
+          :type="showMonitor ? 'primary' : 'default'"
+          @click="showMonitor = !showMonitor"
+        >
+          <el-icon><DataAnalysis /></el-icon>&nbsp;{{ t('raw.monitor') }}
+        </el-button>
+      </el-tooltip>
     </div>
+
+    <!-- P1 实时监控仪表盘 -->
+    <transition name="popup-fade">
+      <div v-if="showMonitor && rawStatus.running" class="monitor-panel">
+        <!-- 实时带宽统计 -->
+        <div class="monitor-section">
+          <div class="monitor-title">
+            <el-icon><TrendCharts /></el-icon>
+            <span>{{ t('raw.bandwidthMonitor') }}</span>
+            <div class="flex-1"></div>
+            <el-button size="small" text @click="resetStats">{{ t('raw.resetStats') }}</el-button>
+          </div>
+          <div class="monitor-stats">
+            <div class="stat-card">
+              <div class="stat-value">{{ rawStats?.pps?.toFixed(1) || '0.0' }}</div>
+              <div class="stat-label">{{ t('raw.pps') }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">{{ rawStats?.mbps?.toFixed(2) || '0.00' }}</div>
+              <div class="stat-label">{{ t('raw.mbps') }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">{{ rawStats?.dropped_packets || 0 }}</div>
+              <div class="stat-label">{{ t('raw.dropped') }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">{{ rawStats?.total_packets || 0 }}</div>
+              <div class="stat-label">{{ t('raw.totalPkts') }}</div>
+            </div>
+          </div>
+          <!-- 带宽趋势折线图（CSS 实现） -->
+          <div class="bw-trend-chart" v-if="rawStats?.trend?.length">
+            <div class="trend-label">{{ t('raw.bwTrend') }}</div>
+            <div class="trend-bars">
+              <div
+                v-for="(point, i) in rawStats.trend.slice(-15)"
+                :key="i"
+                class="trend-bar-wrap"
+                :title="`PPS: ${point.pps.toFixed(1)}, Mbps: ${point.mbps.toFixed(3)}`"
+              >
+                <div
+                  class="trend-bar"
+                  :style="{
+                    height: Math.min(100, (point.mbps / Math.max(...rawStats.trend.slice(-15).map(t => t.mbps), 0.001)) * 100) + '%'
+                  }"
+                ></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 协议分布统计 -->
+        <div class="monitor-section">
+          <div class="monitor-title">
+            <el-icon><PieChart /></el-icon>
+            <span>{{ t('raw.protoDistribution') }}</span>
+          </div>
+          <div class="proto-stats">
+            <div class="proto-pie" v-if="protoPieData.length">
+              <div class="pie-chart">
+                <div
+                  class="pie-slice tcp"
+                  :style="{ '--pct': protoPieData[0]?.pct || 0 }"
+                ></div>
+              </div>
+              <div class="pie-legend">
+                <div class="legend-item" v-for="item in protoPieData" :key="item.name">
+                  <span class="legend-dot" :class="item.name.toLowerCase()"></span>
+                  <span>{{ item.name }}</span>
+                  <span class="legend-pct">{{ item.pct }}%</span>
+                </div>
+              </div>
+            </div>
+            <div class="proto-bars" v-if="rawStats?.top_processes?.length">
+              <div class="proto-bars-title">{{ t('raw.topProcesses') }}</div>
+              <div v-for="proc in rawStats.top_processes" :key="proc.name" class="proc-bar-row">
+                <div class="proc-name" :title="proc.name">{{ proc.name || '(unknown)' }}</div>
+                <div class="proc-bar-wrap">
+                  <div
+                    class="proc-bar"
+                    :style="{
+                      width: (proc.pkts / Math.max(...rawStats.top_processes.map(p => p.pkts), 1) * 100) + '%'
+                    }"
+                  ></div>
+                </div>
+                <div class="proc-pkts">{{ proc.pkts }} pkts</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 活跃连接监控表格 -->
+        <div class="monitor-section monitor-section-wide">
+          <div class="monitor-title">
+            <el-icon><Connection /></el-icon>
+            <span>{{ t('raw.activeConnections') }}</span>
+            <span class="conn-count">({{ connTotal }})</span>
+          </div>
+          <div class="conn-filters">
+            <el-input
+              v-model="connFilter.process"
+              size="small"
+              :placeholder="t('raw.filterByProcess')"
+              clearable
+              style="width: 140px"
+            />
+            <el-input
+              v-model="connFilter.port"
+              size="small"
+              :placeholder="t('raw.filterByPort')"
+              clearable
+              style="width: 120px"
+            />
+          </div>
+          <div class="conn-table">
+            <div class="conn-head">
+              <div class="conn-col proto">{{ t('raw.proto') }}</div>
+              <div class="conn-col process">{{ t('raw.process') }}</div>
+              <div class="conn-col pid">{{ t('raw.pid') }}</div>
+              <div class="conn-col local-port">{{ t('raw.localPort') }}</div>
+              <div class="conn-col remote">{{ t('raw.remote') }}</div>
+              <div class="conn-col pkts">{{ t('raw.pkts') }}</div>
+            </div>
+            <div class="conn-body">
+              <template v-if="paginatedConnections.length">
+                <div v-for="conn in paginatedConnections" :key="`${conn.proto}-${conn.local_port}-${conn.remote_ip}-${conn.remote_port}`" class="conn-row">
+                  <div class="conn-col proto">
+                    <el-tag size="small" :type="conn.proto === 'tcp' ? 'primary' : 'warning'">{{ conn.proto?.toUpperCase() }}</el-tag>
+                  </div>
+                  <div class="conn-col process" :title="conn.proc_name">{{ conn.proc_name || '-' }}</div>
+                  <div class="conn-col pid">{{ conn.pid || '-' }}</div>
+                  <div class="conn-col local-port">{{ conn.local_port }}</div>
+                  <div class="conn-col remote">{{ conn.remote_ip }}:{{ conn.remote_port }}</div>
+                  <div class="conn-col pkts">{{ conn.pkt_count }}</div>
+                </div>
+              </template>
+              <div v-else class="conn-empty">{{ t('raw.noConnections') }}</div>
+            </div>
+          </div>
+          <div class="conn-pagination" v-if="connTotal > connPageSize">
+            <el-pagination
+              v-model:current-page="connPage"
+              :page-size="connPageSize"
+              :total="connTotal"
+              small
+              layout="prev, pager, next"
+            />
+          </div>
+        </div>
+      </div>
+    </transition>
 
     <!-- 统一悬浮窗（筛选 / 专注 互斥） -->
     <transition name="popup-fade">
@@ -977,9 +1289,9 @@ onUnmounted(() => {
       </div>
     </transition>
 
-    <!-- 主体：左列表 + 右详情 -->
-    <div class="raw-body flex-1 flex overflow-hidden">
-      <div class="raw-list-pane" v-loading="loading">
+    <!-- 主体：左列表 + 右详情 + 可拖拽分隔线 -->
+    <div class="raw-body flex-1 flex overflow-hidden" ref="rawBodyRef">
+      <div class="raw-list-pane" :style="{ width: `${leftRatio * 100}%` }">
         <div class="rl-head mono" :style="{ gridTemplateColumns: gridCols }">
           <div v-if="multiSelectMode" class="rl-check"></div>
           <div class="rl-id">#</div>
@@ -1070,7 +1382,8 @@ onUnmounted(() => {
           </div>
         </transition>
       </div>
-      <div class="raw-detail-pane">
+      <div class="raw-splitter" :class="{ active: dragging }" @mousedown="onSplitDown"></div>
+      <div class="raw-detail-pane" :style="{ width: `${(1 - leftRatio) * 100}%` }">
         <div v-if="!selectedFlow" class="empty-detail text-dim">
           <el-icon :size="36"><Document /></el-icon>
           <div style="margin-top: 10px">{{ t('raw.selectToViewHex') }}</div>
@@ -1079,14 +1392,13 @@ onUnmounted(() => {
           <div class="detail-head">
             <span class="mono">#{{ selectedFlow.id }} {{ selectedFlow.protocol?.toUpperCase() }}</span>
             <span class="text-muted">{{ selectedFlow.src_port }} → {{ selectedFlow.dst_port }}</span>
-            <span class="text-muted">{{ selectedFlow.process_name || 'pid:' + selectedFlow.pid }}</span>
+            <span class="text-muted process-name" :title="selectedFlow.process_name || 'pid:' + selectedFlow.pid">{{ selectedFlow.process_name || 'pid:' + selectedFlow.pid }}</span>
             <div class="flex-1"></div>
             <el-radio-group v-model="detailTab" size="small" class="detail-tab">
               <el-radio-button label="hex">{{ t('raw.hex') }}</el-radio-button>
               <el-radio-button label="protocol">{{ t('raw.protocolAnalysis') }}</el-radio-button>
             </el-radio-group>
             <el-select v-model="hexField" size="small" style="width: 140px" @change="refreshHex">
-              <el-option :label="t('raw.rawData')" value="raw_data" />
               <el-option :label="t('raw.requestBody')" value="request_body" />
               <el-option :label="t('raw.responseBody')" value="response_body" />
             </el-select>
@@ -1109,17 +1421,31 @@ onUnmounted(() => {
         @click.stop
       >
         <div class="ctx-item" @click="onFlowDblClick(ctxMenu.flow!)"><el-icon><Aim /></el-icon>&nbsp;{{ t('raw.viewInCapturePage') }}</div>
-        <!-- 忽略 -->
-        <div class="ctx-item" @click="ctxIgnorePid"><el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByPid') }}</div>
-        <div class="ctx-item" @click="ctxIgnoreProcess"><el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByProcess') }}</div>
         <div class="ctx-sep"></div>
-        <!-- 复制 -->
-        <div class="ctx-item ctx-submenu">
+        <div class="ctx-item" @click="ctxCopyUrl"><el-icon><Link /></el-icon>&nbsp;{{ t('raw.copyUrl') }}</div>
+        <div class="ctx-item" @click="ctxCopyRequest"><el-icon><Top /></el-icon>&nbsp;{{ t('raw.copyRequest') }}</div>
+        <div class="ctx-item" @click="ctxCopyResponse"><el-icon><Bottom /></el-icon>&nbsp;{{ t('raw.copyResponse') }}</div>
+        <div class="ctx-sep"></div>
+        <!-- 忽略：hover 子菜单 -->
+        <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter('ignore')" @mouseleave="onSubmenuLeave">
+          <el-icon><RemoveFilled /></el-icon>&nbsp;{{ t('raw.ignore') }}
+          <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
+          <div class="ctx-submenu-panel" :class="{ visible: showIgnoreSubmenu }">
+            <div class="ctx-item" @click="ctxIgnorePid"><el-icon><Link /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByPid') }}</div>
+            <div class="ctx-item" @click="ctxIgnoreProcess"><el-icon><Link /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByProcess') }}</div>
+            <div class="ctx-item" @click="ctxIgnoreHost"><el-icon><Link /></el-icon>&nbsp;{{ t('raw.ctxIgnoreByHost') }}</div>
+          </div>
+        </div>
+        <div class="ctx-sep"></div>
+        <!-- 复制：hover 子菜单 -->
+        <div class="ctx-item ctx-submenu" @mouseenter="onSubmenuEnter('copy')" @mouseleave="onSubmenuLeave">
           <el-icon><CopyDocument /></el-icon>&nbsp;{{ t('raw.copy') }}
           <el-icon class="ctx-arrow"><ArrowRight /></el-icon>
-        </div>
-        <div class="ctx-submenu-panel">
-          <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">{{ t(item.label) }}</div>
+          <div class="ctx-submenu-panel" :class="{ visible: showCopySubmenu }">
+            <div v-for="item in COPY_FIELDS" :key="item.key" class="ctx-item" @click="copyField(item.field)">
+              {{ t(item.label) }}
+            </div>
+          </div>
         </div>
         <div class="ctx-sep"></div>
         <div class="ctx-item ctx-danger" @click="ctxDelete"><el-icon><Delete /></el-icon>&nbsp;{{ t('raw.deleteFlow') }}</div>
@@ -1145,9 +1471,8 @@ onUnmounted(() => {
 }
 .raw-body { min-height: 0; }
 .raw-list-pane {
-  width: 50%; display: flex; flex-direction: column;
-  border-right: 1px solid var(--on-border-light); min-width: 0;
-  position: relative;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--on-border-light); min-width: 0; overflow: hidden;
 }
 .rl-head, .rl-row {
   display: grid;
@@ -1170,15 +1495,28 @@ onUnmounted(() => {
 .rl-row > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-check { display: flex; align-items: center; justify-content: center; }
 .empty-text { text-align: center; padding: 30px; color: var(--on-text-dim); }
-.raw-detail-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.raw-detail-pane { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.raw-splitter {
+  width: 4px; background: var(--on-border-light); cursor: col-resize; flex-shrink: 0;
+  transition: background 0.15s;
+}
+.raw-splitter:hover, .raw-splitter.active { background: var(--on-accent); }
 .empty-detail {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center;
 }
 .detail-head {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; overflow: hidden;
   padding: 8px 12px; border-bottom: 1px solid var(--on-border-light);
   font-size: 13px;
+  min-width: 0; /* 确保 flex 子项不溢出 */
+}
+.process-name {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hex-container {
   flex: 1;
@@ -1196,20 +1534,22 @@ onUnmounted(() => {
   display: inline-block;
   width: 6px; height: 6px;
   border-radius: var(--on-radius-full);
-  background: var(--on-accent, #2dd4bf);
+  background: var(--on-accent);
   margin-left: 2px;
   vertical-align: middle;
 }
 
 /* 统一悬浮窗 */
+/* UX 修复：min-width 用 min() 钳位并限制 max-width，窄窗口下不溢出视口 */
 .popup-shell {
   position: absolute;
   z-index: 30;
-  min-width: 340px;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  min-width: min(340px, calc(100vw - 20px));
+  max-width: calc(100vw - 20px);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-lg);
-  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  box-shadow: var(--on-shadow-lg);
   font-size: 12.5px;
   overflow: hidden;
 }
@@ -1217,13 +1557,13 @@ onUnmounted(() => {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px;
   cursor: move;
-  background: var(--on-bg-hover, #252535);
+  background: var(--on-bg-hover);
   border-bottom: 1px solid var(--on-border-light);
   user-select: none;
 }
 .popup-title { font-weight: 600; font-size: 12.5px; }
 .popup-close { cursor: pointer; opacity: .6; }
-.popup-close:hover { opacity: 1; color: var(--el-color-danger, #f56c6c); }
+.popup-close:hover { opacity: 1; color: var(--el-color-danger); }
 .popup-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 .popup-fade-enter-active, .popup-fade-leave-active {
   transition: opacity .15s ease, transform .15s ease;
@@ -1305,14 +1645,14 @@ onUnmounted(() => {
   z-index: 20;
   display: flex; align-items: center; gap: 6px;
   padding: 6px 10px;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-lg);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+  box-shadow: var(--on-shadow-md);
   font-size: 12px;
 }
 .mfb-count {
-  color: var(--on-accent, #2dd4bf);
+  color: var(--on-accent);
   font-weight: 600;
   padding-right: 4px;
 }
@@ -1329,10 +1669,10 @@ onUnmounted(() => {
   right: 0;
   margin-top: 6px;
   padding: 10px 12px;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-lg);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  box-shadow: var(--on-shadow-md);
   min-width: 220px;
   z-index: 21;
 }
@@ -1342,33 +1682,263 @@ onUnmounted(() => {
 /* 右键菜单样式 */
 .ctx-menu {
   position: fixed; z-index: 9999;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-md);
   padding: 4px 0;
   min-width: 160px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  box-shadow: var(--on-shadow-md);
   font-size: 13px;
 }
 .ctx-item {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 14px; cursor: pointer;
-  color: var(--on-text, #ccc);
+  color: var(--on-text);
 }
-.ctx-item:hover { background: var(--on-bg-hover, #2a2a3e); color: var(--on-accent, #2dd4bf); }
-.ctx-item.ctx-danger:hover { color: var(--el-color-danger, #f56c6c); }
-.ctx-sep { height: 1px; background: var(--on-border, #333344); margin: 4px 0; }
+.ctx-item:hover { background: var(--on-bg-hover); color: var(--on-accent); }
+.ctx-item.ctx-danger:hover { color: var(--el-color-danger); }
+.ctx-sep { height: 1px; background: var(--on-border); margin: 4px 0; }
 .ctx-submenu { position: relative; }
 .ctx-arrow { margin-left: auto; font-size: 10px; opacity: 0.6; }
 .ctx-submenu-panel {
   display: none;
   position: absolute; left: 100%; top: 0;
-  background: var(--on-bg-elevated, #1e1e2e);
-  border: 1px solid var(--on-border, #333344);
+  background: var(--on-bg-elevated);
+  border: 1px solid var(--on-border);
   border-radius: var(--on-radius-md);
   padding: 4px 0;
   min-width: 140px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  box-shadow: var(--on-shadow-md);
 }
-.ctx-submenu:hover .ctx-submenu-panel { display: block; }
+.ctx-submenu:hover .ctx-submenu-panel, .ctx-submenu-panel.visible { display: block; }
+
+/* P1 实时监控仪表盘 */
+.monitor-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--on-bg-elevated);
+  border-bottom: 1px solid var(--on-border-light);
+}
+.monitor-section {
+  background: var(--on-bg);
+  border: 1px solid var(--on-border-light);
+  border-radius: var(--on-radius-md);
+  padding: 8px 10px;
+  min-width: 200px;
+}
+.monitor-section-wide {
+  flex: 1;
+  min-width: 400px;
+}
+.monitor-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-text-muted);
+  margin-bottom: 8px;
+}
+.monitor-stats {
+  display: flex;
+  gap: 12px;
+}
+.stat-card {
+  text-align: center;
+  min-width: 60px;
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  color: var(--on-accent);
+}
+.stat-label {
+  font-size: 10px;
+  color: var(--on-text-dim);
+  margin-top: 2px;
+}
+
+/* 带宽趋势折线图 */
+.bw-trend-chart {
+  margin-top: 8px;
+}
+.trend-label {
+  font-size: 10px;
+  color: var(--on-text-dim);
+  margin-bottom: 4px;
+}
+.trend-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 40px;
+}
+.trend-bar-wrap {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.trend-bar {
+  width: 100%;
+  background: var(--on-accent);
+  border-radius: 2px 2px 0 0;
+  min-height: 2px;
+  opacity: 0.8;
+  transition: height 0.3s ease;
+}
+
+/* 协议分布 */
+.proto-stats {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.proto-pie {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pie-chart {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--el-color-primary) calc(var(--pct) * 1%),
+    var(--el-color-warning) calc(var(--pct) * 1%)
+  );
+  position: relative;
+}
+.pie-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.legend-dot.tcp { background: var(--el-color-primary); }
+.legend-dot.udp { background: var(--el-color-warning); }
+.legend-pct {
+  color: var(--on-text-dim);
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+/* Top 进程柱状图 */
+.proto-bars {
+  flex: 1;
+  min-width: 120px;
+}
+.proto-bars-title {
+  font-size: 10px;
+  color: var(--on-text-dim);
+  margin-bottom: 4px;
+}
+.proc-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.proc-name {
+  width: 60px;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--on-text-muted);
+}
+.proc-bar-wrap {
+  flex: 1;
+  height: 8px;
+  background: var(--on-border-light);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.proc-bar {
+  height: 100%;
+  background: var(--el-color-primary);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.proc-pkts {
+  font-size: 10px;
+  color: var(--on-text-dim);
+  min-width: 50px;
+  text-align: right;
+}
+
+/* 活跃连接表格 */
+.conn-filters {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.conn-count {
+  font-size: 11px;
+  color: var(--on-text-dim);
+  font-weight: normal;
+}
+.conn-table {
+  border: 1px solid var(--on-border-light);
+  border-radius: var(--on-radius-sm);
+  overflow: hidden;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.conn-head {
+  display: grid;
+  grid-template-columns: 60px 100px 50px 80px 1fr 60px;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--on-bg);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--on-text-muted);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--on-border-light);
+}
+.conn-body {
+  font-size: 11px;
+}
+.conn-row {
+  display: grid;
+  grid-template-columns: 60px 100px 50px 80px 1fr 60px;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--on-border-light);
+  align-items: center;
+}
+.conn-row:last-child { border-bottom: none; }
+.conn-row:hover { background: var(--on-bg-hover); }
+.conn-col {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conn-empty {
+  text-align: center;
+  padding: 20px;
+  color: var(--on-text-dim);
+  font-size: 12px;
+}
+.conn-pagination {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
 </style>

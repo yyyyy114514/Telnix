@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import TextSearch from './TextSearch.vue'
 
 // Headers 标签页：key-value 表格，支持编辑（断点时）
+const { t } = useI18n()
 const props = defineProps<{
   modelValue: string | null
   editable?: boolean
@@ -81,8 +83,8 @@ function removeRow(i: number) {
       <table class="kv-table">
         <thead>
           <tr>
-            <th style="width: 38%">名称</th>
-            <th>值</th>
+            <th style="width: 38%">{{ t('common.name') }}</th>
+            <th>{{ t('common.value') }}</th>
             <th style="width: 40px"></th>
           </tr>
         </thead>
@@ -101,13 +103,13 @@ function removeRow(i: number) {
             </td>
           </tr>
           <tr v-if="!rows.length">
-            <td colspan="3" class="empty-text text-dim">（无 Headers）</td>
+            <td colspan="3" class="empty-text text-dim">{{ t('headerView.noHeaders') }}</td>
           </tr>
         </tbody>
       </table>
       <div class="add-row-bar">
         <el-button size="small" @click="addRow">
-          <el-icon><Plus /></el-icon>&nbsp;新增 Header
+          <el-icon><Plus /></el-icon>&nbsp;{{ t('headerView.addHeader') }}
         </el-button>
       </div>
     </div>

@@ -1,13 +1,18 @@
-"""DNS 劫持后端 - 跨平台实现。
+"""DNS hijack backend - cross-platform implementation.
 
-工作模式：
-- Windows: WinDivert 在网络层截获 UDP 53 端口的 DNS 响应包，修改 A 记录 IP
-- Linux: iptables NAT 把 UDP 53 重定向到本地 DNS 服务器（127.0.0.1:5354）
-- macOS: pf rdr 把 UDP 53 重定向到本地 DNS 服务器（127.0.0.1:5354）
+Working modes:
+- Windows: WinDivert intercepts DNS response packets on UDP port 53 at network layer, modifies A record IP
+- Linux: iptables NAT redirects UDP 53 to local DNS server (127.0.0.1:5354)
+- macOS: pf rdr redirects UDP 53 to local DNS server (127.0.0.1:5354)
 
-跨平台说明：
-- Windows: WinDivert 拦截模式，修改原响应包的 A 记录 RDATA
-- Unix: 本地 DNS 服务器直接构造响应（更干净，无需修改原响应包）
+Cross-platform notes:
+- Windows: WinDivert intercept mode, modifies A record RDATA of original response packet
+- Unix: Local DNS server directly constructs response (cleaner, no need to modify original response packet)
+
+DoH/DoT support:
+- detect_doh_request() checks flow for DNS-over-HTTPS indicators
+- Common DoH providers: cloudflare-dns.com, dns.google, dns.quad9.net, one.one.one.one, dns.adguard.com
+- DoT (DNS-over-TLS): port 853 direct connections to known DoT servers
 """
 from __future__ import annotations
 
@@ -30,6 +35,74 @@ IS_LINUX = sys.platform.startswith("linux")
 IS_MACOS = sys.platform == "darwin"
 IS_UNIX = IS_LINUX or IS_MACOS
 
+# ============ DoH/DoT 检测相关常量 ============
+
+# 已知 DoH 服务器域名列表
+DOH_SERVER_DOMAINS: frozenset[str] = frozenset({
+    # Cloudflare
+    "cloudflare-dns.com",
+    "one.one.one.one",
+    "cloudflare-dns.org",
+    # Google
+    "dns.google",
+    "dns.google.com",
+    # Quad9
+    "dns.quad9.net",
+    "dns9.quad9.net",
+    # AdGuard
+    "dns.adguard.com",
+    "dns.adguard-dns.com",
+    "family.adguard-dns.com",
+    # NextDNS
+    "dns.nextdns.io",
+    "anycast.dns.nextdns.io",
+    # OpenDNS
+    "doh.opendns.com",
+    "doh64.secure.internode.on.net",
+    # CleanBrowsing
+    "doh.cleanbrowsing.org",
+    "security-filter-dns.cleanbrowsing.org",
+    "family-filter-dns.cleanbrowsing.org",
+    # Mullvad
+    "dns.mullvad.net",
+    # ControlD
+    "dns.controld.com",
+    "doh.privacy.xyz",
+    # Quad101
+    "dns.twnic.tw",
+    # etc.
+})
+
+# 已知 DoT 服务器域名列表（用于检测 DoT 流量）
+DOT_SERVER_DOMAINS: frozenset[str] = frozenset({
+    "cloudflare-dns.com",
+    "one.one.one.one",
+    "dns.google",
+    "dns.quad9.net",
+    "dns.adguard.com",
+    "dns.nextdns.io",
+    "dns.mullvad.net",
+    "dns.twnic.tw",
+    "doh.cleanbrowsing.org",
+})
+
+# DoH 相关 HTTP 头（用于检测 DoH 请求）
+DOH_HTTP_HEADERS: frozenset[str] = frozenset({
+    "accept",
+    "content-type",
+    "host",
+    "doh",
+    "x-doh",
+})
+
+# DoH 内容类型
+DOH_CONTENT_TYPES: frozenset[str] = frozenset({
+    "application/dns-message",
+    "application/dns-json",
+    "application/manifest+json",
+    "application/x-google-protobuf",
+})
+
 # 单条规则通配符数量上限（防止 ReDoS）
 # 实测：20 个 *a* 交替的通配符 + 200 字符域名即可触发 >3s 卡顿；
 # 8 个通配符在最坏输入下 <0.1ms，覆盖所有合理用例（典型 1-2 个）。
@@ -51,7 +124,7 @@ _STATS_LOCK = threading.Lock()
 
 
 def _log_hijack(domain: str, original_ips: list, new_ip: str, src: str):
-    """记录一条劫持日志。"""
+    """Record a hijack log entry."""
     entry = {
         "ts": datetime.now().isoformat(),
         "domain": domain,
@@ -79,8 +152,220 @@ def _reset_stats():
             _STATS[k] = 0
 
 
+# ============ DoH/DoT 检测函数 ============
+
+def detect_doh_request(flow: dict) -> dict:
+    """检测流量是否为 DoH/DoT 请求。
+
+    Args:
+        flow: 流量字典，包含 host, url, headers, sni, method 等字段
+
+    Returns:
+        检测结果字典：
+        {
+            "is_doh": bool,           # 是否为 DoH 请求
+            "is_dot": bool,           # 是否为 DoT 请求
+            "provider": str | None,   # DoH 提供商名称
+            "reason": str,            # 检测依据
+            "confidence": str,        # confidence: "high", "medium", "low"
+        }
+    """
+    result = {
+        "is_doh": False,
+        "is_dot": False,
+        "provider": None,
+        "reason": "",
+        "confidence": "none",
+    }
+
+    # 提取关键信息
+    host = (flow.get("host") or "").lower()
+    url = (flow.get("url") or "").lower()
+    method = (flow.get("method") or "").upper()
+    sni = (flow.get("sni") or "").lower()
+    headers = flow.get("headers") or {}
+    if isinstance(headers, dict):
+        headers = {k.lower(): v for k, v in headers.items()}
+
+    # 检查是否为 HTTPS 请求（DoH 使用 HTTPS）
+    is_https = flow.get("scheme") == "https" or flow.get("port") == 443
+    port = flow.get("port")
+
+    # ========== 优先检测 DoT (DNS over TLS) ==========
+    # DoT 通常是直接连接到 853 端口的 TLS 连接，特征明确
+    if port == 853:
+        result["is_dot"] = True
+        if sni in DOT_SERVER_DOMAINS:
+            result["provider"] = sni
+            result["reason"] = f"SNI matches DoT provider: {sni}"
+            result["confidence"] = "high"
+        else:
+            result["reason"] = "Port 853 suggests DoT"
+            result["confidence"] = "medium"
+        return result
+
+    # ========== 检测 DoH (DNS over HTTPS) ==========
+    # 方法1: 检查 SNI 是否为已知 DoH 域名
+    for doh_domain in DOH_SERVER_DOMAINS:
+        if sni == doh_domain or (sni and sni.endswith(f".{doh_domain}")):
+            result["is_doh"] = True
+            result["provider"] = doh_domain
+            result["reason"] = f"SNI matches DoH provider: {doh_domain}"
+            result["confidence"] = "high"
+            return result
+
+    # 方法2: 检查 Host header 是否为已知 DoH 域名
+    for doh_domain in DOH_SERVER_DOMAINS:
+        if host == doh_domain or host.endswith(f".{doh_domain}"):
+            # 进一步检查 HTTP headers 是否符合 DoH 特征
+            content_type = headers.get("content-type", "")
+            accept = headers.get("accept", "")
+
+            if any(ct in content_type for ct in DOH_CONTENT_TYPES):
+                result["is_doh"] = True
+                result["provider"] = doh_domain
+                result["reason"] = f"Host + Content-Type matches DoH: {doh_domain}"
+                result["confidence"] = "high"
+                return result
+
+            if "application/dns" in content_type or "application/dns" in accept:
+                result["is_doh"] = True
+                result["provider"] = doh_domain
+                result["reason"] = f"Host + DNS Content-Type matches DoH: {doh_domain}"
+                result["confidence"] = "high"
+                return result
+
+            # DoH GET 请求特征（Google 格式）
+            if "resolve" in url or "dns-query" in url:
+                result["is_doh"] = True
+                result["provider"] = doh_domain
+                result["reason"] = f"Host + URL path matches DoH: {doh_domain}"
+                result["confidence"] = "medium"
+                return result
+
+    # 方法3: 检查 URL 路径
+    doh_path_patterns = [
+        "/dns-query",
+        "/dns-query/",
+        "/resolve",
+        "/api/dns",
+        "/doh/query",
+        "/doh/submit",
+    ]
+    for pattern in doh_path_patterns:
+        if pattern in url and is_https:
+            result["is_doh"] = True
+            result["reason"] = f"URL path matches DoH pattern: {pattern}"
+            result["confidence"] = "medium"
+            return result
+
+    # 方法4: 检查 HTTP headers 中的 DoH 特征
+    # Chrome/Edge 使用 X-HTTP-Method-Override 或特殊的 Accept 头
+    if "accept" in headers:
+        accept_lower = headers["accept"].lower()
+        if "application/dns" in accept_lower or "application/x-google-protobuf" in accept_lower:
+            result["is_doh"] = True
+            result["reason"] = "Accept header suggests DoH"
+            result["confidence"] = "medium"
+            return result
+
+    # 方法5: 检查 Content-Type
+    if "content-type" in headers:
+        content_type_lower = headers["content-type"].lower()
+        if any(ct in content_type_lower for ct in DOH_CONTENT_TYPES):
+            result["is_doh"] = True
+            result["reason"] = "Content-Type suggests DoH"
+            result["confidence"] = "medium"
+            return result
+
+    # ========== 兜底检测 DoT (基于 SNI) ==========
+    # DoT 可以不依赖端口（通过 SNI 识别）
+    if sni in DOT_SERVER_DOMAINS:
+        result["is_dot"] = True
+        result["provider"] = sni
+        result["reason"] = f"SNI matches DoT provider: {sni}"
+        result["confidence"] = "medium"  # 降级为 medium 因为没有明确端口
+        return result
+
+    return result
+
+
+def detect_doh_in_flows(flows: list[dict]) -> dict:
+    """检测一批流量中的 DoH/DoT 请求。
+
+    Args:
+        flows: 流量字典列表
+
+    Returns:
+        {
+            "doh_count": int,        # DoH 请求数量
+            "dot_count": int,        # DoT 请求数量
+            "doh_flows": list,      # DoH 流量详情
+            "dot_flows": list,      # DoT 流量详情
+            "doh_providers": dict,  # 各提供商数量统计
+        }
+    """
+    result = {
+        "doh_count": 0,
+        "dot_count": 0,
+        "doh_flows": [],
+        "dot_flows": [],
+        "doh_providers": {},
+    }
+
+    for flow in flows:
+        detection = detect_doh_request(flow)
+
+        if detection["is_doh"]:
+            result["doh_count"] += 1
+            provider = detection.get("provider") or "unknown"
+            result["doh_providers"][provider] = result["doh_providers"].get(provider, 0) + 1
+            result["doh_flows"].append({
+                "id": flow.get("id"),
+                "url": flow.get("url"),
+                "method": flow.get("method"),
+                "sni": flow.get("sni"),
+                "host": flow.get("host"),
+                **detection,
+            })
+
+        if detection["is_dot"]:
+            result["dot_count"] += 1
+            provider = detection.get("provider") or "unknown"
+            result["dot_flows"].append({
+                "id": flow.get("id"),
+                "url": flow.get("url"),
+                "method": flow.get("method"),
+                "sni": flow.get("sni"),
+                "port": flow.get("port"),
+                **detection,
+            })
+
+    return result
+
+
+def get_doh_status() -> dict:
+    """获取 DoH 检测状态和统计信息。
+
+    Returns:
+        {
+            "doh_enabled": bool,           # 检测到 DoH 流量
+            "dot_enabled": bool,           # 检测到 DoT 流量
+            "known_providers": list,       # 已知 DoH 提供商列表
+            "recent_detection": dict,      # 最近一次检测结果（如果有）
+        }
+    """
+    return {
+        "doh_enabled": False,  # 将在流量检测时动态更新
+        "dot_enabled": False,
+        "known_providers": sorted(DOH_SERVER_DOMAINS),
+        "known_dot_providers": sorted(DOT_SERVER_DOMAINS),
+        "supported_doh_content_types": sorted(DOH_CONTENT_TYPES),
+    }
+
+
 class DnsHijacker:
-    """DNS 劫持后端。"""
+    """DNS hijack backend."""
 
     def __init__(self):
         self._running = False
@@ -99,6 +384,9 @@ class DnsHijacker:
         # 本机 IP 集合缓存（避免每次包都查询）
         self._local_ips: set[str] = set()
         self._local_ips_ts: float = 0.0
+        # admin 检查结果缓存（降低 status API 频繁调用时的开销）
+        self._admin_cache: bool | None = None
+        self._admin_cache_ts: float = 0.0
 
     @property
     def running(self) -> bool:
@@ -109,13 +397,13 @@ class DnsHijacker:
         return self._last_error
 
     def set_rules(self, rules: dict[str, str], default_ip: str = ""):
-        """更新劫持规则。
+        """Update hijack rules.
 
-        rules: {domain: fake_ip}，domain 支持通配符 * 和 ?
-        - 精确匹配：baidu.com
-        - 后缀通配：*.baidu.com（匹配 mbd.baidu.com、www.baidu.com）
-        - 任意位置通配：*baidu*（匹配 mbd.baidu.com、baidu.com、tieba.baidu.com）
-        default_ip: 默认劫持 IP（所有未匹配规则的 A 记录查询都返回此 IP）
+        rules: {domain: fake_ip}, domain supports wildcards * and ?
+        - Exact match: baidu.com
+        - Suffix wildcard: *.baidu.com (matches mbd.baidu.com, www.baidu.com)
+        - Any position wildcard: *baidu* (matches mbd.baidu.com, baidu.com, tieba.baidu.com)
+        default_ip: default hijack IP (all A record queries not matching rules return this IP)
         """
         with self._lock:
             # 规范化规则：domain 转小写，去前后空白
@@ -132,7 +420,7 @@ class DnsHijacker:
                     # 防止 ReDoS：通配符过多会导致正则引擎指数级回溯
                     # （20 个 *a* + 200 字符域名实测 >3s 卡顿）
                     if pattern.count('*') + pattern.count('?') > _MAX_WILDCARDS_PER_PATTERN:
-                        logger.warning("dns_hijack", "规则通配符过多，已跳过编译",
+                        logger.warning("dns_hijack", "Too many rule wildcards, skipped compilation",
                                        f"pattern={pattern!r} count={pattern.count('*') + pattern.count('?')}"
                                        f" max={_MAX_WILDCARDS_PER_PATTERN}")
                         continue
@@ -148,7 +436,7 @@ class DnsHijacker:
             return dict(self._rules), self._default_ip
 
     def _match_rule(self, domain: str) -> str | None:
-        """匹配域名，返回劫持 IP 或 None。"""
+        """Match domain, return hijack IP or None."""
         d = domain.strip().lower()
         if not d:
             return None
@@ -166,7 +454,7 @@ class DnsHijacker:
         return None
 
     def _refresh_local_ips(self):
-        """刷新本机 IP 集合（用于判断包方向）。"""
+        """Refresh local IP set (used to determine packet direction)."""
         now = time.time()
         if now - self._local_ips_ts < 30:
             return
@@ -188,41 +476,49 @@ class DnsHijacker:
         return ip in self._local_ips
 
     def _is_admin(self) -> bool:
+        now = time.time()
+        if self._admin_cache is not None and now - self._admin_cache_ts < 30:
+            return self._admin_cache
+        result = False
         if not IS_WINDOWS:
             try:
-                return os.geteuid() == 0  # type: ignore[attr-defined]
+                result = os.geteuid() == 0  # type: ignore[attr-defined]
             except AttributeError:
-                return False
-        try:
-            import ctypes
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
-        except Exception:
-            return False
+                result = False
+        else:
+            try:
+                import ctypes
+                result = bool(ctypes.windll.shell32.IsUserAnAdmin())
+            except Exception:
+                result = False
+        self._admin_cache = result
+        self._admin_cache_ts = now
+        return result
 
     def start(self) -> tuple[bool, str]:
-        """启动 DNS 劫持（Windows 专用）。返回 (success, msg)。
+        """Start DNS hijack (Windows only). Returns (success, msg).
 
-        注意：非 Windows 平台不应调用此方法。start_hijack() 会自动路由到
-        LocalDnsHijacker（dns_hijack_local.py），无需调用方关心平台。
+        Note: Non-Windows platforms should not call this method. start_hijack() will automatically route to
+        LocalDnsHijacker (dns_hijack_local.py), no need for caller to care about platform.
         """
         if not IS_WINDOWS:
-            # 防御性检查：非 Windows 平台不应走到这里（start_hijack 会路由到 LocalDnsHijacker）
-            logger.error("dns_hijack", "DnsHijacker.start() 在非 Windows 平台被调用",
-                         "应由 start_hijack() 路由到 LocalDnsHijacker，请检查调用方")
-            return False, "内部错误：Windows 后端在非 Windows 平台被调用"
+            # Defensive check: non-Windows platforms should not reach here (start_hijack routes to LocalDnsHijacker)
+            logger.error("dns_hijack", "DnsHijacker.start() called on non-Windows platform",
+                         "Should be routed to LocalDnsHijacker by start_hijack(), please check caller")
+            return False, "Internal error: Windows backend called on non-Windows platform"
         try:
             import pydivert  # type: ignore  # noqa: F401
         except ImportError:
-            msg = "pydivert 未安装，请运行: pip install pydivert"
-            logger.error("dns_hijack", "pydivert 未安装", msg)
+            msg = "pydivert not installed, please run: pip install pydivert"
+            logger.error("dns_hijack", "pydivert not installed", msg)
             return False, msg
         if self._running:
-            return True, "已在运行"
+            return True, "Already running"
         try:
             import pydivert  # type: ignore
             if not self._is_admin():
-                msg = "DNS 劫持需要管理员权限"
-                logger.error("dns_hijack", "权限不足", msg)
+                msg = "DNS hijack requires administrator privileges"
+                logger.error("dns_hijack", "Insufficient privileges", msg)
                 return False, msg
             # WinDivert filter：拦截 UDP 53 和 TCP 53 端口的包
             # UDP 53：标准 DNS 查询/响应（系统 nslookup、curl 等）
@@ -243,33 +539,33 @@ class DnsHijacker:
             self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="dns-hijack")
             self._thread.start()
             rules, default_ip = self.get_rules()
-            logger.info("dns_hijack", "DNS 劫持已启动",
-                        f"rules={len(rules)} 条, default_ip={default_ip or '(无)'}")
-            return True, "DNS 劫持已启动"
+            logger.info("dns_hijack", "DNS hijack started",
+                        f"rules={len(rules)} rules, default_ip={default_ip or '(none)'}")
+            return True, "DNS hijack started"
         except Exception as e:  # noqa: BLE001
             err_msg = str(e)
             self._last_error = err_msg
-            logger.error("dns_hijack", "WinDivert 启动失败", err_msg)
+            logger.error("dns_hijack", "WinDivert start failed", err_msg)
             self._divert = None
             self._running = False
             low = err_msg.lower()
             if "找不到" in err_msg or "not found" in low:
-                return False, "WinDivert 驱动文件缺失，请确保已安装 pydivert"
+                return False, "WinDivert driver file missing, please ensure pydivert is installed"
             if "access is denied" in low or "拒绝访问" in low:
-                return False, "权限不足，请用管理员身份运行 Telnix"
+                return False, "Insufficient privileges, please run Telnix as administrator"
             if "签名" in err_msg or "sign" in low:
-                return False, "WinDivert 驱动加载被拦截，可能是杀软拦截，请加入白名单"
-            return False, f"启动失败: {err_msg}"
+                return False, "WinDivert driver loading blocked, possibly by antivirus, please add to whitelist"
+            return False, f"Start failed: {err_msg}"
 
     def stop(self) -> tuple[bool, str]:
-        """停止 DNS 劫持。
+        """Stop DNS hijack.
 
-        先 _running=False，再用 shutdown 解除 recv 阻塞，再 close。
-        避免直接 close 导致工作线程永久阻塞在 recv。
+        First _running=False, then use shutdown to unblock recv, then close.
+        Avoids directly closing which would cause worker thread to permanently block on recv.
         Platform: Windows
         """
         if not self._running:
-            return True, "未在运行"
+            return True, "Not running"
         self._running = False
         self._enabled = False
         if self._divert:
@@ -285,8 +581,8 @@ class DnsHijacker:
             if self._thread:
                 self._thread.join(timeout=3)
                 if self._thread.is_alive():
-                    logger.warning("dns_hijack", "停止时工作线程仍在运行",
-                                   "可能存在阻塞 recv")
+                    logger.warning("dns_hijack", "Worker thread still running on stop",
+                                   "possible blocking recv")
                 self._thread = None
             # 最后关闭句柄（join 之后，避免 close-during-blocking-recv 未定义行为）
             try:
@@ -294,16 +590,16 @@ class DnsHijacker:
             except Exception:  # noqa: BLE001
                 pass
             self._divert = None
-        logger.info("dns_hijack", "DNS 劫持已停止",
+        logger.info("dns_hijack", "DNS hijack stopped",
                     f"stats={get_stats()}")
-        return True, "DNS 劫持已停止"
+        return True, "DNS hijack stopped"
 
     def _capture_loop(self):
-        """抓包主循环：recv → 判断是否需要劫持 → 修改 → send。
+        """Capture main loop: recv -> determine if hijack needed -> modify -> send.
 
-        支持 UDP 53 和 TCP 53 两种 DNS 传输：
-        - UDP 53：DNS payload 直接是 IP payload
-        - TCP 53：DNS payload 前有 2 字节长度前缀（RFC 1035 §4.2.2）
+        Supports both UDP 53 and TCP 53 DNS transports:
+        - UDP 53: DNS payload is directly IP payload
+        - TCP 53: DNS payload has 2-byte length prefix (RFC 1035 §4.2.2)
         """
         import pydivert  # type: ignore
         global _STATS
@@ -375,7 +671,7 @@ class DnsHijacker:
                         with _STATS_LOCK:
                             _STATS["hijacked_packets"] += 1
                         _log_hijack(domain or "?", original_ips, new_ip, ip_hdr.src_addr)
-                        logger.info("dns_hijack", "劫持 DNS 响应",
+                        logger.info("dns_hijack", "Hijacking DNS response",
                                     f"domain={domain} {original_ips} -> {new_ip}")
                     else:
                         with _STATS_LOCK:
@@ -383,18 +679,18 @@ class DnsHijacker:
                 except Exception as e:  # noqa: BLE001
                     with _STATS_LOCK:
                         _STATS["errors"] += 1
-                    logger.error("dns_hijack", "劫持处理失败", str(e))
+                    logger.error("dns_hijack", "Hijack processing failed", str(e))
                 # 不论是否修改，都要 send（否则会断网）
                 self._divert.send(packet)
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.error("dns_hijack", "劫持循环异常", str(e))
+                    logger.error("dns_hijack", "Hijack loop exception", str(e))
                     time.sleep(0.05)
 
     def _maybe_hijack(self, data: bytes) -> tuple:
-        """解析 DNS 响应，按规则修改 A 记录。
+        """Parse DNS response, modify A record according to rules.
 
-        返回 (new_payload, hijacked, domain, original_ips, new_ip)
+        Returns (new_payload, hijacked, domain, original_ips, new_ip)
         """
         if len(data) < 12:
             return data, False, "", [], ""
@@ -432,7 +728,7 @@ class DnsHijacker:
         try:
             ip_bytes = socket.inet_aton(new_ip)
         except OSError:
-            logger.warning("dns_hijack", "规则 IP 无效", f"domain={domain} ip={new_ip}")
+            logger.warning("dns_hijack", "Invalid rule IP", f"domain={domain} ip={new_ip}")
             return data, False, domain, [], ""
 
         # AAAA 查询（IPv6）：清空 Answer 段，强制浏览器回退到 IPv4 A 记录查询
@@ -482,9 +778,9 @@ class DnsHijacker:
         return bytes(new_data), True, domain, original_ips, new_ip
 
     def _parse_name(self, data: bytes, offset: int) -> tuple[str, int]:
-        """解析 DNS 域名（支持压缩指针）。
+        """Parse DNS domain name (supports compression pointers).
 
-        返回 (domain, new_offset)：new_offset 指向 NAME 后的位置
+        Returns (domain, new_offset): new_offset points to position after NAME
         """
         labels: list[str] = []
         pos = offset
@@ -529,9 +825,9 @@ _singleton_lock = threading.Lock()
 
 
 def get_hijacker() -> "DnsHijacker | Any":
-    """获取 DNS 劫持单例。
+    """Get DNS hijack singleton.
 
-    Windows 平台返回 DnsHijacker 实例，Unix 平台返回 LocalDnsHijacker 实例。
+    Returns DnsHijacker instance on Windows, LocalDnsHijacker instance on Unix.
     """
     global _dns_hijacker
     with _singleton_lock:
@@ -546,15 +842,15 @@ def get_hijacker() -> "DnsHijacker | Any":
 
 
 def start_hijack(rules: dict[str, str], default_ip: str = "") -> tuple[bool, str]:
-    """启动 DNS 劫持。
+    """Start DNS hijack.
 
-    平台支持：
-    - Windows: WinDivert 拦截模式（需 pydivert + 管理员权限）
-    - Linux: iptables NAT + 本地 DNS 服务器（需 root）
-    - macOS: pf rdr + 本地 DNS 服务器（需 root）
+    Platform support:
+    - Windows: WinDivert intercept mode (requires pydivert + administrator privileges)
+    - Linux: iptables NAT + local DNS server (requires root)
+    - macOS: pf rdr + local DNS server (requires root)
 
-    rules: {domain: fake_ip} 字典
-    default_ip: 默认劫持 IP（所有未匹配规则的 A 记录查询都返回此 IP）
+    rules: {domain: fake_ip} dict
+    default_ip: default hijack IP (all A record queries not matching rules return this IP)
     """
     h = get_hijacker()
     h.set_rules(rules, default_ip)
@@ -562,25 +858,25 @@ def start_hijack(rules: dict[str, str], default_ip: str = "") -> tuple[bool, str
 
 
 def stop_hijack() -> tuple[bool, str]:
-    """停止 DNS 劫持。"""
+    """Stop DNS hijack."""
     h = get_hijacker()
     return h.stop()
 
 
 def update_rules(rules: dict[str, str], default_ip: str = "") -> tuple[bool, str]:
-    """更新规则（运行时热更新）。"""
+    """Update rules (runtime hot update)."""
     h = get_hijacker()
     h.set_rules(rules, default_ip)
-    return True, f"已更新 {len(rules)} 条规则"
+    return True, f"Updated {len(rules)} rules"
 
 
 def hijack_status() -> dict:
-    """获取当前状态。
+    """Get current status.
 
-    平台支持：
-    - Windows: WinDivert 后端状态
-    - Linux: iptables + 本地 DNS 服务器状态
-    - macOS: pf + 本地 DNS 服务器状态
+    Platform support:
+    - Windows: WinDivert backend status
+    - Linux: iptables + local DNS server status
+    - macOS: pf + local DNS server status
     """
     h = get_hijacker()
     rules, default_ip = h.get_rules()
@@ -614,7 +910,7 @@ def hijack_status() -> dict:
 
 
 def clear_log():
-    """清空劫持日志。"""
+    """Clear hijack log."""
     with _HIJACK_LOG_LOCK:
         _HIJACK_LOG.clear()
     with _STATS_LOCK:

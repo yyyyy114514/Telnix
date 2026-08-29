@@ -1,24 +1,24 @@
-"""透明代理模式（简化版）- 跨平台 NETWORK 层重定向。
+"""Transparent proxy mode (simplified) - cross-platform NETWORK layer redirection.
 
-工作原理：
-- Windows: WinDivert 拦截出站 TCP dstPort=80/443 的包，改写地址到本地代理
-- Linux: iptables NAT REDIRECT 把出站 TCP 80/443 重定向到本地代理端口
-- macOS: pf rdr 把出站 TCP 80/443 重定向到本地代理端口
+Working principle:
+- Windows: WinDivert intercepts outbound TCP packets with dstPort=80/443, rewrites addresses to local proxy
+- Linux: iptables NAT REDIRECT redirects outbound TCP 80/443 to local proxy port
+- macOS: pf rdr redirects outbound TCP 80/443 to local proxy port
 
-简化范围：
-- HTTP(80) 走代理正常解析；HTTPS(443) 走 raw TCP 隧道（不解密，端到端 TLS）
-- 仅出站连接，不处理入站
-- 仅在用户显式启用时工作（设置 transparent_proxy=True）
-- 与系统代理并存：系统代理处理已配置的客户端，透明代理处理无代理感知的客户端
+Simplification scope:
+- HTTP(80) goes through proxy for normal parsing; HTTPS(443) uses raw TCP tunnel (no decryption, end-to-end TLS)
+- Outbound connections only, no inbound handling
+- Only works when explicitly enabled by user (setting transparent_proxy=True)
+- Coexists with system proxy: system proxy handles configured clients, transparent proxy handles proxy-unaware clients
 
-隐蔽性优势：
-- 应用无需配置代理，对 HTTP 流量完全透明
-- 不修改系统注册表（不写 ProxyServer/ProxyEnable）
-- 浏览器无代理感知，难以通过常规手段探测
+Stealth advantages:
+- Applications need no proxy configuration, fully transparent to HTTP traffic
+- Does not modify system registry (does not write ProxyServer/ProxyEnable)
+- Browser has no proxy awareness, hard to detect via conventional means
 
-跨平台说明：
-- Windows: WinDivert NETWORK 层拦截 + 用户态 NAT 表
-- Unix: iptables/pf 内核态 NAT，反向流量自动处理（无需 NAT 表）
+Cross-platform notes:
+- Windows: WinDivert NETWORK layer interception + userspace NAT table
+- Unix: iptables/pf kernel-space NAT, reverse traffic handled automatically (no NAT table needed)
 """
 from __future__ import annotations
 
@@ -84,19 +84,21 @@ _proxy_outbound_addrs: set[tuple[str, int]] = set()
 
 
 def _detect_local_ip() -> str:
-    """探测本机非回环 IPv4 地址（用于透明代理重定向目标）。
+    """Detect the local non-loopback IPv4 address (used as transparent proxy redirect target).
 
-    透明代理必须把出站包的目的地址改写成「本机真实 IP」而非 127.0.0.1：
-    WinDivert 拦截到的出站包 src 是客户端真实 IP（如 192.168.x.x），若把 dst
-    改成 127.0.0.1，Windows 会因 loopback 反欺骗（dst=127.0.0.1 但 src 非
-    127.0.0.1）直接丢弃该包，代理永远收不到连接 → 全超时、无日志。改成重定向
-    到本机真实 IP 后，包变成「本机发往本机」（src/dst 同为本机 IP），Windows
-    正常投递给监听 0.0.0.0 的代理。
+    The transparent proxy must rewrite the destination address of outbound packets to
+    "the machine's real IP" rather than 127.0.0.1: WinDivert intercepts outbound packets
+    whose src is the client's real IP (e.g. 192.168.x.x). If dst is rewritten to 127.0.0.1,
+    Windows will drop the packet due to loopback anti-spoofing (dst=127.0.0.1 but src is not
+    127.0.0.1), and the proxy will never receive the connection → full timeout, no logs.
+    After redirecting to the machine's real IP, the packet becomes "sent from local to local"
+    (src/dst are both the local IP), and Windows delivers it normally to the proxy listening on 0.0.0.0.
 
-    探测策略（多重 fallback，避免单点失败导致静默回退 127.0.0.1）：
-    1. UDP connect 公网 IP（8.8.8.8 / 114.114.114.114）让 OS 选择出口网卡
-    2. socket.getaddrinfo(gethostname()) 枚举解析得到的本机 IP
-    3. 仍找不到非回环 IP 时返回空串，让调用方判定为不支持（不再静默回退 127.0.0.1）
+    Detection strategy (multiple fallbacks to avoid silent fallback to 127.0.0.1 due to single-point failure):
+    1. UDP connect to public IP (8.8.8.8 / 114.114.114.114) lets the OS choose the outbound NIC
+    2. socket.getaddrinfo(gethostname()) enumerates local IPs resolved from the hostname
+    3. Returns empty string when no non-loopback IP is found, letting the caller decide it's
+       unsupported (no longer silently falls back to 127.0.0.1)
     """
     import socket
     # 策略 1：UDP connect 公网 IP（不会真正发包）
@@ -128,13 +130,13 @@ def _detect_local_ip() -> str:
 
 
 def register_proxy_port(port: int):
-    """注册代理自身的出站连接本地端口（兼容旧接口，供 server.py 调用）。"""
+    """Register the proxy's own outbound connection local port (legacy interface, called by server.py)."""
     with _proxy_outbound_lock:
         _proxy_outbound_ports.add(port)
 
 
 def unregister_proxy_port(port: int):
-    """注销代理自身的出站连接本地端口。"""
+    """Unregister the proxy's own outbound connection local port."""
     with _proxy_outbound_lock:
         _proxy_outbound_ports.discard(port)
         # 同步清理可能存在的 (any_ip, port) 条目（best-effort，无法精确匹配 ip）
@@ -144,42 +146,42 @@ def unregister_proxy_port(port: int):
 
 
 def register_proxy_addr(src_ip: str, src_port: int):
-    """注册代理自身出站连接的 (src_ip, src_port) 二元组（精确匹配，F11 修复）。"""
+    """Register the (src_ip, src_port) tuple of the proxy's own outbound connection (exact match, F11 fix)."""
     with _proxy_outbound_lock:
         _proxy_outbound_ports.add(src_port)
         _proxy_outbound_addrs.add((src_ip, src_port))
 
 
 def unregister_proxy_addr(src_ip: str, src_port: int):
-    """注销代理自身出站连接的 (src_ip, src_port) 二元组。"""
+    """Unregister the (src_ip, src_port) tuple of the proxy's own outbound connection."""
     with _proxy_outbound_lock:
         _proxy_outbound_ports.discard(src_port)
         _proxy_outbound_addrs.discard((src_ip, src_port))
 
 
 def _is_proxy_outbound_port(port: int) -> bool:
-    """检查端口是否属于代理自身的出站连接（兼容旧接口）。"""
+    """Check whether the port belongs to the proxy's own outbound connection (legacy interface)."""
     with _proxy_outbound_lock:
         return port in _proxy_outbound_ports
 
 
 def _is_proxy_outbound_addr(src_ip: str, src_port: int) -> bool:
-    """检查 (src_ip, src_port) 是否属于代理自身的出站连接。
+    """Check whether (src_ip, src_port) belongs to the proxy's own outbound connection.
 
-    匹配策略（两阶段注册）：
-    1. 优先 (ip, port) 精确匹配 —— connect() 完成后由 register_proxy_addr 注册
-    2. 回退到纯 port 匹配 —— connect() 前由 register_proxy_port 注册（TOCTOU 窗口期）
+    Matching strategy (two-phase registration):
+    1. Prefer (ip, port) exact match — registered by register_proxy_addr after connect() completes
+    2. Fall back to pure port match — registered by register_proxy_port before connect() (TOCTOU window)
 
-    端口回退始终启用（不再仅当 _proxy_outbound_addrs 为空时）：
-    代理出站 socket 在 connect() 前仅注册 port（getsockname() 此时返回 0.0.0.0，
-    无法获取真实源 IP），connect() 后才升级为 (ip, port)。connect 窗口期内
-    发出的 SYN 包必须靠 port 匹配排除，否则 WinDivert 拦截代理自身 SYN
-    形成无限重定向循环（全超时无日志的根因）。
+    Port fallback is always enabled (no longer only when _proxy_outbound_addrs is empty):
+    The proxy's outbound socket only registers port before connect() (getsockname() returns 0.0.0.0
+    at this point, real source IP unavailable), and upgrades to (ip, port) after connect(). SYN
+    packets sent during the connect window must be excluded via port matching, otherwise WinDivert
+    intercepts the proxy's own SYN, forming an infinite redirect loop (root cause of full timeout with no logs).
 
-    原实现缺陷：当 _proxy_outbound_addrs 非空时完全禁用端口回退，
-    但 _register_proxy_socket 在 connect 前 getsockname 得到 0.0.0.0，
-    注册的是 ('0.0.0.0', port) 死数据，真实出站包 src_ip 永远匹配不上，
-    端口回退又被禁用 → 代理自身流量完全未被排除 → 无限循环。
+    Original implementation flaw: when _proxy_outbound_addrs was non-empty, port fallback was
+    completely disabled, but _register_proxy_socket got 0.0.0.0 from getsockname before connect,
+    registering dead data ('0.0.0.0', port) that real outbound packets' src_ip could never match,
+    while port fallback was disabled → proxy's own traffic was not excluded at all → infinite loop.
     """
     with _proxy_outbound_lock:
         if (src_ip, src_port) in _proxy_outbound_addrs:
@@ -188,24 +190,24 @@ def _is_proxy_outbound_addr(src_ip: str, src_port: int) -> bool:
 
 
 class TransparentProxy:
-    """透明代理：用 WinDivert NETWORK 层重定向 HTTP(80) 流量到本地代理。
+    """Transparent proxy: uses WinDivert NETWORK layer to redirect HTTP(80) traffic to local proxy.
 
-    实现要点：
-    - NETWORK 层抓包：能拿到完整 IP/TCP 头
-    - 修改目的 IP/Port 为本地代理，重新计算校验和后 send
-    - 维护 NAT 表：原 (src_ip:port, dst_ip:80) <-> (127.0.0.1:port, 127.0.0.1:8888)
-    - 反向流量（代理回包）：查 NAT 表，把 src 从本地改回原服务器 IP:80
-    - 非本代理端口的流量直接放行（不影响其他网络活动）
+    Implementation notes:
+    - NETWORK layer capture: full IP/TCP headers available
+    - Modify destination IP/Port to local proxy, recompute checksums and send
+    - Maintain NAT table: original (src_ip:port, dst_ip:80) <-> (127.0.0.1:port, 127.0.0.1:8888)
+    - Reverse traffic (proxy response): look up NAT table, rewrite src from local back to original server IP:80
+    - Traffic not on the proxy's own port is passed through directly (does not affect other network activity)
 
-    关键防循环：代理自身连接目标服务器时，其出站包也匹配 WinDivert filter
-    （dst port 80/443, 非 loopback）。通过 _proxy_outbound_ports 集合排除
-    代理自身的出站连接，避免无限重定向导致全部 timeout。
+    Key anti-loop: when the proxy connects to the target server itself, its outbound packets also
+    match the WinDivert filter (dst port 80/443, non-loopback). Excluded via the _proxy_outbound_ports
+    set to avoid infinite redirection causing full timeout.
 
-    NAT 表设计：
-    - key = (src_ip, src_port, dst_ip, dst_port) 四元组（出站时记录）
-    - 反向查找 key = (原 dst_ip, 80, 原 src_ip, 原 src_port)（反向四元组）
-    - 每个条目带 last_seen 时间戳，TTL 300s 自动清理
-    - TCP FIN/RST 收到时立即清理对应条目
+    NAT table design:
+    - key = (src_ip, src_port, dst_ip, dst_port) 4-tuple (recorded on outbound)
+    - Reverse lookup key = (orig dst_ip, 80, orig src_ip, orig src_port) (reverse 4-tuple)
+    - Each entry has a last_seen timestamp, TTL 300s auto-cleanup
+    - TCP FIN/RST immediately cleans up the corresponding entry
     """
 
     def __init__(self, local_port: int = _LOCAL_PORT):
@@ -263,7 +265,7 @@ class TransparentProxy:
         return self._last_error
 
     def status(self) -> dict:
-        """返回透明代理状态。"""
+        """Return transparent proxy status."""
         with self._nat_lock:
             nat_size = len(self._nat_table)
         return {
@@ -278,20 +280,20 @@ class TransparentProxy:
         }
 
     def lookup_reverse(self, client_src_port: int, client_src_ip: Optional[str] = None) -> Optional[tuple]:
-        """供代理服务器在 raw tunnel 模式下反查原目标。
+        """Reverse-lookup the original target for the proxy server in raw tunnel mode.
 
-        参数：
-            client_src_port - 客户端连接到本地代理时的源端口
-                （等价于原出站包的 src_port，唯一标识一条 NAT 条目）
-            client_src_ip - 客户端连接到本地代理时的源 IP（可选，F2 修复）。
-                若提供，则用 (client_src_ip, client_src_port) 二元组精确反查，
-                避免不同客户端端口复用时的误匹配；若为 None 则回退到纯 port 匹配
-                （兼容旧行为，但端口复用时可能误匹配）。
+        Args:
+            client_src_port - the source port when the client connects to the local proxy
+                (equivalent to the src_port of the original outbound packet, uniquely identifies a NAT entry)
+            client_src_ip - the source IP when the client connects to the local proxy (optional, F2 fix).
+                If provided, uses the (client_src_ip, client_src_port) tuple for exact reverse lookup,
+                avoiding mismatches when different clients reuse ports; if None, falls back to pure port match
+                (compatible with old behavior, but may mismatch when ports are reused).
 
-        返回：(orig_dst_ip, orig_dst_port) 或 None（无匹配）
+        Returns: (orig_dst_ip, orig_dst_port) or None (no match)
 
-        性能优化：通过 _client_port_index 字典实现 O(1) 查找，
-        替代原 O(n) 遍历 _nat_table（NAT 表大时性能差距显著）。
+        Performance optimization: O(1) lookup via the _client_port_index dict,
+        replacing the original O(n) traversal of _nat_table (significant performance gap when NAT table is large).
         """
         with self._nat_lock:
             # 优先用 (ip, port) 二元组精确匹配
@@ -321,11 +323,11 @@ class TransparentProxy:
 
     def register_nat_entry(self, client_ip: str, client_port: int,
                             orig_dst_ip: str, orig_dst_port: int) -> None:
-        """F26: 为 SNI fallback 主动注册 NAT 条目。
+        """F26: Actively register a NAT entry for SNI fallback.
 
-        当 lookup_reverse 失败但 SNI fallback 成功连接目标后，调用此方法
-        注册 NAT 条目，确保反向回包能被正确改写回原服务器 IP:port。
-        否则客户端收到 src=local_ip:8888 的包 → RST。
+        When lookup_reverse fails but SNI fallback successfully connects to the target, call this method
+        to register a NAT entry, ensuring the reverse response can be correctly rewritten back to the original server IP:port.
+        Otherwise the client receives a packet with src=local_ip:8888 → RST.
         """
         forward_key = (client_ip, client_port, orig_dst_ip, orig_dst_port)
         reverse_key = (orig_dst_ip, orig_dst_port, client_ip, client_port)
@@ -345,7 +347,7 @@ class TransparentProxy:
             self._client_port_index[(client_ip, client_port)] = forward_key
 
     def _is_admin(self) -> bool:
-        """检查管理员权限。
+        """Check administrator privileges.
 
         Windows: ctypes.windll.shell32.IsUserAnAdmin()
         Unix: os.geteuid() == 0 (root)
@@ -361,23 +363,23 @@ class TransparentProxy:
             return False
 
     def start(self) -> bool:
-        """启动透明代理。返回 True 成功，False 失败。
+        """Start the transparent proxy. Returns True on success, False on failure.
 
-        平台支持：
-        - Windows: WinDivert NETWORK 层拦截（需 pydivert + 管理员权限）
-        - Linux: iptables NAT REDIRECT（需 root + iptables）
-        - macOS: pf rdr（需 root + pfctl）
+        Platform support:
+        - Windows: WinDivert NETWORK layer interception (requires pydivert + administrator privileges)
+        - Linux: iptables NAT REDIRECT (requires root + iptables)
+        - macOS: pf rdr (requires root + pfctl)
         """
         if not IS_WINDOWS:
-            self._last_error = "TransparentProxy 类仅支持 Windows，Unix 请用 UnixTransparentProxy"
+            self._last_error = "TransparentProxy only supports Windows; use UnixTransparentProxy on Unix"
             return False
         if self._running:
             return True
         if not self._is_admin():
-            self._last_error = "需要管理员权限（WinDivert 要求）"
+            self._last_error = "Administrator privileges required (WinDivert requirement)"
             return False
         if pydivert is None:
-            self._last_error = "pydivert 未安装，请运行: pip install pydivert"
+            self._last_error = "pydivert not installed, please run: pip install pydivert"
             return False
         try:
             # filter：出站 TCP dst port in {80,443}，或反向 src port = local_port
@@ -397,12 +399,12 @@ class TransparentProxy:
             # 否则会导致"全超时无日志"的隐蔽失败。明确拒绝启动并报告清晰错误。
             if not self._local_host or self._local_host == "127.0.0.1":
                 self._last_error = (
-                    "无法探测本机非回环 IPv4 地址（UDP connect 8.8.8.8/114.114.114.114/223.5.5.5 "
-                    "均失败，且 getaddrinfo(hostname) 未返回非回环 IP）。"
-                    "透明代理无法工作：重定向目标若是 127.0.0.1 会被 Windows loopback "
-                    "反欺骗丢弃，导致全超时无日志。请检查默认路由/网卡/防火墙后重试。"
+                    "Cannot detect a non-loopback IPv4 address on this machine (UDP connect to "
+                    "8.8.8.8/114.114.114.114/223.5.5.5 all failed, and getaddrinfo(hostname) returned no non-loopback IP). "
+                    "Transparent proxy cannot work: if the redirect target is 127.0.0.1, it will be dropped by "
+                    "Windows loopback anti-spoofing, causing a full timeout with no logs. Please check the default route/NIC/firewall and retry."
                 )
-                logger.error("transparent", "透明代理启动失败：无法探测本机非回环 IP", self._last_error)
+                logger.error("transparent", "Transparent proxy start failed: cannot detect non-loopback local IP", self._last_error)
                 return False
             # 反向 filter：源端口 == local_port 且目的非 loopback。
             # 代理→客户端的回包专用此端口，唯一标识；而出站分支只匹配 dst port 80/443，
@@ -453,13 +455,13 @@ class TransparentProxy:
                 )
                 self._quic_thread.start()
                 logger.info(
-                    "transparent", "QUIC(UDP/443) 拦截已启用",
-                    "已强制浏览器回退 TCP/HTTPS，透明代理可捕获浏览器流量"
+                    "transparent", "QUIC(UDP/443) interception enabled",
+                    "Browsers forced to fall back to TCP/HTTPS, transparent proxy can capture browser traffic"
                 )
             except Exception as e:  # noqa: BLE001
                 # QUIC 拦截失败不影响 TCP 透明代理（仅浏览器 QUIC 流量可能绕过）
                 logger.warning(
-                    "transparent", "QUIC 拦截启动失败（不影响 TCP 透明代理）", str(e)
+                    "transparent", "QUIC interception start failed (does not affect TCP transparent proxy)", str(e)
                 )
                 if self._quic_divert is not None:
                     try:
@@ -468,14 +470,14 @@ class TransparentProxy:
                         pass
                     self._quic_divert = None
             logger.info(
-                "transparent", "透明代理已启动",
+                "transparent", "Transparent proxy started",
                 f"redirect ports={list(_REDIRECT_DST_PORTS)} -> {_REDIRECT_LOOPBACK_ADDR}:{self.local_port} "
                 f"(local_ip={self._local_host})",
             )
             return True
         except Exception as e:  # noqa: BLE001
             self._last_error = str(e)
-            logger.error("transparent", "透明代理启动失败", str(e))
+            logger.error("transparent", "Transparent proxy start failed", str(e))
             # 清理已构造但 open 失败的 divert 对象
             if self._divert is not None:
                 try:
@@ -486,10 +488,10 @@ class TransparentProxy:
             return False
 
     def stop(self):
-        """停止透明代理。
+        """Stop the transparent proxy.
 
-        先 _running=False，再用 shutdown 解除 recv 阻塞，再 close。
-        避免直接 close 导致工作线程永久阻塞在 recv。
+        First sets _running=False, then uses shutdown to unblock recv, then closes.
+        Avoids directly closing which would leave the worker thread permanently blocked on recv.
         Platform: Windows
         """
         self._running = False
@@ -507,8 +509,8 @@ class TransparentProxy:
             if self._thread:
                 self._thread.join(timeout=3)
                 if self._thread.is_alive():
-                    logger.warning("transparent", "停止时工作线程仍在运行",
-                                   "可能存在阻塞 recv")
+                    logger.warning("transparent", "Worker thread still running on stop",
+                                   "possible blocking recv")
                 self._thread = None
             # 最后关闭句柄
             try:
@@ -537,19 +539,19 @@ class TransparentProxy:
         with _proxy_outbound_lock:
             _proxy_outbound_ports.clear()
             _proxy_outbound_addrs.clear()
-        logger.info("transparent", "透明代理已停止")
+        logger.info("transparent", "Transparent proxy stopped")
 
     def _loop(self):
-        """主循环：接收包 -> 判断方向 -> 改写地址 -> 重新注入。
+        """Main loop: receive packet -> determine direction -> rewrite addresses -> re-inject.
 
-        出站包（dst port in {80}, 非 loopback）：
-            - 记录 NAT: forward_key -> (src_ip, src_port, dst_ip, dst_port, last_seen)
-            - 反向索引: reverse_key -> forward_key
+        Outbound packets (dst port in {80}, non-loopback):
+            - Record NAT: forward_key -> (src_ip, src_port, dst_ip, dst_port, last_seen)
+            - Reverse index: reverse_key -> forward_key
             - dst_ip -> 127.0.0.1, dst_port -> local_port
-        反向包（src port = local_port, src/dst ip = 127.0.0.1）：
-            - 查反向索引，找 forward_key
-            - src_ip -> 原 dst_ip, src_port -> 80
-            - FIN/RST 时清理 NAT 条目
+        Reverse packets (src port = local_port, src/dst ip = 127.0.0.1):
+            - Look up reverse index, find forward_key
+            - src_ip -> original dst_ip, src_port -> 80
+            - Clean up NAT entry on FIN/RST
         """
         while self._running:
             try:
@@ -573,7 +575,7 @@ class TransparentProxy:
                         if self._send_fail_count == 1 or self._send_fail_count % 100 == 0:
                             raw_len = len(packet.raw) if packet.raw else 0
                             logger.warning(
-                                "transparent", "IPv6/非TCP send 失败",
+                                "transparent", "IPv6/non-TCP send failed",
                                 f"count={self._send_fail_count} repr={e!r} raw_len={raw_len}"
                             )
                     continue
@@ -617,7 +619,7 @@ class TransparentProxy:
                         self._diag_out_count += 1
                         if self._diag_out_count % 200 == 1:
                             logger.info(
-                                "transparent", "出站重定向已注册NAT",
+                                "transparent", "Outbound redirect NAT registered",
                                 f"src={src_ip}:{src_port} dst={dst_ip}:{dst_port} "
                                 f"nat_size={len(self._nat_table)}"
                             )
@@ -693,10 +695,14 @@ class TransparentProxy:
                             # 服务端数据段要回传给客户端，删除后这些回包反向 NAT 未命中
                             # 被丢弃 → 连接假死/重传（典型症状："浏览器都不行"）。
                             # 保留条目与索引，最终由 _cleanup_nat(TTL=300s) 或 stop() 统一清理。
-                            self._nat_table[forward_key] = (
-                                orig_src_ip, orig_src_port,
-                                orig_dst_ip, orig_dst_port, now, stored_reverse_key,
-                            )
+                            # 仅当条目仍存在时刷新 last_seen：避免在释放锁→改写头部→重新
+                            # 持锁的窗口内被 _cleanup_nat 删除后又重添加，导致 _nat_table
+                            # 与 _client_port_index 不一致（索引未重建，后续精确查找 miss）。
+                            if forward_key in self._nat_table:
+                                self._nat_table[forward_key] = (
+                                    orig_src_ip, orig_src_port,
+                                    orig_dst_ip, orig_dst_port, now, stored_reverse_key,
+                                )
                     else:
                         # 反向 NAT 未命中：丢弃包（不 send），避免客户端收到 src=本机IP:8888
                         # 的包导致内核 RST。原实现"原样放行"会让客户端收到 src 不匹配的包 → RST。
@@ -709,7 +715,7 @@ class TransparentProxy:
                                 idx_size = len(self._client_port_index)
                                 sample_keys = list(self._client_port_index.keys())[:5]
                             logger.warning(
-                                "transparent", "反向NAT未命中丢弃包",
+                                "transparent", "Reverse NAT miss, packet dropped",
                                 f"count={self._nat_miss_count} "
                                 f"lookup=(dst={dst_ip}:{dst_port}) "
                                 f"nat_size={nat_size} idx_size={idx_size} "
@@ -725,7 +731,7 @@ class TransparentProxy:
                 # PermissionError(13,'段已解除锁定',None,158)，改写后的 SYN 包永久丢失 →
                 # 客户端连接超时 → 代理收不到 HTTP 请求 → "抓不到 HTTP 包"。
                 # 重试安全：send 失败时包未注入网络栈，重试不会产生重复包。
-                # F32 增强：重试次数 3→5，退避 1ms/4ms/16ms/64ms（原 1ms/4ms 在高负载下不足）。
+                # F32 增强：重试次数 3→5，退避 0.5ms/1ms/4ms/16ms（原 1ms/4ms/16ms/64ms 在高负载下累积延迟过大）。
                 # Platform: Windows
                 send_ok = False
                 for attempt in range(5):
@@ -735,7 +741,7 @@ class TransparentProxy:
                         break
                     except Exception as e:  # noqa: BLE001
                         if attempt < 4:
-                            time.sleep(0.001 * (4 ** attempt))  # 1ms, 4ms, 16ms, 64ms
+                            time.sleep(0.0005 * (2 ** attempt))  # 0.5ms, 1ms, 2ms, 4ms
                             continue
                         # 5 次均失败：记录增强诊断日志
                         self._send_fail_count += 1
@@ -750,7 +756,7 @@ class TransparentProxy:
                             except Exception:  # noqa: BLE001
                                 is_lb = "?"
                             logger.warning(
-                                "transparent", "send 失败",
+                                "transparent", "send failed",
                                 f"count={self._send_fail_count} repr={e!r} branch={branch} "
                                 f"src={src_ip}:{src_port} dst={dst_ip}:{dst_port} "
                                 f"dir={direction} loopback={is_lb} raw_len={raw_len}"
@@ -760,15 +766,16 @@ class TransparentProxy:
 
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.warning("transparent", "抓包循环异常", str(e))
+                    logger.warning("transparent", "Capture loop exception", str(e))
                     time.sleep(0.01)
 
     def _quic_drop_loop(self):
-        """F39: QUIC(UDP/443) 丢弃循环。
+        """F39: QUIC (UDP/443) drop loop.
 
-        从专用 WinDivert 句柄 recv 出站 UDP/443(80) 包后**不重注入**即视为丢弃，
-        使浏览器 QUIC 握手失败，回退到 TCP/HTTPS（被主句柄拦截重定向到代理）。
-        仅丢弃、不改写，故不触碰任何 NAT 表或校验和。
+        Receives outbound UDP/443(80) packets from a dedicated WinDivert handle and **does not re-inject** them
+        (i.e. drops them), causing the browser's QUIC handshake to fail and fall back to TCP/HTTPS
+        (intercepted and redirected to the proxy by the main handle).
+        Only drops, does not rewrite, so it does not touch any NAT table or checksums.
         """
         while self._running and self._quic_divert is not None:
             try:
@@ -786,20 +793,21 @@ class TransparentProxy:
             # （WinDivert 默认不重注入已 recv 的包，故无需额外操作）
 
     def _recalc_checksums(self, packet):
-        """重算包校验和，兼容不同 pydivert 版本。
+        """Recompute packet checksums, compatible with different pydivert versions.
 
-        F4 修复：原实现 fallback 链最终 `pass` 静默吞错，导致改写了 IP/TCP 头
-        但校验和未更新时包被接收方静默丢弃，表现为"全超时无日志"的隐蔽失败。
-        现在所有 fallback 失败时记录 warning 日志，便于排查。
+        F4 fix: the original fallback chain ended with `pass` silently swallowing errors,
+        causing packets with rewritten IP/TCP headers but unchanged checksums to be silently
+        dropped by the receiver, manifesting as a "full timeout with no logs" hidden failure.
+        Now all fallback failures log a warning for easier troubleshooting.
 
-        F12 修复：pydivert 3.x 把方法名从 `recalc_checksums()` 改为
-        `recalculate_checksums()`。旧代码三个 fallback 全用了不存在的 API 名
-        （`packet.recalc_checksums`、`pydivert.WinDivertHelper`、
-        `self._divert.recalc_checksums`），导致每次改写包都落到 warning 分支，
-        实际未重算校验和。现按存在性顺序探测新旧两个方法名。
+        F12 fix: pydivert 3.x renamed the method from `recalc_checksums()` to
+        `recalculate_checksums()`. The old code's three fallbacks all used non-existent API names
+        (`packet.recalc_checksums`, `pydivert.WinDivertHelper`,
+        `self._divert.recalc_checksums`), causing every rewritten packet to fall into the warning
+        branch without actually recomputing checksums. Now probes both old and new method names by existence.
 
-        备注：WinDivert.send(packet) 默认 `recalculate_checksum=True` 会再重算
-        一次，所以即便这里失败，发送时仍会兜底——但显式重算让错误能更早暴露。
+        Note: WinDivert.send(packet) defaults to `recalculate_checksum=True` which recomputes
+        again, so even if this fails, sending still covers it — but explicit recomputation exposes errors earlier.
         """
         # 优先 pydivert 3.x 新名，回退 pydivert 2.x 旧名
         for attr in ("recalculate_checksums", "recalc_checksums"):
@@ -811,23 +819,23 @@ class TransparentProxy:
                 return
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    "transparent", "校验和重算异常",
-                    f"packet.{attr}() 抛异常: {e!r}"
+                    "transparent", "Checksum recalc exception",
+                    f"packet.{attr}() raised: {e!r}"
                 )
                 return
         # 兜底：packet 上两个方法都不存在（极旧版或非 pydivert 包）
         logger.warning(
-            "transparent", "校验和重算失败",
-            "packet 上找不到 recalculate_checksums / recalc_checksums 方法，"
-            "依赖 WinDivert.send() 默认 recalculate_checksum=True 兜底"
+            "transparent", "Checksum recalc failed",
+            "Cannot find recalculate_checksums / recalc_checksums method on packet, "
+            "falling back to WinDivert.send() default recalculate_checksum=True"
         )
 
     def _find_by_client_port(self, client_src_port: int):
-        """通过客户端原 src_port 反查 NAT 条目。
+        """Reverse-lookup NAT entry by the client's original src_port.
 
-        简化反查：假设同一时刻同一 client_src_port 只对应一条连接
-        （Windows 客户端临时端口范围 49152-65535，碰撞概率极低）。
-        更严格实现应用 (src_ip, src_port) 二元组反查。
+        Simplified reverse lookup: assumes that at any given moment a client_src_port corresponds
+        to only one connection (Windows client ephemeral port range is 49152-65535, collision probability is very low).
+        A stricter implementation should use the (src_ip, src_port) tuple for reverse lookup.
         """
         for forward_key, entry in self._nat_table.items():
             if forward_key[1] == client_src_port:
@@ -835,14 +843,15 @@ class TransparentProxy:
         return None
 
     def _cleanup_nat(self):
-        """清理过期 NAT 条目（TTL 300s 未活动）。
+        """Clean up expired NAT entries (TTL 300s of inactivity).
 
-        避免 NAT 表无限增长，同时不破坏在途连接（活跃连接会更新 last_seen）。
+        Prevents the NAT table from growing unboundedly without breaking in-flight connections
+        (active connections update last_seen).
 
-        性能优化：用 list(self._nat_table) 仅复制 key 列表（比 items() 轻量），
-        并同步清理 _client_port_index 与 _nat_reverse，减少大表时的内存复制开销。
-        F6 修复：反向索引用 O(1) 直接 pop（替代原 O(n) 扫描 _nat_reverse），
-        消除大 NAT 表下周期清理的 O(n²) 性能瓶颈。
+        Performance optimization: uses list(self._nat_table) to copy only the key list (lighter than items()),
+        and synchronously cleans up _client_port_index and _nat_reverse to reduce memory copy overhead on large tables.
+        F6 fix: the reverse index uses O(1) direct pop (replacing the original O(n) scan of _nat_reverse),
+        eliminating the O(n²) performance bottleneck of periodic cleanup on large NAT tables.
         """
         now = time.monotonic()
         expired_keys = []
@@ -865,8 +874,8 @@ class TransparentProxy:
                 if len(entry) >= 6:
                     self._nat_reverse.pop(entry[5], None)
         if expired_keys:
-            logger.info("transparent", "NAT 表清理过期条目",
-                        f"清理 {len(expired_keys)} 条，剩余 {len(self._nat_table)}")
+            logger.info("transparent", "NAT table expired entries cleaned",
+                        f"cleaned {len(expired_keys)} entries, {len(self._nat_table)} remaining")
 
 
 # ---------- 单例管理 ----------
@@ -882,9 +891,9 @@ _lock = threading.Lock()
 
 
 def get_transparent_proxy() -> "TransparentProxy | Any":
-    """获取透明代理单例（懒初始化）。
+    """Get the transparent proxy singleton (lazy initialization).
 
-    Windows 平台返回 TransparentProxy 实例，Unix 平台返回 UnixTransparentProxy 实例。
+    Returns a TransparentProxy instance on Windows, and a UnixTransparentProxy instance on Unix.
     """
     global _instance
     if _instance is None:
@@ -900,21 +909,21 @@ def get_transparent_proxy() -> "TransparentProxy | Any":
 
 
 def start_transparent_proxy() -> tuple[bool, str]:
-    """启动透明代理。返回 (success, msg)。
+    """Start the transparent proxy. Returns (success, msg).
 
-    平台支持：
-    - Windows: WinDivert（需 pydivert + 管理员权限）
-    - Linux: iptables NAT REDIRECT（需 root）
-    - macOS: pf rdr（需 root）
+    Platform support:
+    - Windows: WinDivert (requires pydivert + administrator privileges)
+    - Linux: iptables NAT REDIRECT (requires root)
+    - macOS: pf rdr (requires root)
     """
     # 透明代理要求代理监听 0.0.0.0（WinDivert 把流量重定向到本机真实 IP）。
     # 若代理仅监听 127.0.0.1，重定向到本机 IP 的包会被丢弃，表现为「全超时、无日志」。
     # 常见原因：未在启动前开启透明代理（__main__ 会强制 0.0.0.0），或没开「允许局域网连接」。
     if proxy_listen_host == "127.0.0.1":
         return False, (
-            "透明代理需要代理监听 0.0.0.0：当前代理仅监听 127.0.0.1，"
-            "重定向到本机 IP 的流量无法被接收。请到设置开启「允许局域网设备连接」"
-            "后重启 Telnix，或在启动前开启透明代理后再重启。"
+            "Transparent proxy requires the proxy to listen on 0.0.0.0: currently the proxy only listens on 127.0.0.1, "
+            "traffic redirected to the local IP cannot be received. Please enable \"Allow LAN device connections\" "
+            "in settings and restart Telnix, or enable transparent proxy before starting and then restart."
         )
     # F19: 撤销 F18 互斥。F18 互斥导致场景3（抓不到HTTP）和场景4（RESET）：
     # 开抓包→停透明代理→NAT表清空→已建立连接回包未改写→RESET；
@@ -923,32 +932,32 @@ def start_transparent_proxy() -> tuple[bool, str]:
     # F17 的 send 重试机制足以应对双 handle 下的瞬时段锁定。
     proxy = get_transparent_proxy()
     if proxy.running:
-        return True, "已在运行"
+        return True, "Already running"
     if proxy.start():
         backend = "WinDivert" if IS_WINDOWS else ("iptables" if IS_LINUX else "pf")
-        return True, f"透明代理已启动（{backend}）"
-    return False, proxy.last_error or "启动失败"
+        return True, f"Transparent proxy started ({backend})"
+    return False, proxy.last_error or "Start failed"
 
 
 def stop_transparent_proxy() -> tuple[bool, str]:
-    """停止透明代理。"""
+    """Stop the transparent proxy."""
     proxy = get_transparent_proxy()
     if not proxy.running:
-        return True, "未在运行"
+        return True, "Not running"
     proxy.stop()
-    return True, "透明代理已停止"
+    return True, "Transparent proxy stopped"
 
 
 def transparent_proxy_status() -> dict:
-    """返回透明代理状态。
+    """Return transparent proxy status.
 
-    平台支持：
-    - Windows: WinDivert 后端状态
-    - Linux: iptables 后端状态（需 root）
-    - macOS: pf 后端状态（需 root）
+    Platform support:
+    - Windows: WinDivert backend status
+    - Linux: iptables backend status (requires root)
+    - macOS: pf backend status (requires root)
 
-    跨平台字段对齐：所有平台都返回 running/supported/is_admin/backend/hint，
-    前端可统一读取这些字段判断 UI 状态（管理员标签、后端标签、提权按钮可见性等）。
+    Cross-platform field alignment: all platforms return running/supported/is_admin/backend/hint,
+    so the frontend can uniformly read these fields to determine UI state (admin label, backend label, elevation button visibility, etc.).
     """
     if not IS_WINDOWS:
         # Unix 平台：返回后端可用性 + 运行状态
@@ -959,11 +968,11 @@ def transparent_proxy_status() -> dict:
         backend = "iptables" if IS_LINUX else ("pf" if IS_MACOS else "none")
         running = bool(_instance and _instance.running)
         if running:
-            hint = "就绪（运行中）"
+            hint = "Ready (running)"
         elif not is_admin:
-            hint = "需要 root 权限。请用 sudo 启动 Telnix"
+            hint = "Root privileges required. Please start Telnix with sudo"
         else:
-            hint = "就绪"
+            hint = "Ready"
         return {
             "running": running,
             "supported": True,
@@ -977,11 +986,11 @@ def transparent_proxy_status() -> dict:
     is_admin = proxy._is_admin()
     running = proxy.running
     if running:
-        hint = "就绪（运行中）"
+        hint = "Ready (running)"
     elif not is_admin:
-        hint = "需要管理员权限。请用管理员身份重启 Telnix"
+        hint = "Administrator privileges required. Please restart Telnix as administrator"
     else:
-        hint = "就绪"
+        hint = "Ready"
     return {
         "running": running,
         "supported": True,
@@ -993,13 +1002,13 @@ def transparent_proxy_status() -> dict:
 
 
 def lookup_original_dst(sock: socket.socket) -> Optional[tuple[str, int]]:
-    """查询透明代理重定向前的原目标地址（跨平台）。
+    """Query the original destination address before transparent proxy redirection (cross-platform).
 
-    Windows: 通过 NAT 表反查（client_src_port）- 此接口不适用，请用 lookup_reverse
+    Windows: reverse-lookup via NAT table (client_src_port) - this interface does not apply, use lookup_reverse
     Linux: getsockopt(SOL_IP, SO_ORIGINAL_DST)
-    macOS: getsockname（pf rdr 把原目标放到 socket 本地地址）
+    macOS: getsockname (pf rdr puts the original target into the socket's local address)
 
-    返回：(orig_dst_ip, orig_dst_port) 或 None（查询失败/不支持）
+    Returns: (orig_dst_ip, orig_dst_port) or None (query failed/unsupported)
     """
     if not IS_WINDOWS and _instance is not None:
         # Unix 平台：委托给 UnixTransparentProxy.lookup_original_dst

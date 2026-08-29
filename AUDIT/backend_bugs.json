@@ -1,0 +1,163 @@
+{
+  "findings": [
+    {
+      "file": "src/host/telnix/auto_reply/script_worker.py",
+      "line": 247,
+      "severity": "high",
+      "type": "安全漏洞",
+      "description": "_real_import = _builtins.__import__ 在脚本首次加载前执行。如果用户在脚本中使用 __import__，会使用真实 import 而非受限版本。",
+      "reproduce": "用户脚本使用 __import__('socket') 可以绕过受限导入。",
+      "fix_suggestion": "在受限环境中拦截 __import__ 调用，或将其从 _builtins 中删除。"
+    },
+    {
+      "file": "src/host/telnix/api/auto_reply.py",
+      "line": 453,
+      "severity": "medium",
+      "type": "异常处理",
+      "description": "except Exception 块中引用了未定义的变量 `e`。Line 453-455, 477-479, 496-498, 513-515, 821-823 以及其他位置都存在此问题。",
+      "reproduce": "触发任何在 except 块中引用变量 e 的代码路径，例如 rule update 失败时调用 remove_runner()，会抛出 NameError 而非预期的异常处理。",
+      "fix_suggestion": "将 except Exception: 改为 except Exception as e:"
+    },
+    {
+      "file": "src/host/telnix/api/export.py",
+      "line": 142,
+      "severity": "medium",
+      "type": "异常处理",
+      "description": "Line 142-144, 209-211, 476-477 等多处 except Exception 块中引用了未定义的变量 `e`。",
+      "reproduce": "触发 export 功能中任何异常路径，例如 base64 解码失败，会抛出 NameError 而非预期的异常处理。",
+      "fix_suggestion": "将 except Exception: 改为 except Exception as e:"
+    },
+    {
+      "file": "src/host/telnix/api/settings.py",
+      "line": 30,
+      "severity": "medium",
+      "type": "异常处理",
+      "description": "Line 30-32, 171-173, 195-197, 242-244, 251-253, 358-360 等多处 except Exception 块中引用了未定义的变量 `e`。",
+      "reproduce": "触发 settings 相关功能中任何异常路径，会抛出 NameError 而非预期的异常处理。",
+      "fix_suggestion": "将 except Exception: 改为 except Exception as e:"
+    },
+    {
+      "file": "src/host/telnix/api/auth.py",
+      "line": 44,
+      "severity": "medium",
+      "type": "异常处理",
+      "description": "except 块中引用了未定义的变量 `e`。",
+      "reproduce": "当 settings_store.get_setting() 抛出异常时，会抛出 NameError 而非预期的异常处理。",
+      "fix_suggestion": "将 except Exception: 改为 except Exception as e:"
+    },
+    {
+      "file": "src/host/telnix/proxy/ssl_bump.py",
+      "line": 444,
+      "severity": "low",
+      "type": "逻辑错误",
+      "description": "f-string 中的变量引用语法错误。`{self.root_cert_path}` 在普通字符串而非 f-string 中，不会被替换。",
+      "reproduce": "在 Linux 系统上触发 remove_root_cert() 时，返回的 hint 消息会显示字面量 '{self.root_cert_path}' 而非实际证书路径。",
+      "fix_suggestion": "将字符串改为 f-string 或使用 .format() 格式化。"
+    },
+    {
+      "file": "src/host/telnix/api/sessions.py",
+      "line": 249,
+      "severity": "low",
+      "type": "竞态",
+      "description": "overview 缓存更新使用 clear() 后立即赋值，存在 read-then-write 竞态条件。",
+      "reproduce": "两个并发请求同时到达 Line 249，一个线程执行 clear() 后、赋值前，另一个线程读取 _overview_cache 会得到空字典。",
+      "fix_suggestion": "使用原子操作整体替换缓存，或在整个更新区域使用锁。"
+    },
+    {
+      "file": "src/host/telnix/auto_reply/rules.py",
+      "line": 343,
+      "severity": "low",
+      "type": "逻辑错误",
+      "description": "快速路径逻辑有缺陷。当 _has_rules=False 但 _cache 已加载（空规则）时，会跳过缓存直接执行 load_rules()。",
+      "reproduce": "设置一条规则后删除所有规则（invalidate_cache），再调用 host_matches_any_rule() 时，快速路径会跳过已加载的空缓存再次查询 DB。",
+      "fix_suggestion": "在 _has_rules=False 时直接返回 False，避免不必要的缓存跳过。"
+    },
+    {
+      "file": "src/host/telnix/clash/client.py",
+      "line": 127,
+      "severity": "low",
+      "type": "竞态",
+      "description": "double-checked locking 模式有缺陷。在两次检查之间（Line 128-130 的 Thread 创建），另一个线程可能已经更新了 _upstream_probe_thread。",
+      "reproduce": "两个线程同时首次调用 get_upstream_proxy()，都看到 _upstream_probe_thread is None，各自创建新线程。",
+      "fix_suggestion": "在整个检查和创建区域使用锁。"
+    },
+    {
+      "file": "src/host/telnix/auto_reply/script_worker.py",
+      "line": 250,
+      "severity": "low",
+      "type": "逻辑错误",
+      "description": "_blocked_open() 抛出 PermissionError 但该异常类型依赖于 OSError（已被限制使用）。",
+      "reproduce": "用户脚本调用 open() 时抛出 PermissionError，但由于受限环境语义，可能导致混淆。",
+      "fix_suggestion": "考虑使用更通用的异常类型或在文档中说明受限环境的异常行为。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 1658,
+      "severity": "low",
+      "type": "竞态",
+      "description": "SSL context 缓存的双重检查锁定在 mtime 缓存逻辑中缺少临界区保护。",
+      "reproduce": "高并发下，多个线程同时检查 SSL context 缓存，部分线程可能使用过期的 mtime 值。",
+      "fix_suggestion": "将 mtime 缓存更新放入锁保护的临界区。"
+    },
+    {
+      "file": "src/host/telnix/api/export.py",
+      "line": 556,
+      "severity": "medium",
+      "type": "逻辑错误",
+      "description": "TCP 响应包的 ACK 序列号硬编码为 1，而正确值应该是 base_seq（请求序列号）。",
+      "reproduce": "导出任意 HTTPS 流量到 pcap，用 Wireshark 打开时响应包显示错误的 ACK 值。",
+      "fix_suggestion": "使用请求的序列号作为 ACK 值：tcp_seq + len(tcp_data)"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 689,
+      "severity": "low",
+      "type": "资源泄漏",
+      "description": "HTTP/2 连接池在对象销毁时没有显式关闭。",
+      "reproduce": "停止代理服务器后，h2 连接池中的连接可能未正确关闭。",
+      "fix_suggestion": "在 __del__ 或 close 方法中显式关闭所有 h2 连接。"
+    },
+    {
+      "file": "src/host/telnix/api/replay.py",
+      "line": 157,
+      "severity": "medium",
+      "type": "边界条件",
+      "description": "_repeat_replay() 中如果所有请求都失败（durations 为空），stats 计算会抛出 ValueError。",
+      "reproduce": "使用无效的 URL 或目标服务器不可达时触发 repeat 功能，会导致所有请求失败，durations 为空，后续 stats 计算失败。",
+      "fix_suggestion": "在计算前检查 durations 是否为空：if durations: min/max/sum(durations)"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 1416,
+      "severity": "low",
+      "type": "边界条件",
+      "description": "SNI fallback 解析时 sni_host 可能为 bytes 类型而代码按 str 处理。",
+      "reproduce": "某些 TLS ClientHello 的 SNI extension 包含非 ASCII 字符时，decode('ascii', errors='replace') 产生替换字符。",
+      "fix_suggestion": "在 decode 后添加类型检查，或使用 .decode('utf-8', errors='replace') 确保返回 str。"
+    },
+    {
+      "file": "src/host/telnix/api/export.py",
+      "line": 291,
+      "severity": "medium",
+      "type": "逻辑错误",
+      "description": "CSV 导出使用字符串拼接而非 csv.writer。当 flow 字段包含逗号、引号或换行符时，生成的 CSV 格式不正确。",
+      "reproduce": "导出会话时，如果 URL 或 path 包含逗号，生成的 CSV 文件中该字段会被错误分割。",
+      "fix_suggestion": "使用 csv.writer 模块：正确处理特殊字符、转义、引号。"
+    },
+    {
+      "file": "src/host/telnix/auto_reply/auto_reply.py",
+      "line": 341,
+      "severity": "low",
+      "type": "边界条件",
+      "description": "_rule_signature() 计算中，modify_rules 为 None 时会序列化为 null 而非空列表。",
+      "reproduce": "创建两条规则，pattern/match_mode/action 相同但 modify_rules 分别为 [] 和 None 时，签名不同但逻辑上应视为相同。",
+      "fix_suggestion": "在序列化前将 None 转换为 []：modify_rules or []"
+    }
+  ],
+  "summary": {
+    "total": 17,
+    "high": 1,
+    "medium": 8,
+    "low": 8
+  }
+}

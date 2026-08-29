@@ -1,7 +1,8 @@
-"""专注模式 API：只关注指定进程的流量，其他直接放行不记录。"""
+"""Focus mode API: only focus on specified process traffic, others pass through without recording."""
 
 import psutil
 
+from ..logger import _capture_log
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -27,7 +28,7 @@ _persisted_protocols: list[str] = []
 
 
 def _find_pids_by_name(names: list[str]) -> list[int]:
-    """按进程名查 PID（跨版本兼容，用 psutil，不依赖已弃用的 wmic）。"""
+    """Find PID by process name (cross-version compatible, uses psutil, does not depend on deprecated wmic)."""
     if not names:
         return []
     names_lower = {n.lower() for n in names}
@@ -40,13 +41,16 @@ def _find_pids_by_name(names: list[str]) -> list[int]:
                     pids.append(proc.info["pid"])
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-    except Exception:  # noqa: BLE001
+    except Exception:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
     return pids
 
 
 def _get_child_pids(parent_pids: list[int]) -> list[int]:
-    """递归获取子进程 PID（用 psutil，构建父子表后 BFS）。"""
+    """Recursively get child process PIDs (uses psutil, builds parent-child table then BFS)."""
     if not parent_pids:
         return []
     parent_set = set(parent_pids)
@@ -72,14 +76,17 @@ def _get_child_pids(parent_pids: list[int]) -> list[int]:
                     visited.add(child)
                     children.append(child)
                     queue.append(child)
-    except Exception:  # noqa: BLE001
+    except Exception:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
     return children
 
 
 @router.get("/focus")
 async def get_focus(request: Request):
-    """获取专注模式状态。"""
+    """Get focus mode status."""
     proxy = request.app.state.telnix.proxy
     if proxy is None:
         return ok({"enabled": False, "pids": [], "hosts": [], "process_names": [],
@@ -91,10 +98,10 @@ async def get_focus(request: Request):
 
 @router.post("/focus")
 async def set_focus(body: FocusMode, request: Request):
-    """设置专注模式：开启/关闭 + PID 列表 + 进程名列表（自动转 PID + 子进程）+ host 通配符列表。
+    """Set focus mode: enable/disable + PID list + process name list (auto-convert to PID + child processes) + host wildcard list.
 
-    pid/host/method/status_code/content_type 跨类 OR 匹配：满足任一条件即记录/拦截。
-    protocols 仅前端 displayFlows 过滤生效，抓包层不处理。
+    pid/host/method/status_code/content_type cross-category OR matching: record/intercept if any condition is met.
+    protocols only effective for frontend displayFlows filtering, not processed by capture layer.
     """
     global _persisted_protocols
     proxy = request.app.state.telnix.proxy

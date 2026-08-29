@@ -13,6 +13,7 @@
  * 弹窗居中显示，仅内部可滚动（长文本不撑破布局）。
  */
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
   visible,
   message,
@@ -20,6 +21,7 @@ import {
   cancelWindivertWarning,
 } from '../stores/windivertWarning'
 
+const { t } = useI18n()
 const dialogVisible = computed({
   get: () => visible.value,
   set: (v: boolean) => {
@@ -40,7 +42,7 @@ function onCancel() {
 <template>
   <el-dialog
     v-model="dialogVisible"
-    title="WinDivert 驱动风险提示"
+    :title="t('windivert.dialogTitle')"
     width="560px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
@@ -54,7 +56,7 @@ function onCancel() {
           <el-icon><WarningFilled /></el-icon>
         </div>
         <div class="warning-title-block">
-          <div class="warning-title">即将加载 WinDivert 内核驱动</div>
+          <div class="warning-title">{{ t('windivert.loadingDriver') }}</div>
         </div>
       </div>
 
@@ -65,15 +67,15 @@ function onCancel() {
       <div class="warning-points">
         <div class="point">
           <el-icon class="point-icon ok"><CircleCheckFilled /></el-icon>
-          <span>若驱动加载被拦截，请将 Telnix 目录与 WinDivert64.sys 加入杀软白名单后重试。</span>
+          <span>{{ t('windivert.driverBlockedTip') }}</span>
         </div>
       </div>
     </div>
 
     <template #footer>
       <div class="dialog-footer">
-        <el-button @click="onCancel">取消</el-button>
-        <el-button type="primary" @click="onAccept">了解，不再显示此提示</el-button>
+        <el-button @click="onCancel">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="onAccept">{{ t('windivert.ackButton') }}</el-button>
       </div>
     </template>
   </el-dialog>

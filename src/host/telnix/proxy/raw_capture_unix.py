@@ -1,20 +1,20 @@
-"""TCP/UDP 原始抓包后端 - Unix 跨平台实现（Linux AF_PACKET / macOS BPF）。
+"""TCP/UDP raw capture backend - Unix cross-platform implementation (Linux AF_PACKET / macOS BPF).
 
-在 macOS / Linux 上替代 Windows 的 WinDivert 抓包：
-- Linux: 用 socket(AF_PACKET, SOCK_RAW, ETH_P_ALL) 嗅探所有以太网包
-  - 优势：纯 stdlib，无外部依赖；内核态过滤可用 BPF filter 进一步加速
-  - 限制：需要 root（CAP_NET_RAW），抓到的是二层帧（含 Ethernet 头）
-- macOS: 用 BPF 设备 /dev/bpfN 嗅探
-  - 优势：纯 stdlib，无外部依赖；macOS 原生抓包机制
-  - 限制：需要 root；BPF 设备需要手动查找空闲设备
+Replaces Windows' WinDivert capture on macOS / Linux:
+- Linux: uses socket(AF_PACKET, SOCK_RAW, ETH_P_ALL) to sniff all Ethernet packets
+  - Advantage: pure stdlib, no external dependencies; kernel-level BPF filter can further accelerate
+  - Limitation: requires root (CAP_NET_RAW); captures Layer 2 frames (including Ethernet header)
+- macOS: uses BPF device /dev/bpfN to sniff
+  - Advantage: pure stdlib, no external dependencies; macOS native capture mechanism
+  - Limitation: requires root; BPF devices must be manually searched for a free one
 
-抓到的包以与 Windows 版本完全一致的数据结构入队 enrich worker，
-保持 raw_capture.py 主流程不变。
+Captured packets are enqueued to the enrich worker with a data structure identical
+to the Windows version, keeping the main flow in raw_capture.py unchanged.
 
-性能说明：
-- AF_PACKET 在 1000 pps 下吞吐充足（内核缓冲 + 用户态批量读取）
-- BPF 在 macOS 上性能优秀（内核态过滤，仅复制匹配包到用户态）
-- 与 WinDivert SNIFF 模式等价：只嗅探不拦截，包正常流转不断网
+Performance notes:
+- AF_PACKET has sufficient throughput at 1000 pps (kernel buffer + userspace batch reads)
+- BPF has excellent performance on macOS (kernel-level filtering, only matching packets copied to userspace)
+- Equivalent to WinDivert SNIFF mode: sniff-only, no interception, packets flow normally
 """
 
 from __future__ import annotations
@@ -107,15 +107,71 @@ _LOCAL_IP_CACHE_TS_UNIX: float = 0.0
 _LOCAL_IP_CACHE_TTL_UNIX = 60.0
 _LOCAL_IP_CACHE_LOCK_UNIX = threading.Lock()
 
+# 忽略规则缓存（与 server.py / raw_capture.py 保持同步，5 秒刷新）
+_IGNORED_PIDS_UNIX: set[int] = set()
+_IGNORED_NAMES_UNIX: set[str] = set()
+_IGNORED_HOST_REGEXES_UNIX: list = []
+_IGNORED_LOCK_UNIX = threading.Lock()
+_IGNORED_LAST_REFRESH_UNIX = 0.0
+_IGNORED_REFRESH_INTERVAL = 5.0
+
+
+def _refresh_ignored_unix():
+    """Refresh ignore rules from DB (cached, 5s TTL)."""
+    global _IGNORED_PIDS_UNIX, _IGNORED_NAMES_UNIX, _IGNORED_HOST_REGEXES_UNIX, _IGNORED_LAST_REFRESH_UNIX
+    now = time.time()
+    if now - _IGNORED_LAST_REFRESH_UNIX < _IGNORED_REFRESH_INTERVAL:
+        return
+    _IGNORED_LAST_REFRESH_UNIX = now
+    rows = db.get_ignored_processes()
+    pids = {r["pid"] for r in rows if r.get("pid") and r["pid"] > 0}
+    names = {r["process_name"].lower()
+             for r in rows
+             if (not r.get("pid") or r["pid"] <= 0) and r.get("process_name")}
+    host_rows = db.get_ignored_hosts()
+    hosts = [r["host_pattern"] for r in host_rows if r.get("host_pattern")]
+    import re as _re
+    host_rx = []
+    for p in hosts:
+        try:
+            escaped = p.replace(".", r"\.").replace("*", ".*").replace("?", ".")
+            host_rx.append(_re.compile(escaped, _re.IGNORECASE))
+        except Exception:  # noqa: BLE001
+            host_rx.append(None)
+    with _IGNORED_LOCK_UNIX:
+        _IGNORED_PIDS_UNIX = pids
+        _IGNORED_NAMES_UNIX = names
+        _IGNORED_HOST_REGEXES_UNIX = host_rx
+
+
+def _is_ignored_unix(pid: int | None, proc_name: str | None, host: str | None) -> bool:
+    """Check if flow should be ignored per user rules (pid / process name / host wildcard)."""
+    _refresh_ignored_unix()
+    with _IGNORED_LOCK_UNIX:
+        pid_set = _IGNORED_PIDS_UNIX
+        name_set = _IGNORED_NAMES_UNIX
+        host_rx = _IGNORED_HOST_REGEXES_UNIX
+    if pid is not None and pid > 0 and pid in pid_set:
+        return True
+    if proc_name and proc_name.lower() in name_set:
+        return True
+    if host and host_rx:
+        for rx in host_rx:
+            if rx is not None and rx.search(host):
+                return True
+    return False
+
+
 # 缓存初始化锁：保护 _ensure_caches() 的懒初始化（4 个 enrich worker 并发调用时避免 OrderedDict 被覆盖）
 _CACHE_INIT_LOCK = threading.Lock()
 
 
 def _ensure_caches():
-    """懒初始化 OrderedDict 缓存（避免 import 时报错）。
+    """Lazily initialize OrderedDict caches (avoid errors at import time).
 
-    线程安全：用 _CACHE_INIT_LOCK 保护，多个 enrich worker 并发调用时
-    只会初始化一次，避免一个线程的 OrderedDict 被另一个线程覆盖（丢失已缓存数据）。
+    Thread-safe: protected by _CACHE_INIT_LOCK; when multiple enrich workers
+    call concurrently, initialization happens only once, preventing one thread's
+    OrderedDict from being overwritten by another (losing cached data).
     """
     global _PID_CACHE_UNIX, _PROC_NAME_CACHE_UNIX, _IP_REGION_CACHE_UNIX
     # 双检锁：先无锁检查（快路径），命中则直接返回；未命中再加锁初始化
@@ -129,7 +185,7 @@ def _ensure_caches():
 
 
 def _is_local_ip_cached(ip: str) -> bool:
-    """判断 IP 是否本机 IP（带缓存，与 raw_capture.py 等价）。"""
+    """Check whether the IP is a local IP (with cache, equivalent to raw_capture.py)."""
     global _LOCAL_IP_CACHE_UNIX, _LOCAL_IP_CACHE_TS_UNIX
     if ip in ("127.0.0.1", "::1"):
         return True
@@ -152,7 +208,7 @@ def _is_local_ip_cached(ip: str) -> bool:
 
 
 def _lookup_pid_cached(src_ip, src_port, dst_ip, dst_port, list_rows_fn, is_udp: bool = False) -> int | None:
-    """带 LRU 缓存的 PID 反查（与 raw_capture.py 等价）。"""
+    """PID reverse-lookup with LRU cache (equivalent to raw_capture.py)."""
     _ensure_caches()
     if is_udp:
         src_is_local = _is_local_ip_cached(src_ip)
@@ -199,7 +255,7 @@ def _lookup_pid_cached(src_ip, src_port, dst_ip, dst_port, list_rows_fn, is_udp:
 
 
 def _proc_name_cached(pid: int) -> str:
-    """带 LRU 缓存的进程名查询，5 秒 TTL。"""
+    """Process name query with LRU cache, 5-second TTL."""
     _ensure_caches()
     now = time.time()
     with _PROC_NAME_LOCK:
@@ -226,7 +282,7 @@ def _proc_name_cached(pid: int) -> str:
 
 
 def _ip_region_cached(ip: str) -> str:
-    """带 LRU 缓存的 IP 属地查询，10 分钟 TTL。"""
+    """IP region lookup with LRU cache, 10-minute TTL."""
     _ensure_caches()
     now = time.time()
     with _IP_REGION_LOCK:
@@ -250,9 +306,9 @@ def _ip_region_cached(ip: str) -> str:
 
 def _enrich_one(session_id: int, raw: dict, list_tcp_fn, list_udp_fn,
                 pid_filter, port_filter, self_ports):
-    """处理单个 raw dict：PID 反查 → 进程名 → PID 过滤 → DNS 解析 → IP 属地 → 写库。
+    """Process a single raw dict: PID reverse-lookup -> process name -> PID filter -> DNS parse -> IP region -> write to DB.
 
-    与 RawCapture._enrich_one 逻辑完全等价，独立实现避免循环依赖。
+    Logically equivalent to RawCapture._enrich_one; independently implemented to avoid circular dependencies.
     """
     proto_name = raw["proto_name"]
     src_ip, dst_ip = raw["src_ip"], raw["dst_ip"]
@@ -354,26 +410,30 @@ def _enrich_one(session_id: int, raw: dict, list_tcp_fn, list_udp_fn,
             "remote_ip": remote_ip,
             "ip_region": _ip_region_cached(remote_ip) if remote_ip else "",
         }
+    # 忽略检查（与 ProxyServer / raw_capture.py 逻辑一致）
+    _flow_host = flow.get("host", "")
+    if _is_ignored_unix(pid, proc_name, _flow_host):
+        return
     db.insert_flow_async(flow)
 
 
 def _dns_summary(dns_info: dict) -> str:
-    """把 DNS 解析结果格式化为可读文本。"""
+    """Format DNS parse results as readable text."""
     import json as _json
     return _json.dumps(dns_info, ensure_ascii=False, indent=2)
 
 
 class UnixRawCapture:
-    """Unix 平台 TCP/UDP 抓包后端。
+    """Unix-platform TCP/UDP capture backend.
 
-    对外接口与 Windows 的 RawCapture 类保持一致：
+    External interface is consistent with the Windows RawCapture class:
     - start() / stop() / status()
-    - _enrich_queue 暴露给 enrich worker
+    - _enrich_queue exposed to enrich workers
 
-    与 Windows 版本的差异：
-    - 没有 pydivert，直接用 socket(AF_PACKET) 或 BPF 设备
-    - 抓到的是二层帧，需要手动解析 Ethernet + IP + TCP/UDP 头
-    - SNIFF 模式（只读不写），不影响网络流量
+    Differences from the Windows version:
+    - No pydivert; directly uses socket(AF_PACKET) or BPF device
+    - Captures Layer 2 frames; needs manual parsing of Ethernet + IP + TCP/UDP headers
+    - SNIFF mode (read-only, no write); does not affect network traffic
     """
 
     def __init__(self, session_id: int):
@@ -408,7 +468,7 @@ class UnixRawCapture:
         self._port_filter = ports
 
     def set_filter(self, filter_str: str):
-        """Unix 上不支持 WinDivert filter 字符串，忽略。"""
+        """WinDivert filter string is not supported on Unix; ignored."""
         # 端口过滤通过代码层实现
         pass
 
@@ -421,23 +481,23 @@ class UnixRawCapture:
         return self._last_error
 
     def _is_admin(self) -> bool:
-        """检查 root 权限（AF_PACKET/BPF 都需要）。"""
+        """Check for root privileges (AF_PACKET/BPF both require it)."""
         try:
             return os.geteuid() == 0
         except AttributeError:
             return False
 
     def start(self) -> bool:
-        """启动抓包。"""
+        """Start capture."""
         if not IS_UNIX:
-            self._last_error = "UnixRawCapture 仅支持 Linux/macOS"
+            self._last_error = "UnixRawCapture only supports Linux/macOS"
             return False
         if self._running:
             return True
         try:
             if not self._is_admin():
-                self._last_error = "需要 root 权限（AF_PACKET/BPF 需要 CAP_NET_RAW）"
-                logger.error("raw", "Unix 抓包需要 root", "请用 sudo 启动 Telnix")
+                self._last_error = "Root privileges required (AF_PACKET/BPF requires CAP_NET_RAW)"
+                logger.error("raw", "Unix capture requires root", "Please start Telnix with sudo")
                 return False
 
             if IS_LINUX:
@@ -454,17 +514,17 @@ class UnixRawCapture:
                 t = threading.Thread(target=self._enrich_loop, daemon=True, name=f"raw-unix-enrich-{i}")
                 t.start()
                 self._enrich_threads.append(t)
-            logger.info("raw", "TCP/UDP 抓包已启动 (Unix)",
+            logger.info("raw", "TCP/UDP capture started (Unix)",
                         f"platform={sys.platform}, ifname={self._ifname}")
             return True
         except Exception as e:  # noqa: BLE001
             self._last_error = str(e)
-            logger.error("raw", "Unix 抓包启动失败", str(e))
+            logger.error("raw", "Unix capture start failed", str(e))
             self._cleanup_socket()
             return False
 
     def _start_linux(self) -> bool:
-        """Linux: 用 AF_PACKET raw socket 抓包。"""
+        """Linux: capture using AF_PACKET raw socket."""
         try:
             self._sock = socket.socket(
                 socket.AF_PACKET, socket.SOCK_RAW, _ETH_P_ALL_NET
@@ -478,14 +538,14 @@ class UnixRawCapture:
             self._ifname = "any"
             return True
         except PermissionError as e:
-            self._last_error = f"权限不足：{e}（需要 CAP_NET_RAW / root）"
+            self._last_error = f"Insufficient privileges: {e} (CAP_NET_RAW / root required)"
             return False
         except OSError as e:
-            self._last_error = f"AF_PACKET 创建失败: {e}"
+            self._last_error = f"AF_PACKET creation failed: {e}"
             return False
 
     def _start_macos(self) -> bool:
-        """macOS: 用 BPF 设备抓包。"""
+        """macOS: capture using BPF device."""
         # 查找空闲的 BPF 设备 /dev/bpf0 ~ /dev/bpf255
         bpf_path = None
         fd = None
@@ -499,12 +559,12 @@ class UnixRawCapture:
                 if e.errno == errno.EBUSY:
                     continue  # 设备被占用，尝试下一个
                 if e.errno == errno.EACCES:
-                    self._last_error = f"权限不足：无法打开 {path}（需要 root）"
+                    self._last_error = f"Insufficient permissions: cannot open {path} (root required)"
                     return False
                 # ENOENT 等其他错误：跳出循环
                 break
         if bpf_path is None or fd is None:
-            self._last_error = "找不到空闲的 BPF 设备（/dev/bpfN 全部占用）"
+            self._last_error = "No free BPF device available (all /dev/bpfN in use)"
             return False
         self._bpf_fd = fd
         self._bpf_dev_path = bpf_path
@@ -519,7 +579,7 @@ class UnixRawCapture:
             # 选定接口：优先选 en0（默认网卡），失败时尝试 en1
             ifname = self._find_active_interface()
             if not ifname:
-                self._last_error = "找不到活动的网络接口"
+                self._last_error = "No active network interface found"
                 self._cleanup_socket()
                 return False
             self._ifname = ifname
@@ -542,12 +602,12 @@ class UnixRawCapture:
             self._bpf_buf_len = max(actual_len, buf_len)
             return True
         except OSError as e:
-            self._last_error = f"BPF 配置失败: {e}"
+            self._last_error = f"BPF configuration failed: {e}"
             self._cleanup_socket()
             return False
 
     def _find_active_interface(self) -> str | None:
-        """查找活动网络接口（macOS）。"""
+        """Find the active network interface (macOS)."""
         # 优先用 en0（默认有线/无线），失败时尝试 en1
         candidates = ["en0", "en1", "en2"]
         for name in candidates:
@@ -571,7 +631,7 @@ class UnixRawCapture:
         return "en0"
 
     def _cleanup_socket(self):
-        """清理 socket / BPF 设备。"""
+        """Clean up socket / BPF device."""
         if self._sock is not None:
             try:
                 self._sock.close()
@@ -587,7 +647,7 @@ class UnixRawCapture:
         self._bpf_dev_path = None
 
     def stop(self):
-        """停止抓包。"""
+        """Stop capture."""
         self._running = False
         # 关闭 socket / BPF 设备，解除 recv 阻塞
         self._cleanup_socket()
@@ -607,11 +667,11 @@ class UnixRawCapture:
             total_dropped = self._dropped
             self._dropped = 0
         if total_dropped > 0:
-            logger.warning("raw", "Unix 抓包停止，丢包统计", f"累计丢包: {total_dropped}")
-        logger.info("raw", "TCP/UDP 抓包已停止 (Unix)")
+            logger.warning("raw", "Unix capture stopped, drop stats", f"total dropped: {total_dropped}")
+        logger.info("raw", "TCP/UDP capture stopped (Unix)")
 
     def _capture_loop(self):
-        """抓包主循环（与 Windows 版本相同的轻量入队模式）。"""
+        """Capture main loop (same lightweight enqueue pattern as the Windows version)."""
         while self._running:
             try:
                 if IS_LINUX:
@@ -620,11 +680,11 @@ class UnixRawCapture:
                     self._capture_one_macos()
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.error("raw", "Unix 抓包循环异常", str(e))
+                    logger.error("raw", "Unix capture loop exception", str(e))
                     time.sleep(0.1)
 
     def _capture_one_linux(self):
-        """Linux: 从 AF_PACKET socket 读一个包并解析。"""
+        """Linux: read one packet from AF_PACKET socket and parse it."""
         try:
             # recvfrom 返回 (data, (ifname, proto, pkttype, hatype, halen))
             data, _ = self._sock.recvfrom(65536)
@@ -632,7 +692,7 @@ class UnixRawCapture:
             return
         except OSError as e:
             if self._running:
-                logger.error("raw", "AF_PACKET recv 失败", str(e))
+                logger.error("raw", "AF_PACKET recv failed", str(e))
             return
         # Linux AF_PACKET 数据含 Ethernet 头（14 字节）
         # Ethernet: dst_mac(6) + src_mac(6) + ethertype(2)
@@ -647,21 +707,21 @@ class UnixRawCapture:
         self._parse_and_enqueue_ip_packet(data[14:])
 
     def _capture_one_macos(self):
-        """macOS: 从 BPF 设备读一批包并解析。
+        """macOS: read a batch of packets from BPF device and parse them.
 
-        BPF 一次 read 返回多个包，每个包前有 bpf_hdr 结构：
+        BPF returns multiple packets per read; each packet is preceded by a bpf_hdr structure:
         struct bpf_hdr {
-            bpf_u_int32 bh_tstamp;     // 时间戳（秒）
-            u_short bh_caplen;         // 捕获长度
-            u_short bh_datalen;        // 原始包长度
-            u_short bh_hdrlen;         // bpf_hdr 长度（含 padding）
+            bpf_u_int32 bh_tstamp;     // timestamp (seconds)
+            u_short bh_caplen;         // captured length
+            u_short bh_datalen;        // original packet length
+            u_short bh_hdrlen;         // bpf_hdr length (including padding)
         };
         """
         try:
             data = os.read(self._bpf_fd, self._bpf_buf_len)
         except OSError as e:
             if self._running:
-                logger.error("raw", "BPF read 失败", str(e))
+                logger.error("raw", "BPF read failed", str(e))
             return
         if not data:
             return
@@ -699,7 +759,7 @@ class UnixRawCapture:
                 offset += _BPF_ALIGNMENT - (offset % _BPF_ALIGNMENT)
 
     def _parse_and_enqueue_ip_packet(self, ip_data: bytes):
-        """解析 IPv4 包并构造 raw dict 入队。"""
+        """Parse an IPv4 packet and build a raw dict to enqueue."""
         if len(ip_data) < 20:
             return
         # IP 头前 4 位 version + IHL
@@ -777,10 +837,10 @@ class UnixRawCapture:
             with self._dropped_lock:
                 self._dropped += 1
                 if self._dropped % 100 == 0:
-                    logger.warning("raw", "Unix 抓包队列满丢包", f"累计丢包: {self._dropped}")
+                    logger.warning("raw", "Unix capture queue full, packet dropped", f"total dropped: {self._dropped}")
 
     def _enrich_loop(self):
-        """enrich worker：从队列取 raw dict，补充 PID/进程名/IP属地/DNS，写库。"""
+        """enrich worker: dequeue raw dict, fill in PID/process name/IP region/DNS, write to DB."""
         from .process_lookup import _list_tcp_owner_rows, _list_udp_owner_rows
         while self._running:
             try:
@@ -797,16 +857,16 @@ class UnixRawCapture:
                 )
             except Exception as e:  # noqa: BLE001
                 if self._running:
-                    logger.error("raw", "Unix enrich 异常", str(e))
+                    logger.error("raw", "Unix enrich exception", str(e))
 
 
 def is_unix_raw_capture_available() -> bool:
-    """检查 Unix 抓包后端是否可用（仅判断平台，不检查 root）。"""
+    """Check whether the Unix capture backend is available (platform check only, does not check root)."""
     return IS_UNIX
 
 
 def get_unix_raw_capture_status() -> dict:
-    """返回 Unix 抓包后端状态（用于前端显示）。"""
+    """Return the Unix capture backend status (for frontend display)."""
     try:
         is_admin = os.geteuid() == 0
     except AttributeError:
@@ -816,5 +876,5 @@ def get_unix_raw_capture_status() -> dict:
         "supported": True,
         "backend": "af_packet" if IS_LINUX else ("bpf" if IS_MACOS else "none"),
         "is_admin": is_admin,
-        "hint": ("就绪" if is_admin else "需要 root 权限") if IS_UNIX else "不支持的平台",
+        "hint": ("Ready" if is_admin else "Root privileges required") if IS_UNIX else "Unsupported platform",
     }

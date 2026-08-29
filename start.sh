@@ -30,18 +30,6 @@ else
     COLOR_CYAN=""; COLOR_GREEN=""; COLOR_YELLOW=""; COLOR_RED=""; COLOR_GRAY=""; COLOR_RESET=""
 fi
 
-# ---------- 检测 python3 ----------
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "${COLOR_RED}[Telnix] ERROR: 未找到 python3${COLOR_RESET}"
-    echo "  macOS:   brew install python"
-    echo "  Debian:  sudo apt install python3"
-    echo "  RHEL:    sudo dnf install python3"
-    exit 1
-fi
-PY_EXE="$(command -v python3)"
-PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-echo "${COLOR_GRAY}[Python] $PY_EXE ($PY_VER)${COLOR_RESET}"
-
 # ---------- 检查后端包是否就位 ----------
 TELNIX_INIT="$HOST_DIR/telnix/__init__.py"
 if [ ! -f "$TELNIX_INIT" ]; then

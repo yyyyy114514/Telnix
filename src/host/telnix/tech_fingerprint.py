@@ -1,16 +1,18 @@
-"""技术栈识别（Tech Stack Fingerprint）。
+"""Tech Stack Fingerprint.
 
-通过响应头 / Cookie / Body 特征识别目标站点使用的技术栈：
-- 服务器：Nginx / Apache / IIS / Caddy
-- 语言：PHP / Java / Python / Node.js / ASP.NET / Ruby / Go
-- 框架：Django / Flask / Spring / Express / Laravel / Rails / ASP.NET MVC
-- 前端：React / Vue / Angular / jQuery / Next.js / Nuxt
-- CMS：WordPress / Drupal / Discuz
-- CDN / WAF：Cloudflare / Akamai / 阿里云 WAF / 腾讯云 WAF
-- Analytics：Google Analytics / 百度统计 / 友盟
-- 构建工具：Webpack / Vite
+Identifies the technology stack used by the target site via response header /
+cookie / body signatures:
+- Servers: Nginx / Apache / IIS / Caddy
+- Languages: PHP / Java / Python / Node.js / ASP.NET / Ruby / Go
+- Frameworks: Django / Flask / Spring / Express / Laravel / Rails / ASP.NET MVC
+- Frontend: React / Vue / Angular / jQuery / Next.js / Nuxt
+- CMS: WordPress / Drupal / Discuz
+- CDN / WAF: Cloudflare / Akamai / 阿里云 WAF / 腾讯云 WAF
+- Analytics: Google Analytics / 百度统计 / 友盟
+- Build tools: Webpack / Vite
 
-识别结果按类别分组返回，含置信度（high/medium/low）。
+Identification results are returned grouped by category, with confidence
+(high/medium/low).
 """
 from __future__ import annotations
 
@@ -228,14 +230,14 @@ def fingerprint(
     response_body: bytes | str | None,
     set_cookie: str | list[str] | None = None,
 ) -> list[dict]:
-    """识别技术栈，返回指纹列表。
+    """Identify the tech stack and return the fingerprint list.
 
-    参数：
-    - response_headers: dict 或 JSON 字符串（小写 key，value 为字符串）
-    - response_body: 响应 body（bytes 或 str，最多取前 512KB 识别避免大文件慢）
-    - set_cookie: Set-Cookie 头（单个字符串或列表）
+    Parameters:
+    - response_headers: dict or JSON string (lowercase keys, string values)
+    - response_body: response body (bytes or str, only the first 512KB is used to avoid slow large files)
+    - set_cookie: Set-Cookie header (single string or list)
 
-    返回：[{name, category, confidence, version?}] 按类别排序，去重
+    Returns: [{name, category, confidence, version?}] sorted by category, deduplicated
     """
     # 标准化 headers（dict）
     headers: dict[str, str] = {}
@@ -317,12 +319,12 @@ def fingerprint(
 
 def _add_result(results: dict, name: str, category: str,
                 confidence: str, version: Optional[str]):
-    """添加识别结果，去重保留高置信度。
+    """Add an identification result, deduplicating and keeping the higher confidence.
 
-    合并规则：
-    - 已存在且新置信度更高：升级置信度；version 用新的（高置信度来源更可靠）
-    - 已存在且新置信度更低或相等：保留原置信度；version 仅在原为空时补充
-    - 新条目：直接插入
+    Merge rules:
+    - Existing and new confidence is higher: upgrade confidence; use the new version (higher-confidence source is more reliable)
+    - Existing and new confidence is lower or equal: keep the original confidence; only fill in version when the original is empty
+    - New entry: insert directly
     """
     key = (category, name)
     existing = results.get(key)
@@ -348,9 +350,9 @@ def _add_result(results: dict, name: str, category: str,
 
 
 def fingerprint_flow(flow: dict) -> list[dict]:
-    """从 DB flow dict 提取技术栈指纹。
+    """Extract tech stack fingerprints from a DB flow dict.
 
-    flow 需包含 response_headers / response_body / set_cookie 字段。
+    The flow must contain response_headers / response_body / set_cookie fields.
     """
     return fingerprint(
         response_headers=flow.get("response_headers"),

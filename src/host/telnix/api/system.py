@@ -1,16 +1,16 @@
-"""系统控制 API：重启服务 / 退出 / 关闭系统代理。
+"""System control API: restart service / quit / disable system proxy / cleanup db.
 
-设计要点：
-- 重启：通过 os.execv 在同进程内重启，继承同一控制台窗口。重启前清系统代理。
-- 退出：调用 _quit_hook（由 __main__.py 注入），清代理 + sys.exit。
-- 关闭系统代理：调用注入的 _clear_proxy_hook。
-- 管理员重启（restart-as-admin）：先经 GUI 用户确认（置顶弹窗），同意后 ShellExecuteW runas。
-  CLI 发起 → 后端创建 pending 请求并阻塞等待 → 前端轮询弹窗 → 用户响应 → 解除阻塞。
-- WinDivert 风险提示：首次启用 WinDivert 相关功能（TCP/UDP 抓包 / 透明代理 / DNS 劫持）
-  时弹窗告知用户该驱动可能被杀软拦截。GUI 走 Vue 对话框，CLI/MCP 走原生 MessageBox。
+Design points:
+- Restart: Restart within the same process via os.execv, inheriting the same console window. Clear system proxy before restart.
+- Quit: Call _quit_hook (injected by __main__.py), clear proxy + sys.exit.
+- Disable system proxy: Call injected _clear_proxy_hook.
+- Restart as admin (restart-as-admin): First confirm with GUI user (topmost popup), then ShellExecuteW runas if agreed.
+  CLI initiates -> backend creates pending request and blocks waiting -> frontend polls popup -> user responds -> unblock.
+- WinDivert risk warning: Popup to inform user that this driver may be blocked by antivirus when enabling WinDivert-related features (TCP/UDP capture / transparent proxy / DNS hijack) for the first time. GUI uses Vue dialog, CLI/MCP uses native MessageBox.
 """
 
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -18,8 +18,11 @@ import uuid
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from .. import settings_store
+from ..logger import _capture_log
+from .. import db
 from . import ok, err
 
 router = APIRouter()
@@ -32,6 +35,10 @@ _enable_proxy_hook = None
 # 系统代理当前是否开启（由 __main__ 更新）
 system_proxy_on = False
 
+# 平台能力接口中 is_admin 等稳定结果的内存缓存（避免设置页等频繁检测导致 2 秒跳动）
+_admin_cache: dict | None = None
+_ADMIN_CACHE_TTL = 30.0
+
 # ------ 代理丢失检测 ------
 # _proxy_lost：期望开启（system_proxy_on=True）但实际注册表已关闭/被抢占时置 True
 # 前端轮询 /status 时检测该字段，弹窗询问是否重新开启
@@ -43,7 +50,7 @@ _proxy_monitor_lock = threading.Lock()
 
 
 def set_hooks(restart=None, quit=None, clear_proxy=None, enable_proxy=None):
-    """注入重启/退出/清代理/开代理的回调。"""
+    """Inject callbacks for restart/quit/clear proxy/enable proxy."""
     global _restart_hook, _quit_hook, _clear_proxy_hook, _enable_proxy_hook
     if restart is not None:
         _restart_hook = restart
@@ -56,10 +63,10 @@ def set_hooks(restart=None, quit=None, clear_proxy=None, enable_proxy=None):
 
 
 def mark_proxy_on(v: bool):
-    """更新系统代理开关状态。
+    """Update system proxy on/off state.
 
-    用户主动开启/关闭代理时调用此函数。
-    主动关闭时同时重置 _proxy_lost=False，避免前端继续弹窗。
+    Called when user actively enables/disables proxy.
+    When actively disabled, also reset _proxy_lost=False to avoid frontend continuing to popup.
     """
     global system_proxy_on, _proxy_lost
     system_proxy_on = v
@@ -68,16 +75,16 @@ def mark_proxy_on(v: bool):
 
 
 def is_proxy_lost() -> bool:
-    """查询代理是否丢失（前端轮询 /status 时使用）。"""
+    """Query whether proxy is lost (used when frontend polls /status)."""
     return _proxy_lost
 
 
 def start_proxy_monitor():
-    """启动代理状态监控线程（仅启动一次，由 __main__.py 调用）。
+    """Start proxy status monitor thread (started only once, called by __main__.py).
 
-    每 5 秒读取注册表实际代理状态，与 system_proxy_on 对比：
-    - 期望开启但实际关闭 → _proxy_lost=True
-    - 期望关闭时不监控（避免误报）
+    Reads actual proxy status from registry every 5 seconds and compares with system_proxy_on:
+    - Expected on but actually off -> _proxy_lost=True
+    - Not monitored when expected off (to avoid false positives)
     """
     global _proxy_monitor_thread, _proxy_monitor_started
     with _proxy_monitor_lock:
@@ -93,33 +100,34 @@ def start_proxy_monitor():
 
 
 def _read_actual_proxy_enabled() -> bool:
-    """读取系统实际代理开关状态（跨平台）。
+    """Read actual system proxy on/off state (cross-platform).
 
-    平台支持：
-    - Windows: 读注册表 ProxyEnable
-    - macOS: networksetup -getwebproxy 检查 Enabled
+    Platform support:
+    - Windows: Read registry ProxyEnable
+    - macOS: networksetup -getwebproxy check Enabled
     - Linux GNOME: gsettings get org.gnome.system.proxy mode
-    - Linux KDE: kreadconfig5 读 ProxyType
+    - Linux KDE: kreadconfig5 read ProxyType
     """
     try:
         from .. import system_proxy
         return system_proxy.read_actual_proxy_enabled()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
         return False
 
 
 def _proxy_monitor_loop():
-    """代理状态监控循环（后台线程，跨平台）。
+    """Proxy status monitor loop (background thread, cross-platform).
 
-    每 5 秒读取系统实际代理状态，与 system_proxy_on 对比：
-    - 期望开启但实际关闭 → _proxy_lost=True
-    - 期望关闭时不监控（避免误报）
+    Reads actual system proxy status every 5 seconds and compares with system_proxy_on:
+    - Expected on but actually off -> _proxy_lost=True
+    - Not monitored when expected off (to avoid false positives)
 
-    平台支持：
-    - Windows: 读注册表 ProxyEnable
+    Platform support:
+    - Windows: Read registry ProxyEnable
     - macOS: networksetup -getwebproxy
     - Linux: gsettings/kreadconfig5
-    - 不支持的平台：直接退出（无法监控）
+    - Unsupported platforms: exit directly (cannot monitor)
     """
     global _proxy_lost
     # 启动时先等 10 秒，让前端初始化完成，避免初次轮询误触发
@@ -139,19 +147,19 @@ def _proxy_monitor_loop():
                 # 期望开但实际关：代理丢失
                 if not _proxy_lost:
                     global_set_proxy_lost(True)
-                    print("[Telnix] 检测到系统代理已丢失", file=sys.stderr)
+                    print("[Telnix] System proxy lost detected", file=sys.stderr)
             elif actual and not (last_seen_actual is None or last_seen_actual):
                 # 代理恢复了（前端弹窗后用户同意重新开启）
                 if _proxy_lost:
                     global_set_proxy_lost(False)
-                    print("[Telnix] 系统代理已恢复", file=sys.stderr)
+                    print("[Telnix] System proxy restored", file=sys.stderr)
             last_seen_actual = actual
         except Exception as e:  # noqa: BLE001
-            print(f"[Telnix] 代理监控异常: {e}", file=sys.stderr)
+            print(f"[Telnix] Proxy monitor exception: {e}", file=sys.stderr)
 
 
 def global_set_proxy_lost(v: bool):
-    """线程安全地更新 _proxy_lost。"""
+    """Thread-safely update _proxy_lost."""
     global _proxy_lost
     _proxy_lost = v
 
@@ -166,9 +174,10 @@ _pending_lock = threading.Lock()
 
 
 def _create_pending_request(source: str = "cli") -> str:
-    """创建一个待确认的管理员重启请求，返回 request_id。
+    """Create a pending admin restart request, return request_id.
 
-    创建后立即在新线程中弹原生 Windows MessageBox（置顶），用户响应后回传结果。
+    After creation, immediately popup native Windows MessageBox (topmost) in a new thread,
+    and pass back the result after user responds.
     """
     rid = uuid.uuid4().hex[:12]
     with _pending_lock:
@@ -188,29 +197,81 @@ def _create_pending_request(source: str = "cli") -> str:
 
 
 def _native_message_box_thread(rid: str, source: str):
-    """在新线程中弹原生 Windows Yes/No 弹窗，把结果回传到 pending 请求。"""
-    title = "Telnix 管理员重启请求"
+    """Popup native Windows Yes/No dialog in a new thread, pass result back to pending request."""
+    title = "Telnix Admin Restart Request"
     message = (
-        f"来源: {source}\n\n"
-        "CLI / Agent 请求以管理员身份重启 Telnix，\n"
-        "以辅助 agent 抓包（TCP/UDP 抓包需要管理员权限）。\n\n"
-        "同意后将弹出 UAC 提权窗口，Telnix 会以管理员身份重启。\n\n"
-        "是否同意？"
+        f"Source: {source}\n\n"
+        "CLI / Agent requests to restart Telnix as administrator\n"
+        "to assist agent packet capture (TCP/UDP capture requires administrator privileges).\n\n"
+        "If agreed, a UAC elevation prompt will appear, and Telnix will restart as administrator.\n\n"
+        "Do you agree?"
     )
     result = _show_native_message_box(title, message)
     response = 'accept' if result == 'yes' else 'reject'
     _respond_pending_request(rid, response)
 
 
-def _show_native_message_box(title: str, message: str) -> str:
-    """显示原生 Windows 置顶 Yes/No 弹窗，返回 'yes' / 'no'。
+def _show_confirm_box_unix(title: str, message: str) -> str:
+    """在 macOS/Linux 弹出原生 Yes/No 确认框，返回 'yes' / 'no'。
 
-    使用 MB_TOPMOST | MB_SYSTEMMODAL | MB_SETFOREGROUND 确保窗口置顶显示，
-    引起用户注意（任务栏图标闪烁 + 强制前置）。
+    安全策略：无法弹出任何确认框时返回 'no'（保守拒绝），
+    确保管理员重启这类高危操作必须经过真实的用户交互确认。
+    """
+    import shutil
+    try:
+        if sys.platform == 'darwin':
+            # macOS: osascript 显示确认对话框，默认聚焦「取消」
+            script = (
+                f'display dialog {_applescript_quote(message)} '
+                f'with title {_applescript_quote(title)} '
+                f'buttons {{"Cancel", "OK"}} default button "Cancel" '
+                f'with icon caution'
+            )
+            r = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True, text=True, timeout=120,
+            )
+            # 点 OK 返回码 0；取消返回非 0（User canceled）
+            return 'yes' if r.returncode == 0 else 'no'
+        # Linux: 优先 zenity，其次 kdialog
+        if shutil.which('zenity'):
+            r = subprocess.run(
+                ['zenity', '--question', '--title', title, '--text', message,
+                 '--ok-label', 'OK', '--cancel-label', 'Cancel', '--default-cancel'],
+                capture_output=True, timeout=120,
+            )
+            return 'yes' if r.returncode == 0 else 'no'
+        if shutil.which('kdialog'):
+            r = subprocess.run(
+                ['kdialog', '--title', title, '--warningyesno', message],
+                capture_output=True, timeout=120,
+            )
+            return 'yes' if r.returncode == 0 else 'no'
+    except subprocess.TimeoutExpired:
+        return 'no'
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
+        return 'no'
+    # 无任何可用的确认工具：保守拒绝
+    return 'no'
+
+
+def _applescript_quote(s: str) -> str:
+    """把字符串安全嵌入 AppleScript 字面量（转义反斜杠与双引号）。"""
+    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _show_native_message_box(title: str, message: str) -> str:
+    """Show native Windows topmost Yes/No dialog, return 'yes' / 'no'.
+
+    Uses MB_TOPMOST | MB_SYSTEMMODAL | MB_SETFOREGROUND to ensure the window is displayed on top,
+    drawing user attention (taskbar icon flashing + force foreground).
     """
     if sys.platform != 'win32':
-        # 非 Windows 平台退化：直接同意（无原生弹窗）
-        return 'yes'
+        # 非 Windows 平台：弹出原生确认框（macOS osascript / Linux zenity|kdialog）。
+        # 安全：绝不自动同意——无法弹出确认框时保守拒绝，
+        # 避免局域网/CSRF 请求在无用户交互下静默触发管理员重启。
+        return _show_confirm_box_unix(title, message)
     MB_YESNO = 0x00000004
     MB_ICONQUESTION = 0x00000020
     MB_TOPMOST = 0x00040000
@@ -237,13 +298,14 @@ def _show_native_message_box(title: str, message: str) -> str:
             flags,
         )
         return 'yes' if result == IDYES else 'no'
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
         # 任何异常都视为拒绝（保守安全策略）
         return 'no'
 
 
 def _wait_pending_request(rid: str, timeout: float = 60.0) -> str | None:
-    """阻塞等待用户响应，返回 'accept' / 'reject' / None（超时）。"""
+    """Block waiting for user response, return 'accept' / 'reject' / None (timeout)."""
     with _pending_lock:
         item = _pending_admin_requests.get(rid)
     if not item:
@@ -256,7 +318,7 @@ def _wait_pending_request(rid: str, timeout: float = 60.0) -> str | None:
 
 
 def _respond_pending_request(rid: str, response: str) -> bool:
-    """用户响应 pending 请求，返回是否成功。"""
+    """User responds to pending request, return whether successful."""
     with _pending_lock:
         item = _pending_admin_requests.get(rid)
         if not item or item["response"] is not None:
@@ -267,13 +329,13 @@ def _respond_pending_request(rid: str, response: str) -> bool:
 
 
 def _cleanup_pending_request(rid: str):
-    """清理已处理的 pending 请求。"""
+    """Clean up processed pending request."""
     with _pending_lock:
         _pending_admin_requests.pop(rid, None)
 
 
 def _list_pending_requests() -> list[dict]:
-    """列出所有待确认请求（用于前端轮询）。"""
+    """List all pending requests (for frontend polling)."""
     now = time.time()
     out = []
     with _pending_lock:
@@ -289,18 +351,18 @@ def _list_pending_requests() -> list[dict]:
             "source": item["source"],
             "created_at": item["created_at"],
             "action": "restart-as-admin",
-            "message": "CLI 请求以管理员身份重启 Telnix 以辅助 agent 抓包（TCP/UDP 抓包需要管理员权限）",
+            "message": "CLI requests to restart Telnix as administrator to assist agent packet capture (TCP/UDP capture requires administrator privileges)",
         })
     return out
 
 
 def _do_shell_elevate() -> tuple[bool, str]:
-    """执行提权，启动新的管理员/root 进程。返回 (success, message)。
+    """Perform elevation, start a new administrator/root process. Return (success, message).
 
-    平台支持：
-    - Windows: ShellExecuteW('runas') 触发 UAC
+    Platform support:
+    - Windows: ShellExecuteW('runas') triggers UAC
     - macOS: osascript with administrator privileges
-    - Linux: pkexec（GUI）或 sudo（CLI）
+    - Linux: pkexec (GUI) or sudo (CLI)
     """
     # 先清理系统代理（避免提权后旧进程残留代理设置）
     if _clear_proxy_hook is not None:
@@ -312,12 +374,12 @@ def _do_shell_elevate() -> tuple[bool, str]:
         from .. import elevation
         ok, msg = elevation.elevate()
     except Exception as e:  # noqa: BLE001
-        return False, f'提权失败: {e}'
+        return False, f'Elevation failed: {e}'
     if not ok:
         return False, msg
     # 退出当前非管理员进程
     threading.Thread(target=_delayed_quit, daemon=True).start()
-    return True, '已批准'
+    return True, 'Approved'
 
 
 # ---------- WinDivert 风险提示 ----------
@@ -328,36 +390,36 @@ def _do_shell_elevate() -> tuple[bool, str]:
 WINDIVERT_ACK_KEY = "windivert_warning_acknowledged"
 
 _WINDIVERT_WARNING_MESSAGE = (
-    "即将启用的功能需要加载 WinDivert64.sys 内核驱动。\n\n"
-    "该驱动常被漏洞利用工具使用，部分杀毒软件（360 / 火绒 / Windows Defender 等）"
-    "可能将其作为\"漏洞驱动\"拦截或报警，导致功能无法启动。\n\n"
-    "Telnix 仅将该驱动用于抓包 / 透明代理 / DNS 劫持，"
-    "不会对您的设备带来任何安全隐患。\n\n"
-    "是否确认开启？"
+    "The feature about to be enabled requires loading the WinDivert64.sys kernel driver.\n\n"
+    "This driver is commonly used by exploit tools, and some antivirus software (360 / Huorong / Windows Defender, etc.) "
+    "may block or alert on it as a \"vulnerable driver\", causing the feature to fail to start.\n\n"
+    "Telnix only uses this driver for packet capture / transparent proxy / DNS hijack, "
+    "and will not bring any security risks to your device.\n\n"
+    "Do you confirm to enable it?"
 )
 
 _WINDIVERT_WARNING_BRIEF = (
-    "即将加载 WinDivert64.sys 内核驱动，该驱动常被漏洞利用工具使用，"
-    "部分杀毒软件可能将其作为\"漏洞驱动\"拦截或报警。"
-    "Telnix 仅用于抓包 / 透明代理，不会对您的设备带来安全隐患。"
+    "About to load WinDivert64.sys kernel driver, which is commonly used by exploit tools. "
+    "Some antivirus software may block or alert on it as a \"vulnerable driver\". "
+    "Telnix only uses it for packet capture / transparent proxy, and will not bring any security risks to your device."
 )
 
 
 def is_windivert_acknowledged() -> bool:
-    """用户是否已确认 WinDivert 风险提示。"""
+    """Whether user has acknowledged WinDivert risk warning."""
     return settings_store.get_setting(WINDIVERT_ACK_KEY, "0") == "1"
 
 
 def windivert_warning_needed() -> bool:
-    """是否需要提示：仅 Windows 平台 + 未确认时为 True。"""
+    """Whether to prompt: True only on Windows platform + not acknowledged."""
     return sys.platform == "win32" and not is_windivert_acknowledged()
 
 
 def check_windivert_ack_or_block():
-    """在 WinDivert 相关 API 入口调用。
+    """Called at WinDivert-related API entry points.
 
-    返回 None 表示已确认（或非 Windows 平台，由底层函数返回不支持），可继续执行。
-    返回 JSONResponse（HTTP 403 + need_ack=true）表示需要确认，调用方应直接 return 该响应。
+    Returns None if acknowledged (or non-Windows platform, where underlying functions return unsupported), can continue execution.
+    Returns JSONResponse (HTTP 403 + need_ack=true) if acknowledgment is required, caller should directly return this response.
     """
     if sys.platform != "win32":
         # 非 Windows 平台：不检查 ack，由底层函数返回"不支持"错误
@@ -369,7 +431,7 @@ def check_windivert_ack_or_block():
         status_code=403,
         content={
             "code": -1,
-            "msg": "需要先确认 WinDivert 风险提示",
+            "msg": "WinDivert risk warning must be acknowledged first",
             "data": {"need_ack": True},
             "need_ack": True,
         },
@@ -377,7 +439,7 @@ def check_windivert_ack_or_block():
 
 
 def acknowledge_windivert_warning() -> None:
-    """标记为已确认（永久不再提示）。"""
+    """Mark as acknowledged (will not prompt again permanently)."""
     settings_store.set_setting(WINDIVERT_ACK_KEY, "1")
 
 
@@ -390,9 +452,10 @@ _pending_windivert_lock = threading.Lock()
 
 
 def _create_pending_windivert_ack() -> str:
-    """创建一个待确认的 WinDivert ack 请求，返回 request_id。
+    """Create a pending WinDivert ack request, return request_id.
 
-    创建后立即在新线程中弹原生 Windows MessageBox（置顶），用户响应后回传结果。
+    After creation, immediately popup native Windows MessageBox (topmost) in a new thread,
+    and pass back the result after user responds.
     """
     rid = uuid.uuid4().hex[:12]
     with _pending_windivert_lock:
@@ -411,8 +474,8 @@ def _create_pending_windivert_ack() -> str:
 
 
 def _native_windivert_message_box_thread(rid: str):
-    """在新线程中弹原生 Windows Yes/No 弹窗，把结果回传到 pending ack 请求。"""
-    title = "Telnix WinDivert 驱动风险提示"
+    """Popup native Windows Yes/No dialog in a new thread, pass result back to pending ack request."""
+    title = "Telnix WinDivert Driver Risk Warning"
     message = _WINDIVERT_WARNING_MESSAGE
     result = _show_native_message_box(title, message)
     response = 'accept' if result == 'yes' else 'reject'
@@ -421,12 +484,13 @@ def _native_windivert_message_box_thread(rid: str):
     if response == 'accept':
         try:
             acknowledge_windivert_warning()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            _capture_log("error", "API exception", extra={"exc": repr(e)})
             pass
 
 
 def _wait_pending_windivert_ack(rid: str, timeout: float = 60.0) -> str | None:
-    """阻塞等待用户响应，返回 'accept' / 'reject' / None（超时）。"""
+    """Block waiting for user response, return 'accept' / 'reject' / None (timeout)."""
     with _pending_windivert_lock:
         item = _pending_windivert_acks.get(rid)
     if not item:
@@ -438,7 +502,7 @@ def _wait_pending_windivert_ack(rid: str, timeout: float = 60.0) -> str | None:
 
 
 def _respond_pending_windivert_ack(rid: str, response: str) -> bool:
-    """用户响应 pending ack 请求，返回是否成功。"""
+    """User responds to pending ack request, return whether successful."""
     with _pending_windivert_lock:
         item = _pending_windivert_acks.get(rid)
         if not item or item["response"] is not None:
@@ -449,92 +513,92 @@ def _respond_pending_windivert_ack(rid: str, response: str) -> bool:
 
 
 def _cleanup_pending_windivert_ack(rid: str):
-    """清理已处理的 pending ack 请求。"""
+    """Clean up processed pending ack request."""
     with _pending_windivert_lock:
         _pending_windivert_acks.pop(rid, None)
 
 
 @router.post("/system/restart")
 async def restart_service(request: Request):
-    """重启前后端服务（同进程内 os.execv 重启）。"""
+    """Restart frontend and backend services (in-process os.execv restart)."""
     if _restart_hook is None:
-        return err("重启钩子未注入")
+        return err("Restart hook not injected")
     # 异步执行，避免请求未返回就退出
     threading.Thread(target=_delayed_restart, daemon=True).start()
-    return ok({"restarting": True}, "正在重启服务，请稍候...")
+    return ok({"restarting": True}, "Restarting service, please wait...")
 
 
 @router.post("/system/quit")
 async def quit_service(request: Request):
-    """退出 Telnix（关闭前后端 + 清系统代理）。"""
+    """Quit Telnix (close frontend and backend + clear system proxy)."""
     threading.Thread(target=_delayed_quit, daemon=True).start()
-    return ok({"quitting": True}, "正在退出 Telnix...")
+    return ok({"quitting": True}, "Quitting Telnix...")
 
 
 @router.post("/system/clear-proxy")
 async def clear_proxy(request: Request):
-    """仅关闭系统代理（保留服务运行）。"""
+    """Only disable system proxy (keep service running)."""
     if _clear_proxy_hook is not None:
         try:
             _clear_proxy_hook()
         except Exception as e:  # noqa: BLE001
-            return err(f"清代理失败: {e}")
+            return err(f"Clear proxy failed: {e}")
     mark_proxy_on(False)
-    return ok({"cleared": True, "system_proxy_on": False}, "系统代理已关闭")
+    return ok({"cleared": True, "system_proxy_on": False}, "System proxy disabled")
 
 
 @router.post("/system/enable-proxy")
 async def enable_proxy(request: Request):
-    """重新开启系统代理（指向 Telnix 代理端口）。"""
+    """Re-enable system proxy (pointing to Telnix proxy port)."""
     if _enable_proxy_hook is None:
-        return err("开代理钩子未注入")
+        return err("Enable proxy hook not injected")
     try:
         _enable_proxy_hook()
     except Exception as e:  # noqa: BLE001
-        return err(f"开启代理失败: {e}")
+        return err(f"Enable proxy failed: {e}")
     mark_proxy_on(True)
-    return ok({"enabled": True, "system_proxy_on": True}, "系统代理已开启")
+    return ok({"enabled": True, "system_proxy_on": True}, "System proxy enabled")
 
 
 @router.post("/system/restart-as-admin")
 async def restart_as_admin(request: Request):
-    """以管理员身份重启 Telnix（UAC 提权）。
+    """Restart Telnix as administrator (UAC elevation).
 
-    兼容旧接口：直接弹 UAC，不经 GUI 确认。
-    新的 CLI 流程请使用 /system/request-admin-restart + /system/admin-request/{id}/wait。
+    Legacy interface: directly pops UAC without GUI confirmation.
+    For new CLI flows, use /system/request-admin-restart + /system/admin-request/{id}/wait.
     """
     success, msg = _do_shell_elevate()
     if not success:
         return err(msg)
-    return ok({'restarting': True}, '正在以管理员身份重启 Telnix...')
+    return ok({'restarting': True}, 'Restarting Telnix as administrator...')
 
 
 @router.post("/system/request-admin-restart")
 async def request_admin_restart(request: Request):
-    """创建一个待 GUI 确认的管理员重启请求。
+    """Create a pending admin restart request awaiting GUI confirmation.
 
-    返回 request_id，CLI 应通过 /system/admin-request/{id}/wait 长轮询等待响应。
+    Returns request_id, CLI should long-poll via /system/admin-request/{id}/wait for response.
     """
     rid = _create_pending_request(source="cli")
     return ok({
         "request_id": rid,
-        "message": "已创建待确认请求，等待 GUI 用户响应",
+        "message": "Pending request created, waiting for GUI user response",
     })
 
 
 @router.get("/system/admin-request/{rid}/wait")
 async def admin_request_wait(rid: str, request: Request):
-    """长轮询等待用户响应，超时 60s 返回 pending。"""
+    """Long-poll waiting for user response, returns pending on 60s timeout."""
     import asyncio
     # 检查 rid 是否存在
     with _pending_lock:
         item = _pending_admin_requests.get(rid)
     if not item:
-        return err("请求不存在或已处理")
+        return err("Request not found or already processed")
     # 阻塞等待放到线程池，避免阻塞事件循环
     response = await asyncio.to_thread(_wait_pending_request, rid, 60.0)
     if response is None:
-        return ok({"status": "pending", "request_id": rid}, "仍在等待用户响应")
+        return ok({"status": "pending", "request_id": rid}, "Still waiting for user response")
     # 已响应
     if response == "accept":
         # 执行 UAC 提权
@@ -542,32 +606,33 @@ async def admin_request_wait(rid: str, request: Request):
         _cleanup_pending_request(rid)
         if not success:
             return err(msg)
-        return ok({"status": "accepted", "request_id": rid}, "用户已批准，正在以管理员身份重启")
+        return ok({"status": "accepted", "request_id": rid}, "User accepted, restarting as administrator")
     else:
         _cleanup_pending_request(rid)
-        return ok({"status": "rejected", "request_id": rid}, "用户拒绝了管理员重启请求")
+        return ok({"status": "rejected", "request_id": rid}, "User rejected the admin restart request")
 
 
 @router.get("/system/pending-admin-actions")
 async def pending_admin_actions(request: Request):
-    """前端轮询：获取待确认的管理员动作列表。"""
+    """Frontend polling: get list of pending admin actions."""
     return ok({"items": _list_pending_requests()})
 
 
 @router.post("/system/admin-request/{rid}/respond")
 async def admin_request_respond(rid: str, request: Request):
-    """前端用户响应 pending 请求（accept/reject）。"""
+    """Frontend user responds to pending request (accept/reject)."""
     try:
         body = await request.json()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
         body = {}
     response = (body.get("response") or "").lower()
     if response not in ("accept", "reject"):
-        return err("response 必须是 accept 或 reject")
+        return err("response must be accept or reject")
     success = _respond_pending_request(rid, response)
     if not success:
-        return err("请求不存在或已响应")
-    return ok({"request_id": rid, "response": response}, "已提交响应")
+        return err("Request not found or already responded")
+    return ok({"request_id": rid, "response": response}, "Response submitted")
 
 
 # ---------- WinDivert 风险提示 API ----------
@@ -579,12 +644,12 @@ async def admin_request_respond(rid: str, request: Request):
 
 @router.get("/system/windivert-warning")
 async def get_windivert_warning(request: Request):
-    """查询 WinDivert 风险提示状态。
+    """Query WinDivert risk warning status.
 
-    返回:
-      needed: 是否需要提示（仅 Windows 平台 + 未确认时为 true）
-      message: 风险说明文本（前端弹窗正文用）
-      ack: 当前是否已确认
+    Returns:
+      needed: whether to prompt (true only on Windows platform + not acknowledged)
+      message: risk explanation text (for frontend popup body)
+      ack: whether currently acknowledged
     """
     needed = windivert_warning_needed()
     return ok({
@@ -598,250 +663,247 @@ async def get_windivert_warning(request: Request):
 
 @router.post("/system/windivert-warning/ack")
 async def ack_windivert_warning(request: Request):
-    """标记 WinDivert 风险提示为已确认（永久不再提示）。
+    """Mark WinDivert risk warning as acknowledged (will not prompt again permanently).
 
-    由前端"了解，不再显示此提示"按钮调用，也可由 CLI/MCP 在原生弹窗用户选"是"后调用。
+    Called by the frontend "Got it, do not show this prompt again" button, or by CLI/MCP after the user selects "Yes" in the native popup.
     """
     acknowledge_windivert_warning()
-    return ok({"ack": True}, "已确认 WinDivert 风险提示，后续不再提示")
+    return ok({"ack": True}, "WinDivert risk warning confirmed, will not prompt again")
 
 
 @router.post("/system/request-windivert-ack")
 async def request_windivert_ack(request: Request):
-    """创建一个待 GUI 用户确认的 WinDivert ack 请求（CLI/MCP 用）。
+    """Create a pending WinDivert ack request awaiting GUI user confirmation (for CLI/MCP).
 
-    创建后立即在新线程中弹原生 Windows MessageBox（置顶）。
-    CLI 应通过 /system/windivert-ack-request/{id}/wait 长轮询等待响应。
-    返回 request_id。
+    After creation, immediately popup native Windows MessageBox (topmost) in a new thread.
+    CLI should long-poll via /system/windivert-ack-request/{id}/wait for response.
+    Returns request_id.
     """
     # 非 Windows 平台：无需 ack（底层功能直接返回不支持）
     if sys.platform != "win32":
         return ok({"request_id": None, "skipped": True},
-                  "非 Windows 平台无需 WinDivert 风险提示")
+                  "Non-Windows platform does not require WinDivert risk warning")
     # 已确认：直接跳过
     if is_windivert_acknowledged():
         return ok({"request_id": None, "skipped": True, "ack": True},
-                  "已确认过 WinDivert 风险提示")
+                  "WinDivert risk warning already confirmed")
     rid = _create_pending_windivert_ack()
     return ok({
         "request_id": rid,
-        "message": "已创建待确认请求，等待 GUI 用户响应",
+        "message": "Pending request created, waiting for GUI user response",
     })
 
 
 @router.get("/system/windivert-ack-request/{rid}/wait")
 async def windivert_ack_request_wait(rid: str, request: Request):
-    """长轮询等待用户响应，超时 60s 返回 pending。"""
+    """Long-poll waiting for user response, returns pending on 60s timeout."""
     import asyncio
     with _pending_windivert_lock:
         item = _pending_windivert_acks.get(rid)
     if not item:
-        return err("请求不存在或已处理")
+        return err("Request not found or already processed")
     response = await asyncio.to_thread(_wait_pending_windivert_ack, rid, 60.0)
     if response is None:
-        return ok({"status": "pending", "request_id": rid}, "仍在等待用户响应")
+        return ok({"status": "pending", "request_id": rid}, "Still waiting for user response")
     _cleanup_pending_windivert_ack(rid)
     if response == "accept":
         return ok({"status": "accepted", "request_id": rid, "ack": True},
-                  "用户已确认 WinDivert 风险提示")
+                  "User confirmed WinDivert risk warning")
     else:
         return ok({"status": "rejected", "request_id": rid, "ack": False},
-                   "用户拒绝了 WinDivert 风险提示")
+                   "User rejected WinDivert risk warning")
 
 
 def _delayed_restart():
-    """延迟 500ms 执行重启，让 HTTP 响应先返回。"""
+    """Delay 500ms before restart, letting HTTP response return first."""
     import time
     time.sleep(0.5)
     try:
         _restart_hook()
     except Exception as e:  # noqa: BLE001
-        print(f"[Telnix] 重启失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Restart failed: {e}", file=sys.stderr)
 
 
 def _delayed_quit():
-    """延迟 500ms 执行退出。"""
+    """Delay 500ms before quit."""
     import time
     time.sleep(0.5)
     try:
         _quit_hook()
     except Exception as e:  # noqa: BLE001
-        print(f"[Telnix] 退出失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Quit failed: {e}", file=sys.stderr)
 
 
-# ---------- 可选依赖安装（pip install mitmproxy） ----------
-# 安装任务状态：idle / running / success / failed
-# 只允许同时一个安装任务（避免 pip 冲突）
-_install_lock = threading.Lock()
-_install_state = {
-    "status": "idle",       # idle / running / success / failed
-    "package": None,        # 当前/上次安装的包名
-    "started_at": None,     # 开始时间戳
-    "finished_at": None,    # 结束时间戳
-    "log": "",              # 累计日志输出（尾部截断到 64KB 避免无限增长）
-    "return_code": None,    # pip 返回码（0=成功）
-}
-_INSTALL_LOG_MAX = 64 * 1024  # 日志最大长度
+@router.post("/system/firewall-allow")
+async def firewall_allow(request: Request):
+    """Add Windows firewall inbound rules to allow ports 8888 (proxy) and 18901 (API).
 
-
-def _append_install_log(text: str):
-    """追加安装日志，超过上限时丢弃头部。"""
-    global _install_state
-    _install_state["log"] = (_install_state["log"] + text)
-    if len(_install_state["log"]) > _INSTALL_LOG_MAX:
-        _install_state["log"] = _install_state["log"][-_INSTALL_LOG_MAX:]
-
-
-def _run_pip_install(package: str, lock: threading.Lock):
-    """在工作线程中执行 pip install，并更新全局 _install_state。
-
-    使用 subprocess.Popen 行读取 stdout/stderr 实时累计日志。
-    lock 由调用线程传入，本函数负责在结束时释放。
+    Windows only: uses netsh to configure Windows Firewall. Non-Windows returns error.
+    Requires administrator privileges.
     """
-    global _install_state
+    if not sys.platform.startswith("win"):
+        return err("firewall-allow is Windows only (netsh firewall). On macOS/Linux, use ufw/firewall-cmd/System Settings to allow ports manually")
     import subprocess
-    python = sys.executable
-    cmd = [python, "-m", "pip", "install", "--disable-pip-version-check", package]
-    _append_install_log(f"$ {' '.join(cmd)}\n")
+    rules = [
+        ("Telnix-Proxy-8888", 8888, "TCP"),
+        ("Telnix-API-18901", 18901, "TCP"),
+    ]
+    results = []
+    failed = False
+    for name, port, proto in rules:
+        cmd = [
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name={name}",
+            f"dir=in", f"action=allow", f"protocol={proto}",
+            f"localport={port}",
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                results.append({"rule": name, "port": port, "ok": True})
+            else:
+                results.append({"rule": name, "port": port, "ok": False,
+                                "error": (r.stderr or r.stdout or "").strip()})
+                failed = True
+        except Exception as e:  # noqa: BLE001
+            results.append({"rule": name, "port": port, "ok": False, "error": str(e)})
+            failed = True
+    return ok({
+        "firewall_allow": not failed,
+        "rules": results,
+        "hint": "Firewall rules added" if not failed else
+                "Some rules failed to add. Run Telnix as administrator and retry",
+    })
+
+
+@router.get("/system/firewall-status")
+async def firewall_status(request: Request):
+    """Query whether Telnix-related firewall rules exist.
+
+    Windows only: netsh firewall query. Non-Windows returns error.
+    """
+    if not sys.platform.startswith("win"):
+        return err("firewall-status is Windows only (netsh firewall). On macOS/Linux, use ufw status/firewall-cmd --list-ports to view firewall status")
+    import subprocess
+    cmd = ["netsh", "advfirewall", "firewall", "show", "rule",
+           "name=Telnix-Proxy-8888"]
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            _append_install_log(line)
-        proc.wait()
-        rc = proc.returncode
-        _install_state["return_code"] = rc
-        if rc == 0:
-            _install_state["status"] = "success"
-            _append_install_log(f"\n[OK] {package} 安装成功\n")
-        else:
-            _install_state["status"] = "failed"
-            _append_install_log(f"\n[FAIL] {package} 安装失败，返回码 {rc}\n")
+        r1 = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
     except Exception as e:  # noqa: BLE001
-        _install_state["status"] = "failed"
-        _install_state["return_code"] = -1
-        _append_install_log(f"\n[ERROR] 执行异常: {e}\n")
-    finally:
-        _install_state["finished_at"] = time.time()
-        # 释放锁，允许后续安装任务
-        try:
-            lock.release()
-        except RuntimeError:  # noqa: BLE001
-            pass  # 锁已被释放（异常路径兜底）
-
-
-# 允许安装的可选依赖白名单（防止任意命令注入）
-_INSTALLABLE_PACKAGES = {
-    "mitmproxy": "mitmproxy",
-    "pydivert": "pydivert",  # Windows 抓包驱动；Unix 不需要（AF_PACKET/BPF）
-}
-
-
-@router.post("/system/install-dep")
-async def install_dep(request: Request):
-    """触发 pip 安装可选依赖（如 mitmproxy）。
-
-    请求体: {"package": "mitmproxy"}
-    返回: {"status": "running"} 或错误信息
-    同一时刻只允许一个安装任务，已有任务运行中时返回 409。
-    """
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
+        r1 = None
+    cmd = ["netsh", "advfirewall", "firewall", "show", "rule",
+           "name=Telnix-API-18901"]
     try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        body = {}
-    package = (body.get("package") or "").strip().lower()
-    if package not in _INSTALLABLE_PACKAGES:
-        return err(f"不支持的包名: {package}（当前仅支持: {', '.join(_INSTALLABLE_PACKAGES)}）")
-    real_name = _INSTALLABLE_PACKAGES[package]
-    acquired = _install_lock.acquire(blocking=False)
-    if not acquired:
-        return err("已有安装任务在执行中，请等待完成", code=409)
-    try:
-        # 重置状态
-        _install_state.update({
-            "status": "running",
-            "package": real_name,
-            "started_at": time.time(),
-            "finished_at": None,
-            "log": "",
-            "return_code": None,
-        })
-        threading.Thread(
-            target=_run_pip_install,
-            args=(real_name, _install_lock),
-            daemon=True,
-            name=f"pip-install-{real_name}",
-        ).start()
-        return ok({
-            "status": "running",
-            "package": real_name,
-        }, f"正在安装 {real_name}，可通过 /system/install-dep/status 查询进度")
+        r2 = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
     except Exception as e:  # noqa: BLE001
-        # 启动线程失败：释放锁并重置状态
-        try:
-            _install_lock.release()
-        except RuntimeError:  # noqa: BLE001
-            pass
-        _install_state["status"] = "failed"
-        _install_state["finished_at"] = time.time()
-        return err(f"启动安装任务失败: {e}")
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
+        r2 = None
+    proxy_ok = bool(r1 and r1.returncode == 0 and "Telnix-Proxy-8888" in (r1.stdout or ""))
+    api_ok = bool(r2 and r2.returncode == 0 and "Telnix-API-18901" in (r2.stdout or ""))
+    return ok({
+        "proxy_8888_allowed": proxy_ok,
+        "api_18901_allowed": api_ok,
+        "hint": "If false, the rule is not added and the phone cannot connect. Call firewall-allow with administrator privileges",
+    })
 
 
-@router.get("/system/install-dep/status")
-async def install_dep_status(request: Request):
-    """查询安装任务状态。
+@router.get("/system/db-stats")
+async def system_db_stats(request: Request):
+    """Return current database file size and row counts of major tables."""
+    try:
+        return ok(db.get_db_stats())
+    except Exception as e:  # noqa: BLE001
+        return err(str(e))
 
-    返回: {"status": "idle|running|success|failed", "package": ..., "log": ..., ...}
-    status=success 时同时返回 mitmproxy_available（重新检测是否可导入）。
+
+@router.get("/system/ports")
+async def get_ports(request: Request):
+    """Return the actual API/proxy ports used by the running backend.
+
+    Used by CLI/agent to discover Telnix's listening ports when random-port mode
+    or auto port-fallback is active (the actual port may differ from settings.json
+    or the default 18901/8888).
+
+    Returns:
+        api_port: actual API port (uvicorn listen port)
+        proxy_port: actual proxy port (proxy server listen port)
+        api_host: API listen host (127.0.0.1 or 0.0.0.0)
+        proxy_host: proxy listen host (127.0.0.1 or 0.0.0.0)
+        port_conflict: port conflict info (None if no conflict)
     """
-    state = dict(_install_state)
-    # 安装成功后重新检测 mitmproxy 可用性
-    if state.get("status") == "success" and state.get("package") == "mitmproxy":
-        try:
-            # 子进程安装完，当前进程需重新 import（pip 装到 site-packages 后新 import 可生效）
-            import importlib
-            mod = importlib.import_module("mitmproxy")
-            state["mitmproxy_available"] = True
-            state["mitmproxy_version"] = getattr(mod, "__version__", None)
-        except Exception:  # noqa: BLE001
-            # 安装成功但当前进程未生效（需重启 Telnix）
-            state["mitmproxy_available"] = False
-            state["mitmproxy_version"] = None
-            state["note"] = "安装成功但当前进程尚未加载，需重启 Telnix 后生效"
-    return ok(state)
+    state = request.app.state.telnix
+    from ..config import get_host, get_proxy_host
+    return ok({
+        "api_port": state.api_port,
+        "proxy_port": state.proxy_port,
+        "api_host": get_host(),
+        "proxy_host": get_proxy_host(),
+        "port_conflict": state.port_conflict,
+    })
 
 
-@router.post("/system/install-dep/cancel")
-async def install_dep_cancel(request: Request):
-    """取消正在运行的安装任务（仅标记状态，实际 pip 进程会被强杀）。
+@router.post("/system/cleanup-db")
+async def system_cleanup_db(request: Request):
+    """Clean up and shrink the database file.
 
-    简化实现：仅在状态为 running 时返回提示（pip 子进程无法干净终止）。
+    Drops and recreates transient tables (flows/sessions) and runs VACUUM to reclaim
+    disk space. Preserves settings, auto-reply rules, ignored lists, and AI chats.
     """
-    if _install_state["status"] != "running":
-        return ok({"status": _install_state["status"]}, "无运行中的安装任务")
-    return err("pip 安装无法干净取消，请等待完成或重启 Telnix", code=400)
+    try:
+        result = db.cleanup_database()
+        return ok(result)
+    except Exception as e:  # noqa: BLE001
+        return err(str(e))
+
+
+class ClearDataBody(BaseModel):
+    type: str
+
+
+_CLEAR_DATA_TYPES = {"flows", "sessions", "rules", "ai_chats", "all"}
+
+
+@router.post("/system/clear-data")
+async def system_clear_data(request: Request, body: ClearDataBody):
+    """Clear database data by category.
+
+    Supported types:
+    - flows / sessions / rules / ai_chats: clear the corresponding table(s)
+    - all: clear all of the above (settings are preserved)
+
+    For the destructive "all" type, the frontend should enforce a 3-second
+    countdown confirmation before calling this endpoint.
+    """
+    if body.type not in _CLEAR_DATA_TYPES:
+        return err(f"Invalid clear type: {body.type}")
+    try:
+        result = db.clear_data_by_type(body.type)
+        return ok({"cleared": True, "type": body.type, **result})
+    except Exception as e:  # noqa: BLE001
+        return err(str(e))
 
 
 @router.get("/system/platform-capabilities")
 async def get_platform_capabilities(request: Request):
-    """返回当前平台的能力信息（前端用于显示/隐藏功能按钮）。
+    """Return current platform capability info (frontend uses to show/hide feature buttons).
 
-    返回各功能在该平台是否支持：
-    - raw_capture: TCP/UDP 抓包（Windows WinDivert / Linux AF_PACKET / macOS BPF）
-    - transparent_proxy: 透明代理（Windows WinDivert / Linux iptables / macOS pf）
-    - dns_hijack: DNS 劫持（Windows WinDivert / Linux iptables+local_dns / macOS pf+local_dns）
-    - system_proxy: 系统代理配置（Windows registry / macOS networksetup / Linux gsettings）
-    - windivert_warning: WinDivert 风险提示（仅 Windows 需要）
-    - admin_elevation: 管理员提权（Windows UAC / Unix sudo）
+    Returns whether each feature is supported on this platform:
+    - raw_capture: TCP/UDP capture (Windows WinDivert / Linux AF_PACKET / macOS BPF)
+    - transparent_proxy: transparent proxy (Windows WinDivert / Linux iptables / macOS pf)
+    - dns_hijack: DNS hijack (Windows WinDivert / Linux iptables+local_dns / macOS pf+local_dns)
+    - system_proxy: system proxy config (Windows registry / macOS networksetup / Linux gsettings)
+    - windivert_warning: WinDivert risk warning (Windows only)
+    - admin_elevation: admin elevation (Windows UAC / Unix sudo)
+
+    The is_admin result is cached in memory for 30 seconds to avoid flickering on the
+    settings page caused by repeated privilege checks.
     """
+    global _admin_cache
+    now = time.time()
+    if _admin_cache is not None and (now - _admin_cache["ts"]) < _ADMIN_CACHE_TTL:
+        return ok(_admin_cache["data"])
+
     import os
     is_windows = sys.platform == "win32"
     is_linux = sys.platform.startswith("linux")
@@ -853,7 +915,8 @@ async def get_platform_capabilities(request: Request):
         try:
             import ctypes
             is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
             is_admin = False
     else:
         try:
@@ -865,14 +928,16 @@ async def get_platform_capabilities(request: Request):
     try:
         from .. import system_proxy
         sys_proxy_info = system_proxy.get_system_proxy_info()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
         sys_proxy_info = {"supported": False, "backend": "none"}
 
     # 提权后端信息（UAC / osascript / pkexec / sudo）
     try:
         from .. import elevation
         elev_info = elevation.get_elevation_info()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in system.py", extra={"exc": repr(e)})
         elev_info = {"backend": "uac" if is_windows else "sudo", "hint": ""}
 
     # 抓包后端
@@ -893,7 +958,7 @@ async def get_platform_capabilities(request: Request):
         transparent_backend = "none"
         dns_backend = "none"
 
-    return ok({
+    result = {
         "platform": sys.platform,
         "is_windows": is_windows,
         "is_linux": is_linux,
@@ -906,9 +971,9 @@ async def get_platform_capabilities(request: Request):
                 "backend": raw_backend,
                 "needs_admin": True,
                 "admin_hint": (
-                    "需要管理员权限" if is_windows else
-                    "需要 root 权限（sudo 启动）" if is_unix else
-                    "不支持"
+                    "Administrator privileges required" if is_windows else
+                    "Root privileges required (start with sudo)" if is_unix else
+                    "Not supported"
                 ),
             },
             "transparent_proxy": {
@@ -916,9 +981,9 @@ async def get_platform_capabilities(request: Request):
                 "backend": transparent_backend,
                 "needs_admin": True,
                 "admin_hint": (
-                    "需要管理员权限" if is_windows else
-                    "需要 root 权限（sudo 启动）" if is_unix else
-                    "不支持"
+                    "Administrator privileges required" if is_windows else
+                    "Root privileges required (start with sudo)" if is_unix else
+                    "Not supported"
                 ),
             },
             "dns_hijack": {
@@ -926,9 +991,9 @@ async def get_platform_capabilities(request: Request):
                 "backend": dns_backend,
                 "needs_admin": True,
                 "admin_hint": (
-                    "需要管理员权限" if is_windows else
-                    "需要 root 权限（sudo 启动）" if is_unix else
-                    "不支持"
+                    "Administrator privileges required" if is_windows else
+                    "Root privileges required (start with sudo)" if is_unix else
+                    "Not supported"
                 ),
             },
             "system_proxy": {
@@ -948,4 +1013,6 @@ async def get_platform_capabilities(request: Request):
                 "hint": elev_info.get("hint", ""),
             },
         },
-    })
+    }
+    _admin_cache = {"ts": time.time(), "data": result}
+    return ok(result)

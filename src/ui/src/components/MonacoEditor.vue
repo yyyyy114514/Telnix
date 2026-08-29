@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount, shallowRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { loader } from '@guolao/vue-monaco-editor'
 import type * as Monaco from 'monaco-editor'
 import BigMonacoEditor from './BigMonacoEditor.vue'
@@ -7,6 +8,7 @@ import { setupMonaco } from '../monaco-setup'
 
 // 确保 CDN loader 已配置 + Python 语言已注册（幂等）
 setupMonaco()
+const { t } = useI18n()
 
 /**
  * MonacoEditor：基于 Monaco 的 Python 脚本编辑器（紧凑版）
@@ -21,6 +23,8 @@ const props = defineProps<{
   readOnly?: boolean
   /** 放大编辑器标题 */
   expandTitle?: string
+  /** 是否显示收起测试面板按钮 */
+  showCollapseButton?: boolean
 }>()
 const emit = defineEmits<{
   'update:modelValue': [string]
@@ -48,14 +52,24 @@ function defineCustomTheme(monaco: typeof Monaco) {
   monaco.editor.defineTheme('telnix-light', {
     base: 'vs',
     inherit: true,
-    rules: [],
+    rules: [
+      { token: '', foreground: '1f2328', background: 'ffffff' },
+      { token: 'comment', foreground: '6e7681', fontStyle: 'italic' },
+      { token: 'keyword', foreground: '0550ae' },
+      { token: 'string', foreground: '0a3069' },
+      { token: 'number', foreground: '0550ae' },
+    ],
     colors: {
-      'editor.background': '#00000000',
-      'editorGutter.background': '#00000000',
+      'editor.background': '#ffffff',
+      'editorGutter.background': '#f6f8fa',
+      'editor.foreground': '#1f2328',
       'editorLineNumber.foreground': '#6e7681',
       'editorLineNumber.activeForeground': '#0d9488',
       'editorCursor.foreground': '#0d9488',
       'editor.selectionBackground': '#0d948833',
+      'editorLineHighlightBackground': '#eaeef2',
+      'editorIndentGuide.background': '#e1e4e8',
+      'editorIndentGuide.activeBackground': '#d0d7de',
     },
   })
 }
@@ -85,6 +99,7 @@ onMounted(async () => {
     fontSize: 13,
     fontFamily: 'Consolas, Monaco, "Courier New", monospace',
     lineHeight: 20,
+    lineNumbersMinChars: 3,
     padding: { top: 8, bottom: 8 },
     scrollBeyondLastLine: false,
     smoothScrolling: true,
@@ -153,7 +168,7 @@ function openBigEditor() {
     <button
       type="button"
       class="me-expand-btn"
-      title="放大编辑（全屏 Monaco + IntelliSense）"
+      :title="t('monacoEditor.expandTitle')"
       @click="openBigEditor"
     >
       <svg t="1784560989469" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2601" width="14" height="14" aria-hidden="true">
@@ -168,9 +183,10 @@ function openBigEditor() {
     <BigMonacoEditor
       v-model="bigVisible"
       v-model:show-test-panel="bigShowTestPanel"
-      :title="expandTitle || 'Python 脚本编辑'"
+      :title="expandTitle || t('monacoEditor.defaultTitle')"
       :text="modelValue || ''"
       :language="language || 'python'"
+      :show-collapse-button="showCollapseButton"
       @update:text="(v: string) => emit('update:modelValue', v)"
     >
       <template v-if="$slots['test-panel']" #test-panel>
@@ -189,7 +205,13 @@ function openBigEditor() {
   overflow: hidden;
 }
 .monaco-editor-container {
+  background: #1e1e2e;
+}
+.dark .monaco-editor-container {
   background: transparent;
+}
+.light .monaco-editor-container {
+  background: #ffffff;
 }
 .me-expand-btn {
   position: absolute;

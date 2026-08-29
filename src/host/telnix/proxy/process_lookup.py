@@ -1,10 +1,12 @@
-"""通过 GetExtendedTcpTable 反查客户端连接的 PID + 进程名。
+"""Reverse lookup of client connection PID + process name via GetExtendedTcpTable.
 
-客户端连接代理时，客户端的源端口对应一个 PID。在 TCP 表中查找
-local_addr=client_ip, local_port=client_port 的行，取其 OwningPid。
+When a client connects to the proxy, the client's source port corresponds to a PID.
+Look up the row in the TCP table where local_addr=client_ip, local_port=client_port,
+and take its OwningPid.
 
-跨平台说明：GetExtendedTcpTable 是 Windows 专属 API，非 Windows 平台用 psutil
-的 net_connections() 替代（已有 psutil 依赖，功能等价但精度略低）。
+Cross-platform notes: GetExtendedTcpTable is a Windows-only API; on non-Windows
+platforms, psutil's net_connections() is used instead (psutil is already a
+dependency; functionally equivalent but slightly lower precision).
 """
 
 import concurrent.futures
@@ -12,6 +14,7 @@ import socket
 import sys
 import threading
 import time
+from collections import OrderedDict
 
 import psutil
 
@@ -64,10 +67,11 @@ if IS_WINDOWS:
 
 
 def _list_tcp_owner_rows() -> list[tuple[str, int, str, int, int, int]]:
-    """返回 (local_ip, local_port, remote_ip, remote_port, pid, state) 列表。
+    """Return list of (local_ip, local_port, remote_ip, remote_port, pid, state).
 
-    Windows：用 GetExtendedTcpTable（性能高，原生 API）。
-    非 Windows：用 psutil.net_connections(kind="inet")（跨平台，state 字段无 Windows 状态码）。
+    Windows: uses GetExtendedTcpTable (high performance, native API).
+    Non-Windows: uses psutil.net_connections(kind="inet") (cross-platform; state
+    field lacks Windows status codes).
     """
     if not IS_WINDOWS:
         # 非 Windows 平台：用 psutil 替代 GetExtendedTcpTable
@@ -111,14 +115,16 @@ def _list_tcp_owner_rows() -> list[tuple[str, int, str, int, int, int]]:
 
 
 def _list_udp_owner_rows() -> list[tuple[str, int, int]]:
-    """返回 (local_ip, local_port, pid) 列表。
+    """Return list of (local_ip, local_port, pid).
 
-    UDP 是无连接的，UDP 表只有 local 端信息（无 remote_ip/remote_port）。
-    匹配时按本机 IP+端口查找：出站包用 src，入站包用 dst。
+    UDP is connectionless; the UDP table only has local-end info (no
+    remote_ip/remote_port). Matching is done by local IP+port: outbound packets
+    use src, inbound packets use dst.
 
-    用 psutil 获取 UDP 连接表（比 ctypes GetExtendedUdpTable 更可靠，
-    后者在 64 位系统上结构体偏移容易出错）。psutil 本身跨平台。
-    带 1 秒 TTL 模块级缓存：同一秒内多个 worker 共享一次 psutil 扫描结果。
+    Uses psutil to get the UDP connection table (more reliable than ctypes
+    GetExtendedUdpTable, whose struct offsets are error-prone on 64-bit systems).
+    psutil itself is cross-platform. Includes a 1-second TTL module-level cache:
+    multiple workers within the same second share a single psutil scan result.
     """
     global _UDP_ROWS_CACHE, _UDP_ROWS_CACHE_TS
     now = time.time()
@@ -141,7 +147,7 @@ def _list_udp_owner_rows() -> list[tuple[str, int, int]]:
 
 
 class ProcessLookup:
-    """通过 GetExtendedTcpTable 反查 PID + 进程名。带缓存。"""
+    """Reverse lookup of PID + process name via GetExtendedTcpTable. With caching."""
 
     def __init__(self):
         self._pid_cache: dict[int, str] = {}
@@ -151,17 +157,16 @@ class ProcessLookup:
         self._list_cache_time: float = 0.0
         self._list_cache_lock = threading.Lock()
         self._list_cache_ttl = 5.0  # 缓存 5 秒
-        # 性能优化：客户端 (ip, port) → (pid, name) 的 LRU 缓存
-        # 短时间同端口的多次连接复用结果，避免每次都全表扫描 + psutil 调用
-        self._addr_cache: dict[tuple[str, int], tuple[float, int | None, str | None]] = {}
+        # 性能优化：客户端 (ip, port) → (pid, name) 的 LRU 缓存（OrderedDict，O(1) 淘汰）
+        self._addr_cache: OrderedDict[tuple[str, int], tuple[float, int | None, str | None]] = OrderedDict()
         self._addr_cache_lock = threading.Lock()
         self._addr_cache_ttl = 3.0  # 3 秒 TTL（端口复用窗口短）
-        # 性能优化：客户端 (ip,) → (pid, name) 的 fallback 缓存
-        # 高并发短连接场景（每请求新源端口），(ip,port) 缓存永远 miss，
-        # 但同一客户端进程的 PID 稳定，(ip,) 缓存可大幅降命中率
-        self._ip_cache: dict[str, tuple[float, int | None, str | None]] = {}
+        self._addr_cache_max_size = 500
+        # 性能优化：客户端 (ip,) → (pid, name) 的 fallback 缓存（OrderedDict，O(1) 淘汰）
+        self._ip_cache: OrderedDict[str, tuple[float, int | None, str | None]] = OrderedDict()
         self._ip_cache_lock = threading.Lock()
         self._ip_cache_ttl = 30.0  # 30 秒 TTL（进程 PID 比端口稳定得多）
+        self._ip_cache_max_size = 100
         # single-flight 模式：所有并发连接共享一次 TCP 表扫描
         # 首次 miss 时启动后台扫描，并发连接等待 Event 完成后查缓存
         # 避免同步阻塞每个连接（200ms × 50 连接 = 10s 延迟）
@@ -185,16 +190,18 @@ class ProcessLookup:
         return name
 
     def lookup(self, client_addr, timeout: float = 0.05) -> tuple[int | None, str | None]:
-        """client_addr = (ip, port)，返回 (pid, process_name)。失败返回 (None, None)。
+        """client_addr = (ip, port); returns (pid, process_name). On failure returns (None, None).
 
-        single-flight 模式（兼顾性能 + 进程名显示）：
-        1. (ip, port) → (pid, name) LRU 缓存（3 秒 TTL）
-        2. (ip,) → pid 缓存（30 秒 TTL）：同一客户端进程的 PID 稳定
-           注意：localhost（127.0.0.1/::1）跳过此缓存——本机多进程共享同 IP，
-           用 ip_cache 会导致进程识别错误（如 chrome 的 PID 给了 curl）
-        3. 缓存 miss 时触发后台扫描（只扫一次），并发连接等待 Event 完成
-           - 扫描完成（~5ms）后 Event.set，所有等待连接立即查缓存
-           - 超时（150ms）则返回 (None, None)，不阻塞代理主线程
+        single-flight mode (balancing performance + process name display):
+        1. (ip, port) -> (pid, name) LRU cache (3-second TTL)
+        2. (ip,) -> pid cache (30-second TTL): the same client process's PID is stable
+           Note: localhost (127.0.0.1/::1) skips this cache — multiple local processes
+           share the same IP, so ip_cache would cause process misidentification
+           (e.g. chrome's PID assigned to curl)
+        3. On cache miss, trigger a background scan (only once); concurrent connections
+           wait for the Event to complete
+           - After scan completes (~5ms), Event.set; all waiting connections query the cache immediately
+           - On timeout (150ms), return (None, None) without blocking the proxy main thread
         """
         if not client_addr:
             return None, None
@@ -243,7 +250,7 @@ class ProcessLookup:
         return None, None
 
     def _trigger_refresh(self, client_ip: str, client_port: int):
-        """触发后台 TCP 表扫描。已有扫描在跑则等待，避免重复扫描。"""
+        """Trigger a background TCP table scan. If a scan is already running, wait to avoid duplicate scans."""
         with self._refresh_lock:
             if self._refresh_event is not None and not self._refresh_event.is_set():
                 return  # 已有扫描在跑，等待即可
@@ -259,7 +266,7 @@ class ProcessLookup:
                     self._refresh_event = None
 
     def _do_refresh(self, client_ip: str, client_port: int, event: threading.Event):
-        """后台执行 TCP 表全量扫描 + 更新缓存。完成后 set Event。"""
+        """Run a full TCP table scan in the background + update cache. Sets the Event when done."""
         try:
             now = time.time()
             try:
@@ -282,18 +289,18 @@ class ProcessLookup:
                 for (lip, lport), pid in port_pid_map.items():
                     if lip == client_ip:
                         self._addr_cache[(lip, lport)] = (now, pid, name_map[pid])
-                if len(self._addr_cache) > 1000:
-                    items = sorted(self._addr_cache.items(), key=lambda x: x[1][0])
-                    self._addr_cache = dict(items[-500:])
+                # O(1) LRU 淘汰：OrderedDict.popitem(last=False) 移除最旧条目
+                while len(self._addr_cache) > self._addr_cache_max_size:
+                    self._addr_cache.popitem(last=False)
             # 写 (ip,) fallback 缓存
             target_pid = port_pid_map.get((client_ip, client_port))
             if target_pid:
                 name = self._process_name(target_pid)
                 with self._ip_cache_lock:
                     self._ip_cache[client_ip] = (now, target_pid, name)
-                    if len(self._ip_cache) > 200:
-                        items = sorted(self._ip_cache.items(), key=lambda x: x[1][0])
-                        self._ip_cache = dict(items[-100:])
+                    # O(1) LRU 淘汰：OrderedDict.popitem(last=False) 移除最旧条目
+                    while len(self._ip_cache) > self._ip_cache_max_size:
+                        self._ip_cache.popitem(last=False)
         finally:
             event.set()
             with self._refresh_lock:
@@ -301,10 +308,11 @@ class ProcessLookup:
                     self._refresh_event = None
 
     def list_processes(self) -> list[dict]:
-        """列出所有进程（去重）。
+        """List all processes (deduplicated).
 
-        psutil.process_iter 遍历 400+ 进程耗时 3-4 秒，加 5 秒缓存避免
-        每次请求都全量遍历。首次调用或缓存过期时才真正遍历。
+        psutil.process_iter iterates 400+ processes taking 3-4 seconds; a 5-second
+        cache avoids full iteration on every request. Actual iteration only happens
+        on first call or when the cache expires.
         """
         import time as _time
         now = _time.time()

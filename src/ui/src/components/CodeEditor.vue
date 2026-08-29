@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount, shallowRef, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { EditorState, Compartment } from '@codemirror/state'
 import { EditorView, highlightActiveLine, keymap, drawSelection, placeholder as cmPlaceholder } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -10,6 +11,8 @@ import { json, jsonParseLinter } from '@codemirror/lang-json'
 import { xml } from '@codemirror/lang-xml'
 import { oneDark } from '@codemirror/theme-one-dark'
 import BigCodeEditor from './BigCodeEditor.vue'
+
+const { t } = useI18n()
 
 // 亮色主题（自定义，匹配项目亮色主题）
 const lightTheme = EditorView.theme({
@@ -190,7 +193,7 @@ function openBigEditor() {
     <button
       type="button"
       class="ce-expand-btn"
-      title="放大编辑（全屏 CodeMirror）"
+      :title="t('codeEditor.expandTitle')"
       @click="openBigEditor"
     >
       <svg t="1784560989469" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2601" width="14" height="14" aria-hidden="true">
@@ -200,7 +203,7 @@ function openBigEditor() {
     <div ref="editorHost" class="ce-host"></div>
     <BigCodeEditor
       v-model="bigVisible"
-      :title="expandTitle || '代码编辑'"
+      :title="expandTitle || t('codeEditor.defaultTitle')"
       :text="modelValue || ''"
       :language="language || 'plaintext'"
       @update:text="(v: string) => emit('update:modelValue', v)"

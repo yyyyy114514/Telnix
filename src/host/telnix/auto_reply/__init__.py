@@ -1,1 +1,1 @@
-"""自动回复模块：规则匹配与执行。"""
+"""Auto-reply module: rule matching and execution."""

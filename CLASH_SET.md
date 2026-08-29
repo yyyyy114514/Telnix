@@ -1,27 +1,27 @@
-#### 1.clash party设置
+#### 1. Clash Party 设置
 
-<img src=".\docs\clash\1.png" alt="1" style="zoom:50%;" />
+![1](/docs/clash/1.png)
 
-<img src=".\docs\clash\2.png" alt="2" style="zoom:50%;" />
+![2](/docs/clash/2.png)
 
-<img src=".\docs\clash\3.png" alt="3" style="zoom:50%;" />
+![3](/docs/clash/3.png)
 
-<img src=".\docs\clash\4.png" alt="4" style="zoom:50%;" />
+![4](/docs/clash/4.png)
 
-<img src=".\docs\clash\5.png" alt="5" style="zoom: 67%;" />
+![5](/docs/clash/5.png)
 
-#### 2.Clash Verge设置
+#### 2. Clash Verge 设置
 
-<img src=".\docs\clash\v1.png" alt="v1" style="zoom:50%;" />
+![v1](/docs/clash/v1.png)
 
-<img src=".\docs\clash\v2.png" alt="v2" style="zoom:50%;" />
+![v2](/docs/clash/v2.png)
 
-<img src=".\docs\clash\v3.png" alt="v3" style="zoom:50%;" />
+![v3](/docs/clash/v3.png)
 
-<img src=".\docs\clash\v4.png" alt="v4" style="zoom:50%;" />
+![v4](/docs/clash/v4.png)
 
-<img src=".\docs\clash\3.png" alt="3" style="zoom:50%;" />
+![3](/docs/clash/3.png)
 
-<img src=".\docs\clash\4.png" alt="4" style="zoom:50%;" />
+![4](/docs/clash/4.png)
 
-<img src=".\docs\clash\5.png" alt="5" style="zoom: 67%;" />
+![5](/docs/clash/5.png)

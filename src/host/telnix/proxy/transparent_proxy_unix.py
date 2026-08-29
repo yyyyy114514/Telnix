@@ -1,24 +1,24 @@
-"""透明代理后端 - Unix 跨平台实现（Linux iptables / macOS pf）。
+"""Transparent proxy backend - cross-platform Unix implementation (Linux iptables / macOS pf).
 
-在 macOS / Linux 上替代 Windows 的 WinDivert 透明代理：
-- Linux: 用 iptables NAT REDIRECT 规则把出站 TCP 80/443 重定向到本地代理端口
-  - 启动时插入 iptables 规则，停止时删除
-  - 代理服务器 accept 后用 getsockopt(SO_ORIGINAL_DST) 获取原目标
-  - 优势：iptables 是 Linux 标准防火墙，性能优秀（内核态 NAT）
-  - 限制：需要 root；仅支持 TCP（UDP 透明代理需要 TPROXY，复杂度高）
-- macOS: 用 pf (packet filter) rdr 规则做重定向
-  - 启动时把规则写入 /etc/pf.anchors/telnix 并加载到 pf
-  - 代理服务器 accept 后用 getsockname 获取本地地址（pf 把原目标放在本地地址）
-  - 限制：需要 root；macOS pf 配置较复杂
+Replaces the Windows WinDivert transparent proxy on macOS / Linux:
+- Linux: uses iptables NAT REDIRECT rules to redirect outbound TCP 80/443 to the local proxy port
+  - Inserts iptables rules on start, deletes them on stop
+  - After the proxy server accepts, uses getsockopt(SO_ORIGINAL_DST) to get the original target
+  - Advantages: iptables is the standard Linux firewall, excellent performance (kernel-space NAT)
+  - Limitations: requires root; only supports TCP (UDP transparent proxy requires TPROXY, which is complex)
+- macOS: uses pf (packet filter) rdr rules for redirection
+  - On start, writes rules to /etc/pf.anchors/telnix and loads them into pf
+  - After the proxy server accepts, uses getsockname to get the local address (pf puts the original target in the local address)
+  - Limitations: requires root; macOS pf configuration is relatively complex
 
-与 Windows 版本的核心差异：
-- Windows: WinDivert 在 NETWORK 层拦截+改写包，需要维护 NAT 表做反向流量映射
-- Unix: iptables/pf 在内核态做 NAT，反向流量自动处理，用户态只需查询原目标
+Core differences from the Windows version:
+- Windows: WinDivert intercepts+rewrites packets at the NETWORK layer, needs to maintain a NAT table for reverse traffic mapping
+- Unix: iptables/pf does NAT in kernel space, reverse traffic is handled automatically, userspace only needs to query the original target
 
-性能说明：
-- iptables REDIRECT 性能优秀（内核态 NAT，零用户态开销）
-- pf rdr 在 macOS 上性能也很好
-- 与 Windows WinDivert 拦截模式等价：透明重定向 + 原 dst 查询
+Performance notes:
+- iptables REDIRECT has excellent performance (kernel-space NAT, zero userspace overhead)
+- pf rdr is also very performant on macOS
+- Equivalent to the Windows WinDivert interception mode: transparent redirection + original dst query
 """
 
 from __future__ import annotations
@@ -49,17 +49,17 @@ _PF_ANCHOR_NAME = "telnix"
 
 
 class UnixTransparentProxy:
-    """Unix 平台透明代理后端。
+    """Unix-platform transparent proxy backend.
 
-    对外接口与 Windows 的 TransparentProxy 类保持一致：
+    External interface is consistent with the Windows TransparentProxy class:
     - start() / stop() / status()
-    - lookup_reverse(client_src_port) - 反查原目标
+    - lookup_reverse(client_src_port) - reverse-lookup original target
 
-    与 Windows 版本的差异：
-    - 没有 pydivert，用 iptables/pf 在内核态做 NAT
-    - 不需要维护 NAT 表（内核自动处理反向流量）
-    - lookup_reverse 通过 getsockopt(SO_ORIGINAL_DST) 查询（Linux）
-      或 getsockname（macOS）实现
+    Differences from the Windows version:
+    - No pydivert; uses iptables/pf for kernel-space NAT
+    - No need to maintain a NAT table (kernel handles reverse traffic automatically)
+    - lookup_reverse is implemented via getsockopt(SO_ORIGINAL_DST) (Linux)
+      or getsockname (macOS)
     """
 
     def __init__(self, local_port: int = 8888):
@@ -84,7 +84,7 @@ class UnixTransparentProxy:
         return self._last_error
 
     def status(self) -> dict:
-        """返回透明代理状态（与 Windows 版本字段保持一致）。"""
+        """Return transparent proxy status (fields consistent with the Windows version)."""
         return {
             "running": self._running,
             "redirected_count": self._redirected_count,
@@ -97,28 +97,28 @@ class UnixTransparentProxy:
         }
 
     def lookup_reverse(self, client_src_port: int) -> Optional[tuple]:
-        """供代理服务器在 raw tunnel 模式下反查原目标。
+        """Reverse-lookup the original target for the proxy server in raw tunnel mode.
 
-        Unix 实现的接口与 Windows 一致，但查询机制不同：
-        - Linux: 通过 iptables REDIRECT 后，accept 的 socket 可用
-          getsockopt(SOL_IP, SO_ORIGINAL_DST) 获取原目标
-        - macOS: pf rdr 后，accept 的 socket 的 getsockname 返回原目标
+        The Unix implementation has the same interface as Windows, but the query mechanism differs:
+        - Linux: after iptables REDIRECT, the accepted socket can use
+          getsockopt(SOL_IP, SO_ORIGINAL_DST) to get the original target
+        - macOS: after pf rdr, getsockname of the accepted socket returns the original target
 
-        注意：此方法在 Unix 上不通过 client_src_port 查询（因为不维护 NAT 表），
-        而是要求调用方传入已 accept 的 socket fd。
-        为保持接口兼容，这里返回 None，实际查询通过 lookup_original_dst(sock) 完成。
+        Note: this method on Unix does not query via client_src_port (because no NAT table is maintained),
+        but requires the caller to pass an already-accepted socket fd.
+        For interface compatibility, returns None here; actual query is done via lookup_original_dst(sock).
         """
         # Windows 版本通过 NAT 表反查，Unix 版本通过 socket 选项查询
         # 此方法保留接口兼容性，但 Unix 上应使用 lookup_original_dst
         return None
 
     def lookup_original_dst(self, sock: socket.socket) -> Optional[tuple[str, int]]:
-        """查询 iptables/pf 重定向前的原目标地址。
+        """Query the original target address before iptables/pf redirection.
 
         Linux: getsockopt(SOL_IP, SO_ORIGINAL_DST)
-        macOS: getsockname（pf rdr 把原目标放到 socket 的本地地址）
+        macOS: getsockname (pf rdr puts the original target into the socket's local address)
 
-        返回：(orig_dst_ip, orig_dst_port) 或 None（查询失败）
+        Returns: (orig_dst_ip, orig_dst_port) or None (query failed)
         """
         if IS_LINUX:
             return self._lookup_original_dst_linux(sock)
@@ -127,7 +127,7 @@ class UnixTransparentProxy:
         return None
 
     def _lookup_original_dst_linux(self, sock: socket.socket) -> Optional[tuple[str, int]]:
-        """Linux: 用 SO_ORIGINAL_DST 查询原目标。"""
+        """Linux: query original target via SO_ORIGINAL_DST."""
         try:
             # SO_ORIGINAL_DST 返回 sockaddr_in 结构：family(2) + port(2) + addr(4) + padding(8)
             data = sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
@@ -140,11 +140,11 @@ class UnixTransparentProxy:
                 return None
             return ip, port
         except OSError as e:
-            logger.error("transparent", "SO_ORIGINAL_DST 查询失败", str(e))
+            logger.error("transparent", "SO_ORIGINAL_DST lookup failed", str(e))
             return None
 
     def _lookup_original_dst_macos(self, sock: socket.socket) -> Optional[tuple[str, int]]:
-        """macOS: pf rdr 后 getsockname 返回原目标。"""
+        """macOS: after pf rdr, getsockname returns the original target."""
         try:
             # pf rdr 把原目标地址放到 socket 的本地地址
             # accept 后 getsockname 返回的是原目标，不是 127.0.0.1:8888
@@ -154,26 +154,26 @@ class UnixTransparentProxy:
                 return None
             return ip, port
         except OSError as e:
-            logger.error("transparent", "macOS getsockname 查询失败", str(e))
+            logger.error("transparent", "macOS getsockname lookup failed", str(e))
             return None
 
     def _is_admin(self) -> bool:
-        """检查 root 权限。"""
+        """Check root privileges."""
         try:
             return os.geteuid() == 0
         except AttributeError:
             return False
 
     def start(self) -> bool:
-        """启动透明代理。"""
+        """Start the transparent proxy."""
         if not IS_UNIX:
-            self._last_error = "UnixTransparentProxy 仅支持 Linux/macOS"
+            self._last_error = "UnixTransparentProxy only supports Linux/macOS"
             return False
         if self._running:
             return True
         if not self._is_admin():
-            self._last_error = "需要 root 权限（iptables/pf 需要 root）"
-            logger.error("transparent", "Unix 透明代理需要 root", "请用 sudo 启动 Telnix")
+            self._last_error = "Root privileges required (iptables/pf requires root)"
+            logger.error("transparent", "Unix transparent proxy requires root", "Please start Telnix with sudo")
             return False
         try:
             if IS_LINUX:
@@ -188,23 +188,23 @@ class UnixTransparentProxy:
                                             name="transparent-unix")
             self._thread.start()
             backend = "iptables" if IS_LINUX else "pf"
-            logger.info("transparent", f"透明代理已启动 ({backend})",
+            logger.info("transparent", f"Transparent proxy started ({backend})",
                         f"redirect ports={list(_REDIRECT_DST_PORTS)} -> 127.0.0.1:{self.local_port}")
             return True
         except Exception as e:  # noqa: BLE001
             self._last_error = str(e)
-            logger.error("transparent", "Unix 透明代理启动失败", str(e))
+            logger.error("transparent", "Unix transparent proxy start failed", str(e))
             self._cleanup_rules()
             return False
 
     def _start_linux(self) -> bool:
-        """Linux: 用 iptables NAT REDIRECT 重定向 80/443 到本地代理端口。"""
+        """Linux: use iptables NAT REDIRECT to redirect 80/443 to the local proxy port."""
         self._iptables_rules = []
         # 检查 iptables 是否可用
         try:
             subprocess.run(["iptables", "--version"], capture_output=True, check=True, timeout=5)
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            self._last_error = f"iptables 不可用: {e}（请安装 iptables 包）"
+            self._last_error = f"iptables unavailable: {e} (please install the iptables package)"
             return False
 
         # 添加 OUTPUT 链 REDIRECT 规则（仅本机出站流量）
@@ -227,30 +227,30 @@ class UnixTransparentProxy:
             try:
                 result = subprocess.run(rule, capture_output=True, timeout=5)
                 if result.returncode != 0:
-                    self._last_error = f"iptables 添加规则失败: {result.stderr.decode('utf-8', errors='replace')}"
+                    self._last_error = f"iptables failed to add rule: {result.stderr.decode('utf-8', errors='replace')}"
                     self._cleanup_rules()
                     return False
                 self._iptables_rules.append(rule)
             except subprocess.TimeoutExpired:
-                self._last_error = f"iptables 添加规则超时（port={port}）"
+                self._last_error = f"iptables timed out adding rule (port={port})"
                 self._cleanup_rules()
                 return False
         return True
 
     def _start_macos(self) -> bool:
-        """macOS: 用 pf rdr 规则重定向 80/443 到本地代理端口。"""
+        """macOS: use pf rdr rules to redirect 80/443 to the local proxy port."""
         # 检查 pfctl 是否可用
         try:
             subprocess.run(["pfctl", "-s", "info"], capture_output=True, check=True, timeout=5)
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            self._last_error = f"pfctl 不可用: {e}（macOS 应自带 pf）"
+            self._last_error = f"pfctl unavailable: {e} (macOS should ship with pf)"
             return False
 
         # 生成 pf 规则文件
         # rdr pass on lo0 proto tcp from any to any port {80, 443} -> 127.0.0.1 port 8888
         ports_str = ", ".join(str(p) for p in sorted(_REDIRECT_DST_PORTS))
         pf_rules = (
-            f"# Telnix 透明代理规则（自动生成，请勿手动编辑）\n"
+            f"# Telnix transparent proxy rules (auto-generated, do not edit manually)\n"
             f"rdr pass on lo0 proto tcp from any to any port {{ {ports_str} }} -> 127.0.0.1 port {self.local_port}\n"
         )
 
@@ -259,7 +259,7 @@ class UnixTransparentProxy:
             with open(_PF_ANCHOR_FILE, "w", encoding="utf-8") as f:
                 f.write(pf_rules)
         except OSError as e:
-            self._last_error = f"写入 pf anchor 文件失败: {e}（需要 root 写 /etc/pf.anchors/）"
+            self._last_error = f"Failed to write pf anchor file: {e} (need root to write /etc/pf.anchors/)"
             return False
 
         # 加载 anchor 到 pf
@@ -270,11 +270,11 @@ class UnixTransparentProxy:
                 capture_output=True, timeout=5,
             )
             if result.returncode != 0:
-                self._last_error = f"pfctl 加载 anchor 失败: {result.stderr.decode('utf-8', errors='replace')}"
+                self._last_error = f"pfctl failed to load anchor: {result.stderr.decode('utf-8', errors='replace')}"
                 self._cleanup_rules()
                 return False
         except subprocess.TimeoutExpired:
-            self._last_error = "pfctl 加载 anchor 超时"
+            self._last_error = "pfctl timed out loading anchor"
             self._cleanup_rules()
             return False
 
@@ -296,14 +296,14 @@ class UnixTransparentProxy:
             if f'anchor "{_PF_ANCHOR_NAME}"' not in rules_output:
                 # 主配置未引用 anchor，提示用户手动添加
                 self._last_error = (
-                    f"pf 主配置未引用 anchor '{_PF_ANCHOR_NAME}'。"
-                    f"请在 /etc/pf.conf 中添加一行：anchor \"{_PF_ANCHOR_NAME}\"，"
-                    f"然后运行：sudo pfctl -f /etc/pf.conf"
+                    f"pf main config does not reference anchor '{_PF_ANCHOR_NAME}'. "
+                    f"Please add a line to /etc/pf.conf: anchor \"{_PF_ANCHOR_NAME}\", "
+                    f"then run: sudo pfctl -f /etc/pf.conf"
                 )
                 self._cleanup_rules()
                 return False
         except subprocess.TimeoutExpired:
-            self._last_error = "pfctl 查询规则超时"
+            self._last_error = "pfctl timed out querying rules"
             self._cleanup_rules()
             return False
 
@@ -311,9 +311,9 @@ class UnixTransparentProxy:
         return True
 
     def _monitor_loop(self):
-        """监控循环（保持与 Windows 版本接口一致，实际无工作）。
+        """Monitor loop (kept for interface consistency with the Windows version, actually does no work).
 
-        Windows 版本在这里维护 NAT 表清理，Unix 版本 NAT 在内核态，无需清理。
+        The Windows version maintains NAT table cleanup here; the Unix version's NAT is in kernel space and needs no cleanup.
         """
         while self._running:
             # 仅做周期性统计输出
@@ -321,17 +321,17 @@ class UnixTransparentProxy:
             time.sleep(30)
 
     def stop(self):
-        """停止透明代理，清理 iptables/pf 规则。"""
+        """Stop the transparent proxy and clean up iptables/pf rules."""
         self._running = False
         self._cleanup_rules()
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
         backend = "iptables" if IS_LINUX else "pf"
-        logger.info("transparent", f"透明代理已停止 ({backend})")
+        logger.info("transparent", f"Transparent proxy stopped ({backend})")
 
     def _cleanup_rules(self):
-        """清理已添加的 iptables/pf 规则。"""
+        """Clean up the iptables/pf rules that were added."""
         # Linux: 删除 iptables 规则（用 -D 替代 -A）
         for rule in self._iptables_rules:
             # 把 -A 改为 -D
@@ -365,7 +365,7 @@ class UnixTransparentProxy:
 
 
 def is_unix_transparent_proxy_available() -> bool:
-    """检查 Unix 透明代理后端是否可用。"""
+    """Check whether the Unix transparent proxy backend is available."""
     if not IS_UNIX:
         return False
     # 检查所需工具是否可用
@@ -380,7 +380,7 @@ def is_unix_transparent_proxy_available() -> bool:
 
 
 def get_unix_transparent_proxy_status() -> dict:
-    """返回 Unix 透明代理后端状态。"""
+    """Return the Unix transparent proxy backend status."""
     try:
         is_admin = os.geteuid() == 0
     except AttributeError:
@@ -390,5 +390,5 @@ def get_unix_transparent_proxy_status() -> dict:
         "supported": True,
         "backend": "iptables" if IS_LINUX else ("pf" if IS_MACOS else "none"),
         "is_admin": is_admin,
-        "hint": ("就绪" if is_admin else "需要 root 权限") if IS_UNIX else "不支持的平台",
+        "hint": ("Ready" if is_admin else "Root privileges required") if IS_UNIX else "Unsupported platform",
     }

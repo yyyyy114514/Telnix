@@ -1,0 +1,74 @@
+{
+  "bugs": [
+    {
+      "file": "src/ui/src/views/AIView.vue",
+      "line": 762,
+      "severity": "high",
+      "type": "Bug",
+      "description": "模板语法错误：多余右括号 {{ formatSize(bodySize(f.request_body)) }} 导致编译失败"
+    },
+    {
+      "file": "src/ui/src/views/AIView.vue",
+      "line": 785,
+      "severity": "high",
+      "type": "Bug",
+      "description": "模板语法错误：多余右括号 {{ formatSize(bodySize(f.response_body)) }}"
+    },
+    {
+      "file": "src/ui/src/components/FlowList.vue",
+      "line": 1832,
+      "severity": "medium",
+      "type": "Bug",
+      "description": "v-memo 依赖 gridCols（computed），每次 computed 重算都生成新数组引用，导致 v-memo 永远认为依赖变了而重新渲染。虚拟滚动的性能优化被完全破坏。"
+    },
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 402,
+      "severity": "medium",
+      "type": "Bug",
+      "description": "select() 中检查 request_headers == null 来判断是否需要补全数据，但 SSE 推送的 lite flow 本就不包含 request_headers，导致每次选中都触发 HTTP 请求。"
+    }
+  ],
+  "ux_issues": [
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 233,
+      "severity": "medium",
+      "type": "空状态处理",
+      "description": "restoreFromCache 对超大缓存(>5MB)直接删除，没有任何确认机制或备份。用户辛苦积累的缓存数据突然消失。",
+      "suggestion": "删除前提示用户确认，或自动将大缓存压缩归档到 IndexedDB，而非直接删除。"
+    },
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 234,
+      "severity": "medium",
+      "type": "操作反馈",
+      "description": "当缓存超过用户设置的阈值时，saveToCache 直接丢弃最旧的 30% 数据，没有给用户任何提示，用户可能不知道重要数据已丢失。",
+      "suggestion": "缓存达到阈值时向用户发送通知，让用户选择：压缩归档/继续丢弃/清除旧缓存。"
+    },
+    {
+      "file": "src/ui/src/views/CaptureView.vue",
+      "line": 325,
+      "severity": "low",
+      "type": "操作反馈",
+      "description": "onClear 清空所有会话的流量，但用户可能只想清空当前会话。交互设计上应该给用户选择。",
+      "suggestion": "添加清空范围选项：当前会话/所有会话，让用户明确知道清空的影响范围。"
+    },
+    {
+      "file": "src/ui/src/views/AIView.vue",
+      "line": 762,
+      "severity": "medium",
+      "type": "表单验证",
+      "description": "AI 分析页面存在模板语法错误（多余右括号），会导致页面渲染失败。",
+      "suggestion": "移除多余的右括号。"
+    }
+  ],
+  "summary": {
+    "bugs_total": 4,
+    "bugs_high": 2,
+    "bugs_medium": 2,
+    "ux_total": 4,
+    "ux_medium": 3,
+    "ux_low": 1
+  }
+}

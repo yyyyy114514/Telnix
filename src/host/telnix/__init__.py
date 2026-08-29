@@ -1,1 +1,1 @@
-"""主进程包。"""
+"""Main process package."""

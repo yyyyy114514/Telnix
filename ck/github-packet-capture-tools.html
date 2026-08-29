@@ -1,0 +1,3292 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-trae-theme="light" class=""><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub 开源抓包/网络代理工具全景调研</title>
+
+  <style>
+    @font-face {
+      font-family: 'InstrumentSans';
+      src: url('./_shared/fonts/InstrumentSans-Regular.ttf') format('truetype');
+      font-weight: 400;
+    }
+    @font-face {
+      font-family: 'InstrumentSans';
+      src: url('./_shared/fonts/InstrumentSans-Bold.ttf') format('truetype');
+      font-weight: 700;
+    }
+    @font-face {
+      font-family: 'JetBrainsMono';
+      src: url('./_shared/fonts/JetBrainsMono-Regular.ttf') format('truetype');
+      font-weight: 400;
+    }
+    @font-face {
+      font-family: 'JetBrainsMono';
+      src: url('./_shared/fonts/JetBrainsMono-Bold.ttf') format('truetype');
+      font-weight: 700;
+    }
+  </style>
+
+  <style>
+    :root {
+      --bg: #0f1117;
+      --bg2: #1a1d27;
+      --bg3: #232734;
+      --ink: #e8eaed;
+      --muted: #8b8fa3;
+      --rule: #2e3348;
+      --accent: #00d4aa;
+      --accent2: #ff6b6b;
+      --accent3: #ffc857;
+      --font: 'InstrumentSans', system-ui, sans-serif;
+      --font-mono: 'JetBrainsMono', monospace;
+      --max: 1080px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 16px; scroll-behavior: smooth; }
+    body {
+      font-family: var(--font);
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.7;
+      padding: 0;
+    }
+
+    /* Hero */
+    .hero {
+      background: linear-gradient(135deg, #0f1117 0%, #1a1d27 40%, #0d2818 100%);
+      padding: 4rem 2rem 3rem;
+      text-align: center;
+      border-bottom: 1px solid var(--rule);
+    }
+    .hero h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    .hero .subtitle {
+      font-size: 1.05rem;
+      color: var(--muted);
+      max-width: 700px;
+      margin: 0 auto;
+    }
+    .hero .meta {
+      margin-top: 1.2rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-family: var(--font-mono);
+    }
+
+    /* Page container */
+    article.page {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    /* Section headings */
+    h2 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: var(--ink);
+      margin: 2.5rem 0 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--accent);
+      display: inline-block;
+    }
+    h3 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin: 1.5rem 0 0.6rem;
+    }
+    h4 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--ink);
+      margin: 1rem 0 0.4rem;
+    }
+
+    /* Paragraphs & Lists */
+    p { margin: 0.5rem 0; color: var(--ink); }
+    ul, ol { padding-left: 1.4rem; margin: 0.5rem 0; }
+    li { margin-bottom: 0.3rem; color: var(--ink); }
+
+    /* Feature tags */
+    .tag {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-family: var(--font-mono);
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      margin: 0.15rem 0.2rem;
+      background: var(--bg3);
+      color: var(--accent);
+      border: 1px solid var(--rule);
+      white-space: nowrap;
+    }
+    .tag.red { color: var(--accent2); border-color: rgba(255,107,107,0.3); }
+    .tag.yellow { color: var(--accent3); border-color: rgba(255,200,87,0.3); }
+
+    /* Tool card */
+    .tool-card {
+      background: var(--bg2);
+      border: 1px solid var(--rule);
+      border-radius: 10px;
+      padding: 1.5rem;
+      margin: 1.2rem 0;
+      transition: border-color 0.2s;
+    }
+    .tool-card:hover {
+      border-color: var(--accent);
+    }
+    .tool-card .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.8rem;
+    }
+    .tool-card .tool-name {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .tool-card .tool-name a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .tool-card .tool-name a:hover { text-decoration: underline; }
+    .tool-card .stars {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--accent3);
+      background: rgba(255,200,87,0.1);
+      padding: 0.2rem 0.6rem;
+      border-radius: 20px;
+    }
+    .tool-card .lang {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .tool-card .license {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    /* Highlight box */
+    .highlight-box {
+      background: rgba(0,212,170,0.06);
+      border-left: 3px solid var(--accent);
+      padding: 0.6rem 1rem;
+      margin: 0.8rem 0;
+      border-radius: 0 6px 6px 0;
+      font-size: 0.92rem;
+    }
+    .highlight-box strong { color: var(--accent); }
+
+    /* Summary table */
+    .table-wrap {
+      overflow-x: auto;
+      overflow-y: auto;
+      max-height: 600px;
+      margin: 1.2rem 0;
+      border-radius: 8px;
+      border: 1px solid var(--rule);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      white-space: nowrap;
+    }
+    thead {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    th {
+      background: var(--bg3);
+      color: var(--accent);
+      font-weight: 700;
+      padding: 0.6rem 0.8rem;
+      text-align: left;
+      border-bottom: 2px solid var(--rule);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    td {
+      padding: 0.5rem 0.8rem;
+      border-bottom: 1px solid var(--rule);
+      color: var(--ink);
+      vertical-align: top;
+    }
+    tr:hover td { background: rgba(0,212,170,0.03); }
+
+    /* Inline citations */
+    sup a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.7em;
+      font-weight: 600;
+    }
+    sup a:hover { text-decoration: underline; }
+
+    /* Footer sources */
+    footer {
+      max-width: var(--max);
+      margin: 3rem auto 0;
+      padding: 1.5rem;
+      border-top: 1px solid var(--rule);
+    }
+    footer .sources h2 {
+      font-size: 1.1rem;
+      color: var(--muted);
+      border-bottom: 1px solid var(--rule);
+      padding-bottom: 0.4rem;
+      display: inline-block;
+      margin-bottom: 1rem;
+    }
+    footer .sources ol {
+      padding-left: 1.2rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    footer .sources li {
+      margin-bottom: 0.5rem;
+      overflow-wrap: break-word;
+      word-break: break-all;
+    }
+    footer .sources .src-title {
+      color: var(--ink);
+      word-break: normal;
+    }
+    footer .sources .src-url {
+      display: block;
+      margin-top: 0.15rem;
+      font-size: 0.78rem;
+      color: var(--accent);
+      word-break: break-all;
+    }
+    footer .sources a { text-decoration: none; }
+    footer .sources a:hover { text-decoration: underline; }
+
+    /* Chart */
+    .chart-figure { margin: 2rem 0; }
+    .chart-figure figcaption {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 0.75rem;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .hero h1 { font-size: 1.6rem; }
+      .tool-card .tool-header { flex-direction: column; align-items: flex-start; gap: 0.4rem; }
+      .table-wrap { min-width: 100%; }
+      article.page { padding: 1.5rem 1rem; }
+    }
+
+    /* print */
+    @media print {
+      body { background: #fff; color: #111; }
+      .tool-card { border: 1px solid #ccc; background: #f9f9f9; }
+      .hero { background: #f5f5f5; }
+    }
+  </style>
+<style>.trae-browser-inspect-overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:999997;pointer-events:auto;background:rgba(0,0,0,0)}.trae-browser-inspect-highlight-box{position:absolute;top:0;left:0;z-index:999998;display:none}.trae-browser-inspect-highlight-tag{position:absolute;left:0px;top:0px;height:18px;padding:0 6px;box-sizing:border-box;border-radius:4px;background-color:var(--vscode-icube-colorSuccessHover, "#2FB287");color:var(--vscode-icube-colorSnow, "#fff");font-size:12px;font-weight:400;display:none;align-items:center;z-index:999999}.trae-browser-inspect-highlight-box-show{display:flex}.trae-browser-inspect-select-button.trae-browser-inspect-highlight-box-show{display:flex !important}.trae-browser-inspect-select-button{position:absolute;top:0;left:0;background-color:var(--vscode-icube--bg-bg-base-secondary, "#222427");color:var(--vscode-icube--text-text-default-active, "#F5F9FE");font-size:11px;font-weight:500;border:1px solid var(--vscode-icube--border-neutral-l1, "#E0E2F217");border-radius:6px;padding:0 8px;height:32px;display:none;align-items:center;cursor:pointer;z-index:999999;gap:4px}.trae-browser-inspect-select-button svg,.trae-browser-inspect-select-button span{z-index:1}.trae-browser-inspect-select-highlight-box{background:rgba(0,0,0,0) !important}.trae-browser-inspect-select-highlight-box .trae-browser-inspect-highlight-tag{background-color:var(--vscode-icube--status-success-active, "#1E8B56")}.trae-browser-inspect-comment-card-container{position:fixed;top:0;left:0;z-index:9999999;pointer-events:auto}.trae-browser-inspect-comment-card-container .trae-browser-inspect-comment-card{display:flex;padding-top:0px !important;align-items:center;z-index:9999999 !important;background-color:var(--vscode-icube--bg-bg-menu)}*[contenteditable]{outline:none}.trae-browser-inspect-click-effect{position:fixed;width:40px;height:40px;margin-left:-20px;margin-top:-20px;border-radius:50%;background-color:var(--vscode-icube-colorSuccessHover, #2FB287);pointer-events:none;animation:trae-browser-inspect-ripple 500ms ease-out forwards;z-index:999999}@keyframes trae-browser-inspect-ripple{0%{transform:scale(0.3);opacity:.8}100%{transform:scale(2);opacity:0}}.trae-browser-inspect-ref-box{position:absolute;border:2px solid var(--vscode-icube-colorSuccessHover, "#2FB287");pointer-events:none;z-index:999998;animation:trae-browser-inspect-fadeInOut 2s ease-in-out forwards}.trae-browser-inspect-ref-label{position:absolute;top:-14px;left:0;height:14px;padding:0 4px;box-sizing:border-box;border-radius:2px;background-color:var(--vscode-icube-colorSuccessHover, "#2FB287");color:var(--vscode-icube-colorSnow, "#fff");font-size:9px;font-weight:500;display:flex;align-items:center;white-space:nowrap;z-index:999999}@keyframes trae-browser-inspect-fadeInOut{0%{opacity:0}10%{opacity:1}90%{opacity:1}100%{opacity:0}}.trae-browser-inspect-input-highlight{position:absolute;border:2px solid var(--vscode-icube-colorSuccessHover, "#2FB287");border-radius:4px;pointer-events:none;z-index:999998;box-shadow:0 0 8px var(--vscode-icube-colorSuccessHover, "#2FB287");animation:trae-browser-inspect-input-pulse 600ms ease-out forwards}@keyframes trae-browser-inspect-input-pulse{0%{opacity:0;box-shadow:0 0 0 var(--vscode-icube-colorSuccessHover, "#2FB287")}30%{opacity:1;box-shadow:0 0 12px var(--vscode-icube-colorSuccessHover, "#2FB287")}100%{opacity:0;box-shadow:0 0 0 var(--vscode-icube-colorSuccessHover, "#2FB287")}}.trae-browser-inspect-virtual-cursor{position:fixed;width:20px;height:20px;pointer-events:none;z-index:9999999;opacity:0;transition:opacity .2s ease}.trae-browser-inspect-virtual-cursor.trae-browser-inspect-cursor-visible{opacity:1}.trae-browser-inspect-virtual-cursor.trae-browser-inspect-cursor-idle{animation:trae-browser-inspect-cursor-breathe 2s ease-in-out infinite}.trae-browser-inspect-virtual-cursor svg{width:20px;height:20px;filter:drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3))}@keyframes trae-browser-inspect-cursor-breathe{0%,100%{opacity:.7}50%{opacity:1}}.trae-browser-inspect-scroll-indicator{position:fixed;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 16px;border-radius:8px;background-color:rgba(0,0,0,.7);color:#fff;font-size:13px;font-weight:500;pointer-events:none;z-index:999999;animation:trae-browser-inspect-indicator-fade 800ms ease-out forwards;backdrop-filter:blur(4px)}.trae-browser-inspect-scroll-indicator svg{width:16px;height:16px;fill:#fff}.trae-browser-inspect-scroll-indicator.trae-scroll-up{top:12px;left:50%;transform:translateX(-50%)}.trae-browser-inspect-scroll-indicator.trae-scroll-down{bottom:12px;left:50%;transform:translateX(-50%)}.trae-browser-inspect-scroll-indicator.trae-scroll-left{left:12px;top:50%;transform:translateY(-50%)}.trae-browser-inspect-scroll-indicator.trae-scroll-right{right:12px;top:50%;transform:translateY(-50%)}@keyframes trae-browser-inspect-indicator-fade{0%{opacity:0;transform:translateX(-50%) scale(0.9)}15%{opacity:1;transform:translateX(-50%) scale(1)}85%{opacity:1}100%{opacity:0}}.trae-browser-inspect-scroll-indicator.trae-scroll-left,.trae-browser-inspect-scroll-indicator.trae-scroll-right{animation-name:trae-browser-inspect-indicator-fade-y}@keyframes trae-browser-inspect-indicator-fade-y{0%{opacity:0;transform:translateY(-50%) scale(0.9)}15%{opacity:1;transform:translateY(-50%) scale(1)}85%{opacity:1}100%{opacity:0}}.trae-browser-inspect-key-badge{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:8px;background-color:rgba(0,0,0,.8);color:#fff;font-size:18px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;pointer-events:none;z-index:999999;animation:trae-browser-inspect-key-pop 500ms ease-out forwards;backdrop-filter:blur(4px);border:1px solid hsla(0,0%,100%,.15);box-shadow:0 4px 12px rgba(0,0,0,.3);letter-spacing:1px}@keyframes trae-browser-inspect-key-pop{0%{opacity:0;transform:translateX(-50%) translateY(10px) scale(0.9)}20%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}80%{opacity:1}100%{opacity:0;transform:translateX(-50%) translateY(-10px)}}.trae-browser-inspect-step-badge{position:fixed;top:12px;left:12px;padding:6px 12px;border-radius:6px;background-color:var(--vscode-icube-colorSuccessHover, #2FB287);color:#fff;font-size:12px;font-weight:600;pointer-events:none;z-index:999999;animation:trae-browser-inspect-step-slide 600ms ease-out forwards;box-shadow:0 2px 8px rgba(47,178,135,.3);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.trae-browser-inspect-step-badge.trae-step-old{opacity:.4;transform:translateY(0)}@keyframes trae-browser-inspect-step-slide{0%{opacity:0;transform:translateX(-20px)}20%{opacity:1;transform:translateX(0)}100%{opacity:1;transform:translateX(0)}}.trae-browser-inspect-drag-trail{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:999998}.trae-browser-inspect-drag-trail svg{width:100%;height:100%}.trae-browser-inspect-drag-trail .trae-drag-path{fill:none;stroke:var(--vscode-icube-colorSuccessHover, #2FB287);stroke-width:2;stroke-dasharray:8 4;opacity:.6;animation:trae-browser-inspect-dash 600ms linear forwards}.trae-browser-inspect-drag-trail .trae-drag-dot{fill:var(--vscode-icube-colorSuccessHover, #2FB287);filter:drop-shadow(0 0 4px rgba(47, 178, 135, 0.6))}.trae-browser-inspect-drag-trail .trae-drag-endpoint{fill:none;stroke:var(--vscode-icube-colorSuccessHover, #2FB287);stroke-width:2;opacity:.5}@keyframes trae-browser-inspect-dash{0%{stroke-dashoffset:200}100%{stroke-dashoffset:0}}.trae-browser-inspect-drag-trail.trae-drag-fade{animation:trae-browser-inspect-trail-fade 400ms ease-out forwards}@keyframes trae-browser-inspect-trail-fade{0%{opacity:1}100%{opacity:0}}</style><script type="module">(async () => {
+  try {
+    const client = await import('/@vite/client');
+    const hmr = client.createHotContext('hmr-handler/fake.js');
+    hmr.on('vite:afterUpdate', window['__ICUBE_WEBVIEW_HMR_CALLBACK_1785555854808']);
+  } catch {}
+})();</script><style>.buttonsCard-bTXa5j {
+  padding: var(--spacer-4);
+  background: none;
+  align-items: center;
+  gap: 0;
+  display: inline-flex;
+}
+
+.actionButton-opZL8g {
+  align-items: center;
+  gap: var(--spacer-4);
+  padding: var(--spacer-4) var(--spacer-8);
+  border-radius: var(--radius-4);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  background: none;
+  border: none;
+  display: inline-flex;
+}
+
+.actionButton-opZL8g:hover {
+  background: var(--bg-bg-overlay-l2);
+}
+
+.actionButton-opZL8g:active {
+  background: var(--bg-bg-overlay-l3);
+}
+
+.actionButton-opZL8g:focus-visible {
+  outline: 2px solid var(--status-primary-default);
+  outline-offset: 1px;
+}
+
+.icon-ObJEMt {
+  width: 16px;
+  height: 16px;
+  color: var(--icon-icon-default);
+  flex-shrink: 0;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.title-GptGAg {
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.shortcut-nbwTG4 {
+  color: var(--icon-icon-secondary);
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  display: flex;
+}
+
+.shortcutKey-EE6xrE {
+  font-family: var(--font-family-default);
+  color: var(--icon-icon-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 12px;
+}
+
+.divider-cFGVKQ {
+  box-sizing: content-box;
+  background-clip: content-box;
+  background-color: var(--border-border-neutral-l2);
+  flex-shrink: 0;
+  width: 1px;
+  height: 12px;
+  padding: 0 6px;
+}
+
+</style><style>.commentEditorCard-Un4Xaa {
+  width: 320px;
+  padding: var(--spacing-sm);
+  background: none;
+  flex-direction: column;
+  display: flex;
+}
+
+.textContainer-ZISwbW {
+  padding: var(--spacing-sm);
+  background: var(--bg-bg-overlay-l1);
+  border: 1px solid var(--border-border-neutral-l3);
+  border-radius: var(--radius-sm);
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding-right: 0;
+  display: flex;
+}
+
+.textarea-ggj4j6 {
+  padding: 0 var(--spacing-sm) 0 2px;
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  resize: none;
+  scrollbar-width: thin;
+  scrollbar-color: #56637726 transparent;
+  background: none;
+  border: none;
+  outline: none;
+  flex: 1;
+  max-height: 140px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+  overflow-y: auto;
+}
+
+.textarea-ggj4j6::-webkit-scrollbar {
+  width: 6px;
+}
+
+.textarea-ggj4j6::-webkit-scrollbar-track {
+  background: none;
+}
+
+.textarea-ggj4j6::-webkit-scrollbar-thumb {
+  background: #56637726;
+  border-radius: 3px;
+}
+
+.textarea-ggj4j6::placeholder {
+  color: var(--text-text-tertiary);
+}
+
+.actionBar-u_t8vc {
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--spacing-xs);
+  opacity: 0;
+  max-height: 0;
+  transition: max-height .2s ease-out, opacity .2s ease-out, margin-top .2s ease-out;
+  display: flex;
+  overflow: hidden;
+}
+
+.actionBarVisible-PxXsje {
+  opacity: 1;
+  max-height: 32px;
+  margin-top: var(--spacing-sm);
+}
+
+.actionBarNoExpandAnimation-FCra2J {
+  transition: opacity .2s ease-out;
+}
+
+.actionBarNoExpandAnimation-FCra2J.actionBarVisible-PxXsje {
+  max-height: 32px;
+  margin-top: var(--spacing-sm);
+}
+
+.cancelButton-Lu0me9 {
+  height: 24px;
+  padding: 0 var(--spacing-xs);
+  background: var(--bg-bg-overlay-l2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  border: none;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.cancelButton-Lu0me9:hover, .cancelButton-Lu0me9:active {
+  background: var(--bg-bg-overlay-l3);
+}
+
+.cancelButton-Lu0me9:focus-visible {
+  outline: 2px solid var(--status-primary-default);
+  outline-offset: 1px;
+}
+
+.cancelText-j1RS1q {
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  white-space: nowrap;
+  padding: 0 var(--spacing-xs);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.submitButton-BqyEd7 {
+  height: 24px;
+  padding: 0 var(--spacing-sm);
+  background: var(--bg-bg-invert);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  border: none;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.submitButton-BqyEd7:hover:not(:disabled) {
+  background: var(--bg-bg-invert-hover);
+}
+
+.submitButton-BqyEd7:active:not(:disabled) {
+  background: var(--bg-bg-invert-active);
+}
+
+.submitButton-BqyEd7:disabled {
+  background: var(--bg-bg-invert-disabled);
+  color: var(--text-text-disabled);
+  cursor: not-allowed;
+}
+
+.submitButton-BqyEd7:focus-visible {
+  outline: 2px solid var(--status-primary-default);
+  outline-offset: 1px;
+}
+
+.submitText-N58QRq {
+  font-family: var(--font-family-default);
+  color: var(--text-text-onaccent);
+  white-space: nowrap;
+  padding: 0 var(--spacing-xs);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.submitButton-BqyEd7:disabled .submitText-N58QRq {
+  color: var(--text-text-disabled);
+}
+
+.submitIcon-vyKSKQ {
+  width: 12px;
+  height: 12px;
+  color: var(--icon-icon-onaccent);
+  flex-shrink: 0;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.submitButton-BqyEd7:disabled .submitIcon-vyKSKQ {
+  color: var(--text-text-disabled);
+}
+
+.limitWarning-Hocj0v {
+  align-items: center;
+  gap: var(--spacing-xs);
+  color: var(--status-warning-default);
+  user-select: none;
+  flex: 1;
+  display: flex;
+}
+
+.limitText-hBXEaq {
+  font-family: var(--font-family-default);
+  color: var(--status-warning-default);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+</style><style>.previewCommentCardContainer-HEkpU8 {
+  border-radius: var(--radius-8);
+  background: var(--bg-bg-menu);
+  border: 1px solid var(--border-border-neutral-l1);
+  transition: width .25s cubic-bezier(.4, 0, .2, 1), height .25s cubic-bezier(.4, 0, .2, 1);
+  display: inline-block;
+  overflow: hidden;
+  box-shadow: 0 2px 6px #0003, 0 .5px #ffffff0f, inset 0 .5px #ffffff0f;
+}
+
+.previewCommentCardContent-ELaLah {
+  width: max-content;
+  position: relative;
+}
+
+.previewCommentCardFadeEnter-OMhMD9 {
+  opacity: 0;
+}
+
+.previewCommentCardFadeEnterActive-Eacuvn {
+  opacity: 1;
+  transition: opacity .2s ease-in;
+}
+
+.previewCommentCardFadeExit-ms9vgc {
+  opacity: 1;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.previewCommentCardFadeExitActive-vyQTsd {
+  opacity: 0;
+  transition: opacity .15s ease-out;
+}
+
+.previewCommentCardSuccessCard-PWnm2o {
+  white-space: nowrap;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  display: flex;
+}
+
+.previewCommentCardSuccessIcon-Oht9Ir {
+  width: 16px;
+  height: 16px;
+  color: var(--status-success-default);
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.previewCommentCardSuccessText-s40BWG {
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  user-select: none;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+</style><style id="trae-browser-inspect-drag-styles">
+            .trae-browser-inspect-draggable {
+                cursor: grab !important;
+            }
+            .trae-browser-inspect-dragging-active {
+                cursor: grabbing !important;
+            }
+            .trae-browser-inspect-drag-ghost {
+                opacity: 0.7;
+                pointer-events: none;
+                position: fixed;
+                z-index: 999998;
+                transform: scale(0.95);
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+                transition: none;
+            }
+            .trae-browser-inspect-element-placeholder {
+                opacity: 0.3;
+            }
+        </style><style>.trae-browser-inspect-overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:999997;pointer-events:auto;background:rgba(0,0,0,0)}.trae-browser-inspect-highlight-box{position:absolute;top:0;left:0;z-index:999998;display:none}.trae-browser-inspect-highlight-tag{position:absolute;left:0px;top:0px;height:18px;padding:0 6px;box-sizing:border-box;border-radius:4px;background-color:var(--vscode-icube-colorSuccessHover, "#2FB287");color:var(--vscode-icube-colorSnow, "#fff");font-size:12px;font-weight:400;display:none;align-items:center;z-index:999999}.trae-browser-inspect-highlight-box-show{display:flex}.trae-browser-inspect-select-button.trae-browser-inspect-highlight-box-show{display:flex !important}.trae-browser-inspect-select-button{position:absolute;top:0;left:0;background-color:var(--vscode-icube--bg-bg-base-secondary, "#222427");color:var(--vscode-icube--text-text-default-active, "#F5F9FE");font-size:11px;font-weight:500;border:1px solid var(--vscode-icube--border-neutral-l1, "#E0E2F217");border-radius:6px;padding:0 8px;height:32px;display:none;align-items:center;cursor:pointer;z-index:999999;gap:4px}.trae-browser-inspect-select-button svg,.trae-browser-inspect-select-button span{z-index:1}.trae-browser-inspect-select-highlight-box{background:rgba(0,0,0,0) !important}.trae-browser-inspect-select-highlight-box .trae-browser-inspect-highlight-tag{background-color:var(--vscode-icube--status-success-active, "#1E8B56")}.trae-browser-inspect-comment-card-container{position:fixed;top:0;left:0;z-index:9999999;pointer-events:auto}.trae-browser-inspect-comment-card-container .trae-browser-inspect-comment-card{display:flex;padding-top:0px !important;align-items:center;z-index:9999999 !important;background-color:var(--vscode-icube--bg-bg-menu)}*[contenteditable]{outline:none}.trae-browser-inspect-click-effect{position:fixed;width:40px;height:40px;margin-left:-20px;margin-top:-20px;border-radius:50%;background-color:var(--vscode-icube-colorSuccessHover, #2FB287);pointer-events:none;animation:trae-browser-inspect-ripple 500ms ease-out forwards;z-index:999999}@keyframes trae-browser-inspect-ripple{0%{transform:scale(0.3);opacity:.8}100%{transform:scale(2);opacity:0}}.trae-browser-inspect-ref-box{position:absolute;border:2px solid var(--vscode-icube-colorSuccessHover, "#2FB287");pointer-events:none;z-index:999998;animation:trae-browser-inspect-fadeInOut 2s ease-in-out forwards}.trae-browser-inspect-ref-label{position:absolute;top:-14px;left:0;height:14px;padding:0 4px;box-sizing:border-box;border-radius:2px;background-color:var(--vscode-icube-colorSuccessHover, "#2FB287");color:var(--vscode-icube-colorSnow, "#fff");font-size:9px;font-weight:500;display:flex;align-items:center;white-space:nowrap;z-index:999999}@keyframes trae-browser-inspect-fadeInOut{0%{opacity:0}10%{opacity:1}90%{opacity:1}100%{opacity:0}}.trae-browser-inspect-input-highlight{position:absolute;border:2px solid var(--vscode-icube-colorSuccessHover, "#2FB287");border-radius:4px;pointer-events:none;z-index:999998;box-shadow:0 0 8px var(--vscode-icube-colorSuccessHover, "#2FB287");animation:trae-browser-inspect-input-pulse 600ms ease-out forwards}@keyframes trae-browser-inspect-input-pulse{0%{opacity:0;box-shadow:0 0 0 var(--vscode-icube-colorSuccessHover, "#2FB287")}30%{opacity:1;box-shadow:0 0 12px var(--vscode-icube-colorSuccessHover, "#2FB287")}100%{opacity:0;box-shadow:0 0 0 var(--vscode-icube-colorSuccessHover, "#2FB287")}}.trae-browser-inspect-virtual-cursor{position:fixed;width:20px;height:20px;pointer-events:none;z-index:9999999;opacity:0;transition:opacity .2s ease}.trae-browser-inspect-virtual-cursor.trae-browser-inspect-cursor-visible{opacity:1}.trae-browser-inspect-virtual-cursor.trae-browser-inspect-cursor-idle{animation:trae-browser-inspect-cursor-breathe 2s ease-in-out infinite}.trae-browser-inspect-virtual-cursor svg{width:20px;height:20px;filter:drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3))}@keyframes trae-browser-inspect-cursor-breathe{0%,100%{opacity:.7}50%{opacity:1}}.trae-browser-inspect-scroll-indicator{position:fixed;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 16px;border-radius:8px;background-color:rgba(0,0,0,.7);color:#fff;font-size:13px;font-weight:500;pointer-events:none;z-index:999999;animation:trae-browser-inspect-indicator-fade 800ms ease-out forwards;backdrop-filter:blur(4px)}.trae-browser-inspect-scroll-indicator svg{width:16px;height:16px;fill:#fff}.trae-browser-inspect-scroll-indicator.trae-scroll-up{top:12px;left:50%;transform:translateX(-50%)}.trae-browser-inspect-scroll-indicator.trae-scroll-down{bottom:12px;left:50%;transform:translateX(-50%)}.trae-browser-inspect-scroll-indicator.trae-scroll-left{left:12px;top:50%;transform:translateY(-50%)}.trae-browser-inspect-scroll-indicator.trae-scroll-right{right:12px;top:50%;transform:translateY(-50%)}@keyframes trae-browser-inspect-indicator-fade{0%{opacity:0;transform:translateX(-50%) scale(0.9)}15%{opacity:1;transform:translateX(-50%) scale(1)}85%{opacity:1}100%{opacity:0}}.trae-browser-inspect-scroll-indicator.trae-scroll-left,.trae-browser-inspect-scroll-indicator.trae-scroll-right{animation-name:trae-browser-inspect-indicator-fade-y}@keyframes trae-browser-inspect-indicator-fade-y{0%{opacity:0;transform:translateY(-50%) scale(0.9)}15%{opacity:1;transform:translateY(-50%) scale(1)}85%{opacity:1}100%{opacity:0}}.trae-browser-inspect-key-badge{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:8px;background-color:rgba(0,0,0,.8);color:#fff;font-size:18px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;pointer-events:none;z-index:999999;animation:trae-browser-inspect-key-pop 500ms ease-out forwards;backdrop-filter:blur(4px);border:1px solid hsla(0,0%,100%,.15);box-shadow:0 4px 12px rgba(0,0,0,.3);letter-spacing:1px}@keyframes trae-browser-inspect-key-pop{0%{opacity:0;transform:translateX(-50%) translateY(10px) scale(0.9)}20%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}80%{opacity:1}100%{opacity:0;transform:translateX(-50%) translateY(-10px)}}.trae-browser-inspect-step-badge{position:fixed;top:12px;left:12px;padding:6px 12px;border-radius:6px;background-color:var(--vscode-icube-colorSuccessHover, #2FB287);color:#fff;font-size:12px;font-weight:600;pointer-events:none;z-index:999999;animation:trae-browser-inspect-step-slide 600ms ease-out forwards;box-shadow:0 2px 8px rgba(47,178,135,.3);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.trae-browser-inspect-step-badge.trae-step-old{opacity:.4;transform:translateY(0)}@keyframes trae-browser-inspect-step-slide{0%{opacity:0;transform:translateX(-20px)}20%{opacity:1;transform:translateX(0)}100%{opacity:1;transform:translateX(0)}}.trae-browser-inspect-drag-trail{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:999998}.trae-browser-inspect-drag-trail svg{width:100%;height:100%}.trae-browser-inspect-drag-trail .trae-drag-path{fill:none;stroke:var(--vscode-icube-colorSuccessHover, #2FB287);stroke-width:2;stroke-dasharray:8 4;opacity:.6;animation:trae-browser-inspect-dash 600ms linear forwards}.trae-browser-inspect-drag-trail .trae-drag-dot{fill:var(--vscode-icube-colorSuccessHover, #2FB287);filter:drop-shadow(0 0 4px rgba(47, 178, 135, 0.6))}.trae-browser-inspect-drag-trail .trae-drag-endpoint{fill:none;stroke:var(--vscode-icube-colorSuccessHover, #2FB287);stroke-width:2;opacity:.5}@keyframes trae-browser-inspect-dash{0%{stroke-dashoffset:200}100%{stroke-dashoffset:0}}.trae-browser-inspect-drag-trail.trae-drag-fade{animation:trae-browser-inspect-trail-fade 400ms ease-out forwards}@keyframes trae-browser-inspect-trail-fade{0%{opacity:1}100%{opacity:0}}</style><script type="module">(async () => {
+  try {
+    const client = await import('/@vite/client');
+    const hmr = client.createHotContext('hmr-handler/fake.js');
+    hmr.on('vite:afterUpdate', window['__ICUBE_WEBVIEW_HMR_CALLBACK_1785555854909']);
+  } catch {}
+})();</script><style>.buttonsCard-bTXa5j {
+  padding: var(--spacer-4);
+  background: none;
+  align-items: center;
+  gap: 0;
+  display: inline-flex;
+}
+
+.actionButton-opZL8g {
+  align-items: center;
+  gap: var(--spacer-4);
+  padding: var(--spacer-4) var(--spacer-8);
+  border-radius: var(--radius-4);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  background: none;
+  border: none;
+  display: inline-flex;
+}
+
+.actionButton-opZL8g:hover {
+  background: var(--bg-bg-overlay-l2);
+}
+
+.actionButton-opZL8g:active {
+  background: var(--bg-bg-overlay-l3);
+}
+
+.actionButton-opZL8g:focus-visible {
+  outline: 2px solid var(--status-primary-default);
+  outline-offset: 1px;
+}
+
+.icon-ObJEMt {
+  width: 16px;
+  height: 16px;
+  color: var(--icon-icon-default);
+  flex-shrink: 0;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.title-GptGAg {
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.shortcut-nbwTG4 {
+  color: var(--icon-icon-secondary);
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  display: flex;
+}
+
+.shortcutKey-EE6xrE {
+  font-family: var(--font-family-default);
+  color: var(--icon-icon-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 12px;
+}
+
+.divider-cFGVKQ {
+  box-sizing: content-box;
+  background-clip: content-box;
+  background-color: var(--border-border-neutral-l2);
+  flex-shrink: 0;
+  width: 1px;
+  height: 12px;
+  padding: 0 6px;
+}
+
+</style><style>.commentEditorCard-Un4Xaa {
+  width: 320px;
+  padding: var(--spacing-sm);
+  background: none;
+  flex-direction: column;
+  display: flex;
+}
+
+.textContainer-ZISwbW {
+  padding: var(--spacing-sm);
+  background: var(--bg-bg-overlay-l1);
+  border: 1px solid var(--border-border-neutral-l3);
+  border-radius: var(--radius-sm);
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding-right: 0;
+  display: flex;
+}
+
+.textarea-ggj4j6 {
+  padding: 0 var(--spacing-sm) 0 2px;
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  resize: none;
+  scrollbar-width: thin;
+  scrollbar-color: #56637726 transparent;
+  background: none;
+  border: none;
+  outline: none;
+  flex: 1;
+  max-height: 140px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+  overflow-y: auto;
+}
+
+.textarea-ggj4j6::-webkit-scrollbar {
+  width: 6px;
+}
+
+.textarea-ggj4j6::-webkit-scrollbar-track {
+  background: none;
+}
+
+.textarea-ggj4j6::-webkit-scrollbar-thumb {
+  background: #56637726;
+  border-radius: 3px;
+}
+
+.textarea-ggj4j6::placeholder {
+  color: var(--text-text-tertiary);
+}
+
+.actionBar-u_t8vc {
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--spacing-xs);
+  opacity: 0;
+  max-height: 0;
+  transition: max-height .2s ease-out, opacity .2s ease-out, margin-top .2s ease-out;
+  display: flex;
+  overflow: hidden;
+}
+
+.actionBarVisible-PxXsje {
+  opacity: 1;
+  max-height: 32px;
+  margin-top: var(--spacing-sm);
+}
+
+.actionBarNoExpandAnimation-FCra2J {
+  transition: opacity .2s ease-out;
+}
+
+.actionBarNoExpandAnimation-FCra2J.actionBarVisible-PxXsje {
+  max-height: 32px;
+  margin-top: var(--spacing-sm);
+}
+
+.cancelButton-Lu0me9 {
+  height: 24px;
+  padding: 0 var(--spacing-xs);
+  background: var(--bg-bg-overlay-l2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  border: none;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.cancelButton-Lu0me9:hover, .cancelButton-Lu0me9:active {
+  background: var(--bg-bg-overlay-l3);
+}
+
+.cancelButton-Lu0me9:focus-visible {
+  outline: 2px solid var(--status-primary-default);
+  outline-offset: 1px;
+}
+
+.cancelText-j1RS1q {
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  white-space: nowrap;
+  padding: 0 var(--spacing-xs);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.submitButton-BqyEd7 {
+  height: 24px;
+  padding: 0 var(--spacing-sm);
+  background: var(--bg-bg-invert);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  border: none;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.submitButton-BqyEd7:hover:not(:disabled) {
+  background: var(--bg-bg-invert-hover);
+}
+
+.submitButton-BqyEd7:active:not(:disabled) {
+  background: var(--bg-bg-invert-active);
+}
+
+.submitButton-BqyEd7:disabled {
+  background: var(--bg-bg-invert-disabled);
+  color: var(--text-text-disabled);
+  cursor: not-allowed;
+}
+
+.submitButton-BqyEd7:focus-visible {
+  outline: 2px solid var(--status-primary-default);
+  outline-offset: 1px;
+}
+
+.submitText-N58QRq {
+  font-family: var(--font-family-default);
+  color: var(--text-text-onaccent);
+  white-space: nowrap;
+  padding: 0 var(--spacing-xs);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.submitButton-BqyEd7:disabled .submitText-N58QRq {
+  color: var(--text-text-disabled);
+}
+
+.submitIcon-vyKSKQ {
+  width: 12px;
+  height: 12px;
+  color: var(--icon-icon-onaccent);
+  flex-shrink: 0;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.submitButton-BqyEd7:disabled .submitIcon-vyKSKQ {
+  color: var(--text-text-disabled);
+}
+
+.limitWarning-Hocj0v {
+  align-items: center;
+  gap: var(--spacing-xs);
+  color: var(--status-warning-default);
+  user-select: none;
+  flex: 1;
+  display: flex;
+}
+
+.limitText-hBXEaq {
+  font-family: var(--font-family-default);
+  color: var(--status-warning-default);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+</style><style>.previewCommentCardContainer-HEkpU8 {
+  border-radius: var(--radius-8);
+  background: var(--bg-bg-menu);
+  border: 1px solid var(--border-border-neutral-l1);
+  transition: width .25s cubic-bezier(.4, 0, .2, 1), height .25s cubic-bezier(.4, 0, .2, 1);
+  display: inline-block;
+  overflow: hidden;
+  box-shadow: 0 2px 6px #0003, 0 .5px #ffffff0f, inset 0 .5px #ffffff0f;
+}
+
+.previewCommentCardContent-ELaLah {
+  width: max-content;
+  position: relative;
+}
+
+.previewCommentCardFadeEnter-OMhMD9 {
+  opacity: 0;
+}
+
+.previewCommentCardFadeEnterActive-Eacuvn {
+  opacity: 1;
+  transition: opacity .2s ease-in;
+}
+
+.previewCommentCardFadeExit-ms9vgc {
+  opacity: 1;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.previewCommentCardFadeExitActive-vyQTsd {
+  opacity: 0;
+  transition: opacity .15s ease-out;
+}
+
+.previewCommentCardSuccessCard-PWnm2o {
+  white-space: nowrap;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  display: flex;
+}
+
+.previewCommentCardSuccessIcon-Oht9Ir {
+  width: 16px;
+  height: 16px;
+  color: var(--status-success-default);
+  justify-content: center;
+  align-items: center;
+  display: flex;
+}
+
+.previewCommentCardSuccessText-s40BWG {
+  font-family: var(--font-family-default);
+  color: var(--text-text-default);
+  user-select: none;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+</style><style id="icube-theme-variables">:root {--vscode-foreground: #31353a;--vscode-disabledForeground: #8a9096;--vscode-errorForeground: #cc4b53;--vscode-descriptionForeground: #5b6066;--vscode-icon-foreground: #5b6066;--vscode-focusBorder: rgba(0, 0, 0, 0);--vscode-textLink-foreground: #006ab1;--vscode-textLink-activeForeground: #387bff;--vscode-textSeparator-foreground: rgba(0, 0, 0, 0.18);--vscode-textPreformat-foreground: #a31515;--vscode-textPreformat-background: rgba(0, 0, 0, 0.1);--vscode-textBlockQuote-background: #f2f2f2;--vscode-textBlockQuote-border: rgba(0, 122, 204, 0.5);--vscode-textCodeBlock-background: rgba(220, 220, 220, 0.4);--vscode-sash-hoverBorder: #0fdc78;--vscode-badge-background: #c4c4c4;--vscode-badge-foreground: #333333;--vscode-activityWarningBadge-foreground: #ffffff;--vscode-activityWarningBadge-background: #b27c00;--vscode-activityErrorBadge-foreground: #ffffff;--vscode-activityErrorBadge-background: #e51400;--vscode-scrollbar-shadow: #dddddd;--vscode-scrollbarSlider-background: rgba(100, 100, 100, 0.4);--vscode-scrollbarSlider-hoverBackground: rgba(100, 100, 100, 0.7);--vscode-scrollbarSlider-activeBackground: rgba(0, 0, 0, 0.6);--vscode-progressBar-background: #2f74ff;--vscode-chart-line: #236b8e;--vscode-chart-axis: rgba(0, 0, 0, 0.6);--vscode-chart-guide: rgba(0, 0, 0, 0.2);--vscode-editor-background: #ffffff;--vscode-editor-foreground: #31353a;--vscode-editorStickyScroll-background: #ffffff;--vscode-editorStickyScrollGutter-background: #ffffff;--vscode-editorStickyScrollHover-background: rgba(91, 146, 255, 0.08);--vscode-editorStickyScroll-shadow: #dddddd;--vscode-editorWidget-background: #f3f3f3;--vscode-editorWidget-foreground: #31353a;--vscode-editorWidget-border: #c8c8c8;--vscode-editorError-foreground: #e51400;--vscode-editorWarning-foreground: #bf8803;--vscode-editorInfo-foreground: #0063d3;--vscode-editorHint-foreground: #6c6c6c;--vscode-editorLink-activeForeground: #36393d;--vscode-editor-selectionBackground: rgba(47, 116, 255, 0.18);--vscode-editor-inactiveSelectionBackground: #e5ebf1;--vscode-editor-selectionHighlightBackground: rgba(173, 214, 255, 0.5);--vscode-editor-compositionBorder: #000000;--vscode-editor-findMatchBackground: #a8ac94;--vscode-editor-findMatchHighlightBackground: rgba(234, 92, 0, 0.33);--vscode-editor-findRangeHighlightBackground: rgba(180, 180, 180, 0.3);--vscode-editor-hoverHighlightBackground: rgba(173, 214, 255, 0.15);--vscode-editorHoverWidget-background: #ffffff;--vscode-editorHoverWidget-foreground: #31353a;--vscode-editorHoverWidget-border: rgba(77, 107, 153, 0.09);--vscode-editorHoverWidget-statusBarBackground: #f2f2f2;--vscode-editorInlayHint-foreground: #969696;--vscode-editorInlayHint-background: rgba(196, 196, 196, 0.1);--vscode-editorInlayHint-typeForeground: #969696;--vscode-editorInlayHint-typeBackground: rgba(196, 196, 196, 0.1);--vscode-editorInlayHint-parameterForeground: #969696;--vscode-editorInlayHint-parameterBackground: rgba(196, 196, 196, 0.1);--vscode-editorLightBulb-foreground: #ddb100;--vscode-editorLightBulbAutoFix-foreground: #007acc;--vscode-editorLightBulbAi-foreground: #ddb100;--vscode-editor-snippetTabstopHighlightBackground: rgba(10, 50, 100, 0.2);--vscode-editor-snippetFinalTabstopHighlightBorder: rgba(10, 50, 100, 0.5);--vscode-diffEditor-insertedTextBackground: rgba(64, 176, 139, 0.18);--vscode-diffEditor-removedTextBackground: rgba(232, 70, 58, 0.16);--vscode-diffEditor-insertedLineBackground: rgba(64, 176, 139, 0.12);--vscode-diffEditor-removedLineBackground: rgba(232, 70, 58, 0.12);--vscode-diffEditorOverview-insertedForeground: rgba(64, 176, 139, 0.18);--vscode-diffEditorOverview-removedForeground: rgba(232, 70, 58, 0.16);--vscode-diffEditor-diagonalFill: rgba(34, 34, 34, 0.2);--vscode-diffEditor-unchangedRegionBackground: #ffffff;--vscode-diffEditor-unchangedRegionForeground: #31353a;--vscode-diffEditor-unchangedCodeBackground: rgba(184, 184, 184, 0.16);--vscode-widget-shadow: rgba(0, 0, 0, 0.08);--vscode-widget-border: rgba(77, 107, 153, 0.09);--vscode-toolbar-hoverBackground: rgba(86, 99, 119, 0.11);--vscode-toolbar-activeBackground: rgba(86, 99, 119, 0.15);--vscode-breadcrumb-foreground: rgba(49, 53, 58, 0.8);--vscode-breadcrumb-background: #ffffff;--vscode-breadcrumb-focusForeground: #272a2e;--vscode-breadcrumb-activeSelectionForeground: #272a2e;--vscode-breadcrumbPicker-background: #ffffff;--vscode-merge-currentHeaderBackground: rgba(64, 200, 174, 0.5);--vscode-merge-currentContentBackground: rgba(64, 200, 174, 0.2);--vscode-merge-incomingHeaderBackground: rgba(64, 166, 255, 0.5);--vscode-merge-incomingContentBackground: rgba(64, 166, 255, 0.2);--vscode-merge-commonHeaderBackground: rgba(96, 96, 96, 0.4);--vscode-merge-commonContentBackground: rgba(96, 96, 96, 0.16);--vscode-editorOverviewRuler-currentContentForeground: rgba(64, 200, 174, 0.5);--vscode-editorOverviewRuler-incomingContentForeground: rgba(64, 166, 255, 0.5);--vscode-editorOverviewRuler-commonContentForeground: rgba(96, 96, 96, 0.4);--vscode-editorOverviewRuler-findMatchForeground: rgba(209, 134, 22, 0.49);--vscode-editorOverviewRuler-selectionHighlightForeground: rgba(160, 160, 160, 0.8);--vscode-problemsErrorIcon-foreground: #e51400;--vscode-problemsWarningIcon-foreground: #bf8803;--vscode-problemsInfoIcon-foreground: #0063d3;--vscode-minimap-findMatchHighlight: #d18616;--vscode-minimap-selectionOccurrenceHighlight: #c9c9c9;--vscode-minimap-selectionHighlight: #add6ff;--vscode-minimap-infoHighlight: #0063d3;--vscode-minimap-warningHighlight: #bf8803;--vscode-minimap-errorHighlight: rgba(255, 18, 18, 0.7);--vscode-minimap-foregroundOpacity: #000000;--vscode-minimapSlider-background: rgba(100, 100, 100, 0.2);--vscode-minimapSlider-hoverBackground: rgba(100, 100, 100, 0.35);--vscode-minimapSlider-activeBackground: rgba(0, 0, 0, 0.3);--vscode-charts-foreground: #31353a;--vscode-charts-lines: rgba(49, 53, 58, 0.5);--vscode-charts-red: #e51400;--vscode-charts-blue: #0063d3;--vscode-charts-yellow: #bf8803;--vscode-charts-orange: #d18616;--vscode-charts-green: #388a34;--vscode-charts-purple: #652d90;--vscode-input-background: rgba(86, 99, 119, 0.07);--vscode-input-foreground: #31353a;--vscode-inputOption-activeBorder: rgba(77, 107, 153, 0.36);--vscode-inputOption-hoverBackground: rgba(184, 184, 184, 0.31);--vscode-inputOption-activeBackground: rgba(0, 0, 0, 0);--vscode-inputOption-activeForeground: #000000;--vscode-input-placeholderForeground: #5b6066;--vscode-inputValidation-infoBackground: #d6ecf2;--vscode-inputValidation-infoBorder: #007acc;--vscode-inputValidation-warningBackground: #f6f5d2;--vscode-inputValidation-warningBorder: #b89500;--vscode-inputValidation-errorBackground: #f2dede;--vscode-inputValidation-errorBorder: #e8463a;--vscode-dropdown-background: #ffffff;--vscode-dropdown-foreground: #31353a;--vscode-dropdown-border: #cecece;--vscode-button-foreground: #ffffff;--vscode-button-separator: rgba(193, 195, 205, 0.12);--vscode-button-background: #31353a;--vscode-button-hoverBackground: #72767b;--vscode-button-secondaryForeground: #ffffff;--vscode-button-secondaryBackground: #5f6a79;--vscode-button-secondaryHoverBackground: #4c5561;--vscode-radio-activeForeground: #000000;--vscode-radio-activeBackground: rgba(0, 0, 0, 0);--vscode-radio-activeBorder: rgba(77, 107, 153, 0.36);--vscode-radio-inactiveBorder: rgba(0, 0, 0, 0.2);--vscode-radio-inactiveHoverBackground: rgba(184, 184, 184, 0.31);--vscode-checkbox-background: #ffffff;--vscode-checkbox-selectBackground: #f3f3f3;--vscode-checkbox-foreground: #31353a;--vscode-checkbox-border: #919191;--vscode-checkbox-selectBorder: #5b6066;--vscode-checkbox-disabled.background: #bbbcbd;--vscode-checkbox-disabled.foreground: #74777b;--vscode-keybindingLabel-background: rgba(221, 221, 221, 0.4);--vscode-keybindingLabel-foreground: #555555;--vscode-keybindingLabel-border: rgba(204, 204, 204, 0.4);--vscode-keybindingLabel-bottomBorder: rgba(187, 187, 187, 0.4);--vscode-list-focusOutline: rgba(0, 0, 0, 0);--vscode-list-focusAndSelectionOutline: #90c2f9;--vscode-list-activeSelectionBackground: rgba(86, 99, 119, 0.11);--vscode-list-activeSelectionForeground: #111214;--vscode-list-activeSelectionIconForeground: #5b6066;--vscode-list-inactiveSelectionBackground: rgba(86, 99, 119, 0.11);--vscode-list-inactiveSelectionForeground: #111214;--vscode-list-hoverBackground: rgba(86, 99, 119, 0.11);--vscode-list-dropBackground: rgba(86, 99, 119, 0.11);--vscode-list-dropBetweenBackground: #5b6066;--vscode-list-highlightForeground: #0066bf;--vscode-list-focusHighlightForeground: #0066bf;--vscode-list-invalidItemForeground: #b89500;--vscode-list-errorForeground: #e8463a;--vscode-list-warningForeground: #855f00;--vscode-listFilterWidget-background: #f3f3f3;--vscode-listFilterWidget-outline: rgba(0, 0, 0, 0);--vscode-listFilterWidget-noMatchesOutline: #be1100;--vscode-listFilterWidget-shadow: rgba(0, 0, 0, 0.08);--vscode-list-filterMatchBackground: rgba(234, 92, 0, 0.33);--vscode-list-deemphasizedForeground: #8e8e90;--vscode-tree-indentGuidesStroke: rgba(77, 107, 153, 0.09);--vscode-tree-inactiveIndentGuidesStroke: rgba(221, 226, 233, 0.08);--vscode-tree-tableColumnsBorder: rgba(97, 97, 97, 0.13);--vscode-tree-tableOddRowsBackground: rgba(49, 53, 58, 0.04);--vscode-editorActionList-background: #f3f3f3;--vscode-editorActionList-foreground: #31353a;--vscode-editorActionList-focusForeground: #111214;--vscode-editorActionList-focusBackground: rgba(86, 99, 119, 0.11);--vscode-menu-border: rgba(77, 107, 153, 0.09);--vscode-menu-foreground: #616161;--vscode-menu-background: #ffffff;--vscode-menu-selectionForeground: #111214;--vscode-menu-selectionBackground: rgba(86, 99, 119, 0.11);--vscode-menu-separatorBackground: rgba(77, 107, 153, 0.09);--vscode-quickInput-background: #f8f9fa;--vscode-quickInput-foreground: #31353a;--vscode-quickInputTitle-background: rgba(0, 0, 0, 0.04);--vscode-pickerGroup-foreground: #31353a;--vscode-pickerGroup-border: rgba(77, 107, 153, 0.09);--vscode-quickInputList-focusForeground: #111214;--vscode-quickInputList-focusIconForeground: #5b6066;--vscode-quickInputList-focusBackground: rgba(86, 99, 119, 0.11);--vscode-search-resultsInfoForeground: #31353a;--vscode-searchEditor-findMatchBackground: rgba(234, 92, 0, 0.22);--vscode-tab-activeBackground: rgba(86, 99, 119, 0.11);--vscode-tab-unfocusedActiveBackground: rgba(86, 99, 119, 0.11);--vscode-tab-inactiveBackground: #f8f8f9;--vscode-tab-unfocusedInactiveBackground: #f8f8f9;--vscode-tab-activeForeground: #333333;--vscode-tab-inactiveForeground: #5b6066;--vscode-tab-unfocusedActiveForeground: #31353a;--vscode-tab-unfocusedInactiveForeground: rgba(91, 96, 102, 0.5);--vscode-tab-border: rgba(77, 107, 153, 0.09);--vscode-tab-lastPinnedBorder: rgba(97, 97, 97, 0.19);--vscode-tab-activeBorder: #ffffff;--vscode-tab-unfocusedActiveBorder: rgba(255, 255, 255, 0.7);--vscode-tab-activeBorderTop: #000000;--vscode-tab-unfocusedActiveBorderTop: rgba(0, 0, 0, 0.7);--vscode-tab-selectedBorderTop: #000000;--vscode-tab-selectedBackground: rgba(86, 99, 119, 0.11);--vscode-tab-selectedForeground: #333333;--vscode-tab-dragAndDropBorder: #333333;--vscode-tab-activeModifiedBorder: #33aaee;--vscode-tab-inactiveModifiedBorder: rgba(51, 170, 238, 0.5);--vscode-tab-unfocusedActiveModifiedBorder: rgba(51, 170, 238, 0.7);--vscode-tab-unfocusedInactiveModifiedBorder: rgba(51, 170, 238, 0.25);--vscode-editorPane-background: #ffffff;--vscode-editorGroupHeader-tabsBackground: #f8f8f9;--vscode-editorGroupHeader-tabsBorder: rgba(77, 107, 153, 0.09);--vscode-editorGroupHeader-noTabsBackground: #ffffff;--vscode-editorGroup-border: #e7e7e7;--vscode-editorGroup-dropBackground: rgba(33, 97, 224, 0.16);--vscode-editorGroup-dropIntoPromptForeground: #31353a;--vscode-editorGroup-dropIntoPromptBackground: #f3f3f3;--vscode-sideBySideEditor-horizontalBorder: #e7e7e7;--vscode-sideBySideEditor-verticalBorder: #e7e7e7;--vscode-panel-background: #ffffff;--vscode-panel-border: rgba(128, 128, 128, 0.35);--vscode-panelTitle-activeForeground: #111214;--vscode-panelTitle-inactiveForeground: #5b6066;--vscode-panelTitle-activeBorder: #111214;--vscode-panelInput-border: #dddddd;--vscode-panel-dropBorder: #111214;--vscode-panelSection-dropBackground: rgba(33, 97, 224, 0.16);--vscode-panelSectionHeader-background: #ffffff;--vscode-panelSectionHeader-foreground: #111214;--vscode-panelSectionHeader-border: rgba(77, 107, 153, 0.18);--vscode-panelSection-border: rgba(128, 128, 128, 0.35);--vscode-panelStickyScroll-background: #ffffff;--vscode-panelStickyScroll-shadow: #dddddd;--vscode-banner-background: rgba(60, 69, 83, 0.11);--vscode-banner-foreground: #111214;--vscode-banner-iconForeground: #0063d3;--vscode-statusBar-foreground: #ffffff;--vscode-statusBar-noFolderForeground: #ffffff;--vscode-statusBar-background: rgba(0, 0, 0, 0);--vscode-statusBar-noFolderBackground: rgba(0, 0, 0, 0);--vscode-statusBar-focusBorder: #ffffff;--vscode-statusBarItem-activeBackground: rgba(255, 255, 255, 0.18);--vscode-statusBarItem-focusBorder: #ffffff;--vscode-statusBarItem-hoverBackground: rgba(0, 0, 0, 0.12);--vscode-statusBarItem-hoverForeground: #ffffff;--vscode-statusBarItem-compactHoverBackground: rgba(0, 0, 0, 0.12);--vscode-statusBarItem-prominentForeground: #ffffff;--vscode-statusBarItem-prominentBackground: rgba(0, 0, 0, 0.5);--vscode-statusBarItem-prominentHoverForeground: #ffffff;--vscode-statusBarItem-prominentHoverBackground: rgba(0, 0, 0, 0.12);--vscode-statusBarItem-errorBackground: #c72e0f;--vscode-statusBarItem-errorForeground: #ffffff;--vscode-statusBarItem-errorHoverForeground: #ffffff;--vscode-statusBarItem-errorHoverBackground: rgba(0, 0, 0, 0.12);--vscode-statusBarItem-warningBackground: #725102;--vscode-statusBarItem-warningForeground: #ffffff;--vscode-statusBarItem-warningHoverForeground: #ffffff;--vscode-statusBarItem-warningHoverBackground: rgba(0, 0, 0, 0.12);--vscode-activityBar-background: #edeff2;--vscode-activityBar-foreground: #111214;--vscode-activityBar-inactiveForeground: #5b6066;--vscode-activityBar-activeBorder: #111214;--vscode-activityBar-dropBorder: #111214;--vscode-activityBarBadge-background: #2f74ff;--vscode-activityBarBadge-foreground: #ffffff;--vscode-activityBarTop-foreground: #424242;--vscode-activityBarTop-activeBorder: #424242;--vscode-activityBarTop-inactiveForeground: rgba(66, 66, 66, 0.75);--vscode-activityBarTop-dropBorder: #424242;--vscode-profileBadge-background: #c4c4c4;--vscode-profileBadge-foreground: #333333;--vscode-statusBarItem-remoteBackground: #16825d;--vscode-statusBarItem-remoteForeground: #ffffff;--vscode-statusBarItem-remoteHoverForeground: #ffffff;--vscode-statusBarItem-remoteHoverBackground: rgba(0, 0, 0, 0.12);--vscode-statusBarItem-offlineBackground: #6c1717;--vscode-statusBarItem-offlineForeground: #ffffff;--vscode-statusBarItem-offlineHoverForeground: #ffffff;--vscode-statusBarItem-offlineHoverBackground: rgba(0, 0, 0, 0.12);--vscode-extensionBadge-remoteBackground: #2f74ff;--vscode-extensionBadge-remoteForeground: #ffffff;--vscode-sideBar-background: #ffffff;--vscode-sideBarTitle-background: #ffffff;--vscode-sideBarTitle-foreground: #6f6f6f;--vscode-sideBar-dropBackground: rgba(33, 97, 224, 0.16);--vscode-sideBarSectionHeader-background: #ffffff;--vscode-sideBarSectionHeader-foreground: #31353a;--vscode-sideBarSectionHeader-border: rgba(77, 107, 153, 0.18);--vscode-sideBarActivityBarTop-border: rgba(77, 107, 153, 0.18);--vscode-sideBarStickyScroll-background: #ffffff;--vscode-sideBarStickyScroll-shadow: #dddddd;--vscode-titleBar-activeForeground: #5b6066;--vscode-titleBar-inactiveForeground: rgba(91, 96, 102, 0.6);--vscode-titleBar-activeBackground: #edeff2;--vscode-titleBar-inactiveBackground: #edeff2;--vscode-menubar-selectionForeground: #5b6066;--vscode-menubar-selectionBackground: rgba(86, 99, 119, 0.11);--vscode-commandCenter-foreground: #5b6066;--vscode-commandCenter-activeForeground: #5b6066;--vscode-commandCenter-inactiveForeground: rgba(91, 96, 102, 0.6);--vscode-commandCenter-background: rgba(0, 0, 0, 0.05);--vscode-commandCenter-activeBackground: rgba(0, 0, 0, 0.08);--vscode-commandCenter-border: rgba(91, 96, 102, 0.2);--vscode-commandCenter-activeBorder: rgba(91, 96, 102, 0.3);--vscode-commandCenter-inactiveBorder: rgba(91, 96, 102, 0.15);--vscode-notificationCenter-border: rgba(77, 107, 153, 0.09);--vscode-notificationToast-border: rgba(77, 107, 153, 0.09);--vscode-notifications-foreground: #31353a;--vscode-notifications-background: #ffffff;--vscode-notificationLink-foreground: #006ab1;--vscode-notificationCenterHeader-background: #f2f2f2;--vscode-notifications-border: #f2f2f2;--vscode-notificationsErrorIcon-foreground: #e8463a;--vscode-notificationsWarningIcon-foreground: #e28a00;--vscode-notificationsInfoIcon-foreground: #2f74ff;--vscode-iCubeNotificationCenter-border: rgba(77, 107, 153, 0.09);--vscode-icube-colorSnow: #ffffff;--vscode-icube-colorBlack: #000000;--vscode-icube-colorSnowDisable: rgba(255, 255, 255, 0.3);--vscode-icube-modalOverlay: rgba(0, 0, 0, 0.4);--vscode-icube-colorBg1: #ffffff;--vscode-icube-colorBg2: #edeff2;--vscode-icube-colorBg3: #ffffff;--vscode-icube-colorBg4: #e1e1e1;--vscode-icube-diffColorBg3: rgba(225, 225, 225, 0.35);--vscode-icube-colorBgCode: #ffffff;--vscode-icube-colorBgTr0: rgba(86, 99, 119, 0.07);--vscode-icube-colorBtnHover: rgba(86, 99, 119, 0.11);--vscode-icube-colorBg5: rgba(77, 97, 128, 0.08);--vscode-icube-colorBtnHover2: rgba(86, 99, 119, 0.15);--vscode-icube-colorBtnTransparent3: rgba(86, 99, 119, 0.19);--vscode-icube-colorBlend: rgba(77, 97, 128, 0.12);--vscode-icube-colorTransparent: rgba(255, 255, 255, 0);--vscode-icube-colorWidgetShadow: rgba(0, 0, 0, 0.04);--vscode-icube-colorWidgetShadow2: rgba(0, 0, 0, 0.08);--vscode-icube-colorWidgetShadow3: rgba(0, 0, 0, 0.2);--vscode-icube-colorDefaultText: #31353a;--vscode-icube-colorHighlightText: #111214;--vscode-icube-colorGrayText: #5b6066;--vscode-icube-colorGrayText2: #617080;--vscode-icube-colorDisableText: #8a9096;--vscode-icube-colorBlackText: #111314;--vscode-icube-colorBlackText1: #ffffff;--vscode-icube-colorBlackText2: #000000;--vscode-icube-colorDefaultAvatar: #5b92ff;--vscode-icube-colorDefaultAvatarBackground: #1759dd;--vscode-icube-modalLayoutBg: rgba(0, 25, 49, 0.2);--vscode-icube-colorIcon: #939fb8;--vscode-icube-colorCodeCodeInstruction: #b15ef2;--vscode-icube-colorLine1: rgba(77, 107, 153, 0.09);--vscode-icube-colorLine2: rgba(77, 107, 153, 0.18);--vscode-icube-colorLine3: rgba(77, 107, 153, 0.36);--vscode-icube-colorBrand: #36393d;--vscode-icube-colorBrandHover: #72767b;--vscode-icube-colorBrandActive: #1a1b1d;--vscode-icube-colorBrandTransparent: rgba(86, 99, 119, 0.11);--vscode-icube-colorBrandTransparent2: rgba(86, 99, 119, 0.15);--vscode-icube-colorBrandTransparent3: rgba(86, 99, 119, 0.19);--vscode-icube-colorStatusRegular: #2f74ff;--vscode-icube-colorStatusRegularHover: #4c88ff;--vscode-icube-colorStatusRegularActive: #1759dd;--vscode-icube-colorStatusRegularTransparent: rgba(47, 116, 255, 0.12);--vscode-icube-colorStatusRegularTransparent2: rgba(47, 116, 255, 0.18);--vscode-icube-colorStatusRegularTransparent3: rgba(47, 116, 255, 0.36);--vscode-icube-colorSuccess: #26a57b;--vscode-icube-colorSuccessHover: #2ca77f;--vscode-icube-colorSuccessActive: #1e8b56;--vscode-icube-colorSuccessTransparent: rgba(64, 176, 139, 0.12);--vscode-icube-colorSuccessTransparent2: rgba(64, 176, 139, 0.18);--vscode-icube-colorSuccessTransparent3: rgba(64, 176, 139, 0.36);--vscode-icube-colorError: #e8463a;--vscode-icube-colorErrorHover: #ea574c;--vscode-icube-colorErrorActive: #c9382f;--vscode-icube-colorErrorTransparent: rgba(232, 70, 58, 0.12);--vscode-icube-colorErrorTransparent2: rgba(232, 70, 58, 0.16);--vscode-icube-colorErrorTransparent3: rgba(232, 70, 58, 0.36);--vscode-icube-colorWarning: #e28a00;--vscode-icube-colorWarningHover: #f18c13;--vscode-icube-colorWarningActive: #c46f11;--vscode-icube-colorWarningTransparent: rgba(226, 138, 0, 0.12);--vscode-icube-colorWarningTransparent2: rgba(226, 138, 0, 0.16);--vscode-icube-colorWarningTransparent3: rgba(226, 138, 0, 0.36);--vscode-icube-colorAlert: #c6a626;--vscode-icube-colorAlertHover: #dfb716;--vscode-icube-colorAlertActive: #af8d06;--vscode-icube-colorAlertTransparent: rgba(198, 166, 38, 0.14);--vscode-icube-colorAlertTransparent2: rgba(198, 166, 38, 0.2);--vscode-icube-colorAlertTransparent3: rgba(198, 166, 38, 0.36);--vscode-icube-colorErrorTm1: rgba(204, 75, 83, 0.2);--vscode-icube-colorErrorTr1: rgba(232, 70, 58, 0.12);--vscode-icube-colorSpinLoading: #2f74ff;--vscode-icube-colorC1: #00b983;--vscode-icube-colorC2: #ff6b45;--vscode-icube-colorC3: #f2a90c;--vscode-icube-colorC4: #5fbf00;--vscode-icube-colorC5: #00b8f8;--vscode-icube-colorC6: #3f85ff;--vscode-icube-colorC7: #f53cff;--vscode-icube-colorC8: #9570ff;--vscode-icube-colorC9: #747e94;--vscode-icube-colorDiffToggleBtnBg: #8d7aff;--vscode-icube-textPreformatBackground: #9d89eb;--vscode-icube-colorRed1: #dd3730;--vscode-icube-colorRed2: rgba(221, 55, 48, 0.1);--vscode-icube-colorRed3: #dd3730;--vscode-icube-colorGreen1: #00906e;--vscode-icube-colorDiffBtn1: #ffffff;--vscode-icube-diffInsertedTextBackground: rgba(38, 165, 123, 0.32);--vscode-icube-colorChatError: rgba(97, 97, 97, 0);--vscode-icube-chatIconBg1: #ff4a36;--vscode-icube-chatIconColor1: #ffffff;--vscode-icube-emptyExplorerButtonBgColor: rgba(77, 97, 128, 0.08);--vscode-icube-emptyExplorerButtonTextColor: #333940;--vscode-icube-emptyExplorerSplitTextColor: #333940;--vscode-icube-emptyExplorerSplitColor: rgba(77, 107, 153, 0.2);--vscode-icube-lite.colorBg1: #25252d;--vscode-icube-lite.colorBg2: #1d1c23;--vscode-icube-lite.colorLine1: #2e2e38;--vscode-widget-shadow1: rgba(0, 0, 0, 0.08);--vscode-widget-shadow2: rgba(0, 0, 0, 0.1);--vscode-widget-light.shadow1: rgba(0, 0, 0, 0.04);--vscode-widget-light.shadow2: rgba(0, 0, 0, 0.08);--vscode-icube-tooltipsTextColor: #ffffff;--vscode-icube-ai.disableInputBorderColor: rgba(77, 107, 153, 0.4);--vscode-icube-scrollbarBgColor: rgba(100, 100, 100, 0.4);--vscode-icube-scrollbarHoverBgColor: rgba(100, 100, 100, 0.4);--vscode-icube-desktopEmptyWorkspaceIconBg: rgba(77, 97, 128, 0.08);--vscode-icube-desktopEmptyWorkspaceHoverBg: rgba(77, 107, 153, 0.12);--vscode-icube--code-code-text: #17181a;--vscode-icube-primaryButtonBackground: #31353a;--vscode-icube-primaryButtonForeground: #ffffff;--vscode-icube-primaryButtonHoverBackground: #72767b;--vscode-icube-primaryButtonHoverForeground: #ffffff;--vscode-icube-primaryButtonActivateBackground: #1a1b1d;--vscode-icube-primaryButtonActivateForeground: #ffffff;--vscode-icube-primaryButtonDisableBackground: #8a9096;--vscode-icube-primaryButtonDisableForeground: #ffffff;--vscode-icube-defaultButtonBackground: rgba(86, 99, 119, 0.11);--vscode-icube-defaultButtonForeground: #31353a;--vscode-icube-defaultButtonHoverBackground: rgba(86, 99, 119, 0.15);--vscode-icube-defaultButtonHoverForeground: #31353a;--vscode-icube-defaultButtonActivateBackground: rgba(86, 99, 119, 0.19);--vscode-icube-defaultButtonActivateForeground: #31353a;--vscode-icube-defaultButtonDisableBackground: rgba(86, 99, 119, 0.15);--vscode-icube-defaultButtonDisableForeground: #8a9096;--vscode-icube-checkboxBorder: #31353a;--vscode-icube-checkboxBackground: #31353a;--vscode-icube-checkboxDisabledBackground: #8a9096;--vscode-icube-checkboxForeground: #ffffff;--vscode-icube-checkboxUncheckedBorder: rgba(77, 107, 153, 0.18);--vscode-icube-checkboxUncheckedBackground: #ffffff;--vscode-icube-badgeBackground: #2f74ff;--vscode-icube-badgeForeground: #ffffff;--vscode-icube-colorBgTr1: rgba(86, 99, 119, 0.11);--vscode-icube-colorBgTr2: rgba(86, 99, 119, 0.15);--vscode-icube-colorBgTr3: rgba(86, 99, 119, 0.19);--vscode-icube-colorTextDefault: #31353a;--vscode-icube-colorTextHighlight: #111214;--vscode-icube-colorTextGray: #5b6066;--vscode-icube-colorTextDisable: #8a9096;--vscode-icube-colorBrandTr1: rgba(86, 99, 119, 0.11);--vscode-icube-colorBrandTr2: rgba(86, 99, 119, 0.15);--vscode-icube-colorBrandTr3: rgba(86, 99, 119, 0.19);--vscode-icube-colorSuccessTr1: rgba(64, 176, 139, 0.12);--vscode-icube-colorSuccessTr2: rgba(64, 176, 139, 0.18);--vscode-icube-colorSuccessTr3: rgba(64, 176, 139, 0.36);--vscode-icube-colorErrorTr2: rgba(232, 70, 58, 0.16);--vscode-icube-colorErrorTr3: rgba(232, 70, 58, 0.36);--vscode-icube-colorWarningTr1: rgba(226, 138, 0, 0.12);--vscode-icube-colorWarningTr2: rgba(226, 138, 0, 0.16);--vscode-icube-colorWarningTr3: rgba(226, 138, 0, 0.36);--vscode-icube-colorAlertTr1: rgba(198, 166, 38, 0.14);--vscode-icube-colorAlertTr2: rgba(198, 166, 38, 0.2);--vscode-icube-colorAlertTr3: rgba(198, 166, 38, 0.36);--vscode-icube-colorTextButtonHighlight: #111214;--vscode-icube--special-white: #ffffff;--vscode-icube--special-black: #000000;--vscode-icube--bg-bg-base-default: #ffffff;--vscode-icube--bg-bg-tooltip: #ffffff;--vscode-icube--bg-bg-base-secondary: #edeff2;--vscode-icube--bg-bg-base-tertiary: #ffffff;--vscode-icube--bg-bg-overlay-l1: rgba(86, 99, 119, 0.07);--vscode-icube--bg-bg-overlay-l2: rgba(86, 99, 119, 0.11);--vscode-icube--bg-bg-overlay-l3: rgba(86, 99, 119, 0.15);--vscode-icube--bg-bg-overlay-l4: rgba(86, 99, 119, 0.19);--vscode-icube--border-border-neutral-l1: rgba(77, 107, 153, 0.09);--vscode-icube--border-border-neutral-l2: rgba(77, 107, 153, 0.18);--vscode-icube--border-border-neutral-l3: rgba(77, 107, 153, 0.36);--vscode-icube--text-text-default-hover: #111214;--vscode-icube--text-text-default-active: #111214;--vscode-icube--icon-icon-default-hover: #111214;--vscode-icube--icon-icon-default-active: #111214;--vscode-icube--text-text-default: #31353a;--vscode-icube--text-text-secondary-hover: #31353a;--vscode-icube--text-text-secondary-active: #31353a;--vscode-icube--icon-icon-default: #31353a;--vscode-icube--icon-icon-secondary-hover: #31353a;--vscode-icube--icon-icon-secondary-active: #31353a;--vscode-icube--text-text-secondary: #5b6066;--vscode-icube--icon-icon-secondary: #5b6066;--vscode-icube--text-text-tertiary: #8a9096;--vscode-icube--text-text-disabled: #8a9096;--vscode-icube--icon-icon-tertiary: #8a9096;--vscode-icube--icon-icon-disabled: #8a9096;--vscode-icube--status-primary-default: #2f74ff;--vscode-icube--status-primary-hover: #4c88ff;--vscode-icube--status-primary-active: #1759dd;--vscode-icube--status-primary-surface-l1: rgba(47, 116, 255, 0.12);--vscode-icube--status-primary-surface-l2: rgba(47, 116, 255, 0.18);--vscode-icube--status-primary-surface-l3: rgba(47, 116, 255, 0.36);--vscode-icube--status-success-default: #26a57b;--vscode-icube--status-success-hover: #2ca77f;--vscode-icube--status-success-active: #1e8b56;--vscode-icube--status-success-surface-l1: rgba(64, 176, 139, 0.12);--vscode-icube--status-success-surface-l2: rgba(64, 176, 139, 0.18);--vscode-icube--status-success-surface-l3: rgba(64, 176, 139, 0.36);--vscode-icube--status-alert-default: #c6a626;--vscode-icube--status-alert-hover: #dfb716;--vscode-icube--status-alert-active: #af8d06;--vscode-icube--status-alert-surface-l1: rgba(198, 166, 38, 0.14);--vscode-icube--status-alert-surface-l2: rgba(198, 166, 38, 0.2);--vscode-icube--status-alert-surface-l3: rgba(198, 166, 38, 0.36);--vscode-icube--status-warning-default: #e28a00;--vscode-icube--status-warning-hover: #f18c13;--vscode-icube--status-warning-active: #c46f11;--vscode-icube--status-warning-surface-l1: rgba(226, 138, 0, 0.12);--vscode-icube--status-warning-surface-l2: rgba(226, 138, 0, 0.16);--vscode-icube--status-warning-surface-l3: rgba(226, 138, 0, 0.36);--vscode-icube--status-error-default: #e8463a;--vscode-icube--status-error-hover: #ea574c;--vscode-icube--status-error-active: #c9382f;--vscode-icube--status-error-surface-l1: rgba(232, 70, 58, 0.12);--vscode-icube--status-error-surface-l2: rgba(232, 70, 58, 0.16);--vscode-icube--status-error-surface-l3: rgba(232, 70, 58, 0.36);--vscode-icube--bg-bg-invert: #36393d;--vscode-icube--bg-bg-invert-hover: #72767b;--vscode-icube--bg-bg-invert-active: #1a1b1d;--vscode-icube--bg-bg-invert-disabled: rgba(86, 99, 119, 0.19);--vscode-icube--accent-accent-teal: #00b983;--vscode-icube--accent-accent-coral: #ff6b45;--vscode-icube--accent-accent-amber: #f2a90c;--vscode-icube--accent-accent-lime: #5fbf00;--vscode-icube--accent-accent-cyan: #00b8f8;--vscode-icube--accent-accent-blue: #3f85ff;--vscode-icube--accent-accent-magenta: #f53cff;--vscode-icube--accent-accent-violet: #9570ff;--vscode-icube--accent-accent-slate: #747e94;--vscode-icube--bg-bg-menu: #f8f9fa;--vscode-icube--bg-bg-menu-tr0: rgba(255, 255, 255, 0);--vscode-icube--bg-bg-brand: #0fdc78;--vscode-icube--bg-bg-brand-hover: #0ab861;--vscode-icube--bg-bg-brand-disabled: rgba(10, 184, 97, 0.2);--vscode-icube--border-border-contrast: #000000;--vscode-icube--border-border-brand: #0fdc78;--vscode-icube--text-text-brand: #0ab861;--vscode-icube--icon-icon-brand: #0ab861;--vscode-icube--text-text-brand-hover: #0fdc78;--vscode-icube--icon-icon-brand-hover: #0fdc78;--vscode-icube--text-text-onbrand: #0c0c0d;--vscode-icube--icon-icon-onbrand: #0c0c0d;--vscode-icube--text-text-onaccent: #ffffff;--vscode-icube--icon-icon-onaccent: #ffffff;--vscode-icube--special-bgtabsoverlay: rgba(193, 195, 205, 0.12);--vscode-icube--code-code-tag: #e24864;--vscode-icube--code-code-instruction: #b15ef2;--vscode-icube--code-code-doc: #8393a3;--vscode-icube--code-code-parameter: #4da621;--vscode-icube--cue: #0ab861;--vscode-icube--cue-tr0: rgba(10, 184, 97, 0);--vscode-icube--cue-tr1: rgba(10, 184, 97, 0.16);--vscode-icube--cue-tr2: rgba(10, 184, 97, 0.32);--vscode-icube--cue-diff-add: #00a56e;--vscode-icube--cue-diff-add-inline: rgba(0, 165, 110, 0.12);--vscode-icube--cue-diff-add-popup: rgba(0, 165, 110, 0.18);--vscode-icube--cue-diff-remove: rgba(232, 70, 58, 0.14);--vscode-icube--cue-diff-line: rgba(0, 0, 0, 0.32);--vscode-solo-lite-root-background: #edeff2;--vscode-icube-memoryRiskBackground: #fef3e2;--vscode-icube-memoryRiskBorder: #e8a838;--vscode-icube-memoryRiskIcon: #c87a1c;--vscode-icube-blendColor.btnHover.bg2: #e0e3e9;--vscode-icube-blendColor.btnTransparent3.bg2: #d3d8df;--vscode-editor-lineHighlightBackground: rgba(114, 118, 123, 0.08);--vscode-editor-inactiveLineHighlightBackground: rgba(114, 118, 123, 0.08);--vscode-editor-lineHighlightBorder: #eeeeee;--vscode-editor-rangeHighlightBackground: rgba(253, 255, 0, 0.2);--vscode-editor-symbolHighlightBackground: rgba(234, 92, 0, 0.33);--vscode-editorCursor-foreground: #000000;--vscode-editorMultiCursor-primary.foreground: #000000;--vscode-editorMultiCursor-secondary.foreground: #000000;--vscode-editorWhitespace-foreground: rgba(51, 51, 51, 0.2);--vscode-editorLineNumber-foreground: #72767b;--vscode-editorIndentGuide-background: rgba(77, 107, 153, 0.09);--vscode-editorIndentGuide-activeBackground: rgba(77, 107, 153, 0.36);--vscode-editorIndentGuide-background1: rgba(77, 107, 153, 0.09);--vscode-editorIndentGuide-background2: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-background3: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-background4: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-background5: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-background6: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-activeBackground1: rgba(77, 107, 153, 0.36);--vscode-editorIndentGuide-activeBackground2: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-activeBackground3: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-activeBackground4: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-activeBackground5: rgba(0, 0, 0, 0);--vscode-editorIndentGuide-activeBackground6: rgba(0, 0, 0, 0);--vscode-editorActiveLineNumber-foreground: #0b216f;--vscode-editorLineNumber-activeForeground: #111214;--vscode-editorRuler-foreground: #d3d3d3;--vscode-editorCodeLens-foreground: #919191;--vscode-editorBracketMatch-background: rgba(114, 118, 123, 0.24);--vscode-editorBracketMatch-border: #b9b9b9;--vscode-editorOverviewRuler-border: rgba(127, 127, 127, 0.3);--vscode-editorGutter-background: #ffffff;--vscode-editorUnnecessaryCode-opacity: rgba(0, 0, 0, 0.5);--vscode-editorGhostText-foreground: rgba(0, 0, 0, 0.47);--vscode-editorOverviewRuler-rangeHighlightForeground: rgba(0, 122, 204, 0.6);--vscode-editorOverviewRuler-errorForeground: rgba(255, 18, 18, 0.7);--vscode-editorOverviewRuler-warningForeground: #bf8803;--vscode-editorOverviewRuler-infoForeground: #0063d3;--vscode-editorBracketHighlight-foreground1: #0431fa;--vscode-editorBracketHighlight-foreground2: #319331;--vscode-editorBracketHighlight-foreground3: #7b3814;--vscode-editorBracketHighlight-foreground4: rgba(0, 0, 0, 0);--vscode-editorBracketHighlight-foreground5: rgba(0, 0, 0, 0);--vscode-editorBracketHighlight-foreground6: rgba(0, 0, 0, 0);--vscode-editorBracketHighlight-unexpectedBracket.foreground: rgba(255, 18, 18, 0.8);--vscode-editorBracketPairGuide-background1: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-background2: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-background3: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-background4: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-background5: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-background6: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-activeBackground1: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-activeBackground2: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-activeBackground3: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-activeBackground4: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-activeBackground5: rgba(0, 0, 0, 0);--vscode-editorBracketPairGuide-activeBackground6: rgba(0, 0, 0, 0);--vscode-editorUnicodeHighlight-border: #bf8803;--vscode-diffEditor-move.border: rgba(139, 139, 139, 0.61);--vscode-diffEditor-moveActive.border: #ffa500;--vscode-diffEditor-unchangedRegionShadow: rgba(115, 115, 115, 0.75);--vscode-settings-headerForeground: #111214;--vscode-settings-settingsHeaderHoverForeground: rgba(17, 18, 20, 0.7);--vscode-settings-modifiedItemIndicator: #36393d;--vscode-settings-headerBorder: rgba(77, 107, 153, 0.18);--vscode-settings-sashBorder: rgba(128, 128, 128, 0.35);--vscode-settings-dropdownBackground: #ffffff;--vscode-settings-dropdownForeground: #31353a;--vscode-settings-dropdownBorder: rgba(77, 107, 153, 0.09);--vscode-settings-dropdownListBorder: #c8c8c8;--vscode-settings-checkboxBackground: #ffffff;--vscode-settings-checkboxForeground: #31353a;--vscode-settings-checkboxBorder: #919191;--vscode-settings-textInputBackground: rgba(86, 99, 119, 0.07);--vscode-settings-textInputForeground: #31353a;--vscode-settings-textInputBorder: #cecece;--vscode-settings-numberInputBackground: rgba(86, 99, 119, 0.07);--vscode-settings-numberInputForeground: #31353a;--vscode-settings-numberInputBorder: #cecece;--vscode-settings-focusedRowBackground: rgba(86, 99, 119, 0.07);--vscode-settings-rowHoverBackground: rgba(86, 99, 119, 0.03);--vscode-settings-focusedRowBorder: rgba(0, 0, 0, 0);--vscode-editorOverviewRuler-bracketMatchForeground: #a0a0a0;--vscode-actionBar-toggledBackground: #dddddd;--vscode-symbolIcon-arrayForeground: #31353a;--vscode-symbolIcon-booleanForeground: #31353a;--vscode-symbolIcon-classForeground: #d67e00;--vscode-symbolIcon-colorForeground: #31353a;--vscode-symbolIcon-constantForeground: #31353a;--vscode-symbolIcon-constructorForeground: #652d90;--vscode-symbolIcon-enumeratorForeground: #d67e00;--vscode-symbolIcon-enumeratorMemberForeground: #007acc;--vscode-symbolIcon-eventForeground: #d67e00;--vscode-symbolIcon-fieldForeground: #007acc;--vscode-symbolIcon-fileForeground: #31353a;--vscode-symbolIcon-folderForeground: #31353a;--vscode-symbolIcon-functionForeground: #652d90;--vscode-symbolIcon-interfaceForeground: #007acc;--vscode-symbolIcon-keyForeground: #31353a;--vscode-symbolIcon-keywordForeground: #31353a;--vscode-symbolIcon-methodForeground: #b180d7;--vscode-symbolIcon-moduleForeground: #31353a;--vscode-symbolIcon-namespaceForeground: #31353a;--vscode-symbolIcon-nullForeground: #31353a;--vscode-symbolIcon-numberForeground: #31353a;--vscode-symbolIcon-objectForeground: #31353a;--vscode-symbolIcon-operatorForeground: #31353a;--vscode-symbolIcon-packageForeground: #31353a;--vscode-symbolIcon-propertyForeground: #31353a;--vscode-symbolIcon-referenceForeground: #31353a;--vscode-symbolIcon-snippetForeground: #31353a;--vscode-symbolIcon-stringForeground: #31353a;--vscode-symbolIcon-structForeground: #31353a;--vscode-symbolIcon-textForeground: #31353a;--vscode-symbolIcon-typeParameterForeground: #31353a;--vscode-symbolIcon-unitForeground: #31353a;--vscode-symbolIcon-variableForeground: #007acc;--vscode-peekViewTitle-background: #f3f3f3;--vscode-peekViewTitleLabel-foreground: #000000;--vscode-peekViewTitleDescription-foreground: #616161;--vscode-peekView-border: #0063d3;--vscode-peekViewResult-background: #f3f3f3;--vscode-peekViewResult-lineForeground: #646465;--vscode-peekViewResult-fileForeground: #1e1e1e;--vscode-peekViewResult-selectionBackground: rgba(51, 153, 255, 0.2);--vscode-peekViewResult-selectionForeground: #6c6c6c;--vscode-peekViewEditor-background: #f2f8fc;--vscode-peekViewEditorGutter-background: #f2f8fc;--vscode-peekViewEditorStickyScroll-background: #f2f8fc;--vscode-peekViewEditorStickyScrollGutter-background: #f2f8fc;--vscode-peekViewResult-matchHighlightBackground: rgba(234, 92, 0, 0.3);--vscode-peekViewEditor-matchHighlightBackground: rgba(245, 216, 2, 0.87);--vscode-editorMarkerNavigationError-background: #e51400;--vscode-editorMarkerNavigationError-headerBackground: rgba(229, 20, 0, 0.1);--vscode-editorMarkerNavigationWarning-background: #bf8803;--vscode-editorMarkerNavigationWarning-headerBackground: rgba(191, 136, 3, 0.1);--vscode-editorMarkerNavigationInfo-background: #0063d3;--vscode-editorMarkerNavigationInfo-headerBackground: rgba(0, 99, 211, 0.1);--vscode-editorMarkerNavigation-background: #ffffff;--vscode-editor-foldBackground: rgba(47, 116, 255, 0.05);--vscode-editor-foldPlaceholderForeground: #808080;--vscode-editorGutter-foldingControlForeground: #5b6066;--vscode-editorSuggestWidget-background: #f3f3f3;--vscode-editorSuggestWidget-border: #c8c8c8;--vscode-editorSuggestWidget-foreground: #31353a;--vscode-editorSuggestWidget-selectedForeground: #111214;--vscode-editorSuggestWidget-selectedIconForeground: #5b6066;--vscode-editorSuggestWidget-selectedBackground: rgba(86, 99, 119, 0.11);--vscode-editorSuggestWidget-highlightForeground: #0066bf;--vscode-editorSuggestWidget-focusHighlightForeground: #0066bf;--vscode-editorSuggestWidgetStatus-foreground: rgba(49, 53, 58, 0.5);--vscode-inlineEdit-originalBackground: rgba(232, 70, 58, 0.03);--vscode-inlineEdit-modifiedBackground: rgba(64, 176, 139, 0.05);--vscode-inlineEdit-originalChangedLineBackground: rgba(232, 70, 58, 0.13);--vscode-inlineEdit-originalChangedTextBackground: rgba(232, 70, 58, 0.13);--vscode-inlineEdit-modifiedChangedLineBackground: rgba(64, 176, 139, 0.09);--vscode-inlineEdit-modifiedChangedTextBackground: rgba(64, 176, 139, 0.13);--vscode-inlineEdit-gutterIndicator.primaryForeground: #ffffff;--vscode-inlineEdit-gutterIndicator.primaryBorder: #31353a;--vscode-inlineEdit-gutterIndicator.primaryBackground: rgba(49, 53, 58, 0.5);--vscode-inlineEdit-gutterIndicator.secondaryForeground: #ffffff;--vscode-inlineEdit-gutterIndicator.secondaryBorder: #5f6a79;--vscode-inlineEdit-gutterIndicator.secondaryBackground: #5f6a79;--vscode-inlineEdit-gutterIndicator.successfulForeground: #ffffff;--vscode-inlineEdit-gutterIndicator.successfulBorder: #31353a;--vscode-inlineEdit-gutterIndicator.successfulBackground: #31353a;--vscode-inlineEdit-gutterIndicator.background: rgba(95, 95, 95, 0.09);--vscode-inlineEdit-originalBorder: rgba(232, 70, 58, 0.16);--vscode-inlineEdit-modifiedBorder: rgba(26, 70, 55, 0.18);--vscode-inlineEdit-tabWillAcceptModifiedBorder: rgba(26, 70, 55, 0.18);--vscode-inlineEdit-tabWillAcceptOriginalBorder: rgba(232, 70, 58, 0.16);--vscode-editor-linkedEditingBackground: rgba(255, 0, 0, 0.3);--vscode-editor-wordHighlightBackground: rgba(114, 118, 123, 0.24);--vscode-editor-wordHighlightStrongBackground: rgba(14, 99, 156, 0.25);--vscode-editor-wordHighlightTextBackground: rgba(114, 118, 123, 0.24);--vscode-editorOverviewRuler-wordHighlightForeground: rgba(160, 160, 160, 0.8);--vscode-editorOverviewRuler-wordHighlightStrongForeground: rgba(192, 160, 192, 0.8);--vscode-editorOverviewRuler-wordHighlightTextForeground: rgba(160, 160, 160, 0.8);--vscode-editorHoverWidget-highlightForeground: #0066bf;--vscode-editor-placeholder.foreground: rgba(0, 0, 0, 0.47);--vscode-editorGutter-modifiedBackground: #2090d3;--vscode-editorGutter-modifiedSecondaryBackground: #aad8f2;--vscode-editorGutter-addedBackground: #48985d;--vscode-editorGutter-addedSecondaryBackground: #a7d5b3;--vscode-editorGutter-deletedBackground: #e51400;--vscode-editorGutter-deletedSecondaryBackground: #ff3d2b;--vscode-minimapGutter-modifiedBackground: #2090d3;--vscode-minimapGutter-addedBackground: #48985d;--vscode-minimapGutter-deletedBackground: #e51400;--vscode-editorOverviewRuler-modifiedForeground: rgba(32, 144, 211, 0.6);--vscode-editorOverviewRuler-addedForeground: rgba(72, 152, 93, 0.6);--vscode-editorOverviewRuler-deletedForeground: rgba(229, 20, 0, 0.6);--vscode-editorGutter-itemGlyphForeground: #31353a;--vscode-editorGutter-itemBackground: #dee0e5;--vscode-agentSessionReadIndicator-foreground: rgba(49, 53, 58, 0.15);--vscode-terminal-foreground: #333333;--vscode-terminal-selectionBackground: rgba(47, 116, 255, 0.18);--vscode-terminal-inactiveSelectionBackground: #e5ebf1;--vscode-terminalCommandDecoration-defaultBackground: rgba(0, 0, 0, 0.25);--vscode-terminalCommandDecoration-successBackground: #2090d3;--vscode-terminalCommandDecoration-errorBackground: #e51400;--vscode-terminalOverviewRuler-cursorForeground: rgba(160, 160, 160, 0.8);--vscode-terminal-border: rgba(128, 128, 128, 0.35);--vscode-terminalOverviewRuler-border: rgba(127, 127, 127, 0.3);--vscode-terminal-findMatchBackground: #a8ac94;--vscode-terminal-hoverHighlightBackground: rgba(173, 214, 255, 0.07);--vscode-terminal-findMatchHighlightBackground: rgba(234, 92, 0, 0.33);--vscode-terminalOverviewRuler-findMatchForeground: rgba(209, 134, 22, 0.49);--vscode-terminal-dropBackground: rgba(33, 97, 224, 0.16);--vscode-terminal-tab.activeBorder: #ffffff;--vscode-terminal-initialHintForeground: rgba(0, 0, 0, 0.47);--vscode-scmGraph-historyItemRefColor: #0063d3;--vscode-scmGraph-historyItemRemoteRefColor: #652d90;--vscode-scmGraph-historyItemBaseRefColor: #ea5c00;--vscode-scmGraph-historyItemHoverDefaultLabelForeground: #31353a;--vscode-scmGraph-historyItemHoverDefaultLabelBackground: #c4c4c4;--vscode-scmGraph-historyItemHoverLabelForeground: #ffffff;--vscode-scmGraph-historyItemHoverAdditionsForeground: #587c0c;--vscode-scmGraph-historyItemHoverDeletionsForeground: #ad0707;--vscode-scmGraph-foreground1: #ffb000;--vscode-scmGraph-foreground2: #dc267f;--vscode-scmGraph-foreground3: #994f00;--vscode-scmGraph-foreground4: #40b0a6;--vscode-scmGraph-foreground5: #b66dff;--vscode-commentsView-resolvedIcon: #8a9096;--vscode-commentsView-unresolvedIcon: rgba(0, 0, 0, 0);--vscode-editorCommentsWidget-replyInputBackground: #f3f3f3;--vscode-editorCommentsWidget-resolvedBorder: #8a9096;--vscode-editorCommentsWidget-unresolvedBorder: rgba(0, 0, 0, 0);--vscode-editorCommentsWidget-rangeBackground: rgba(0, 0, 0, 0);--vscode-editorCommentsWidget-rangeActiveBackground: rgba(0, 0, 0, 0);--vscode-editorGutter-commentRangeForeground: #dee0e5;--vscode-editorOverviewRuler-commentForeground: #dee0e5;--vscode-editorOverviewRuler-commentUnresolvedForeground: #dee0e5;--vscode-editorOverviewRuler-commentDraftForeground: #dee0e5;--vscode-editorGutter-commentGlyphForeground: #31353a;--vscode-editorGutter-commentUnresolvedGlyphForeground: #31353a;--vscode-editorGutter-commentDraftGlyphForeground: #31353a;--vscode-ports-iconRunningProcessForeground: #369432;--vscode-welcomePage-tileBackground: #f3f3f3;--vscode-welcomePage-tileHoverBackground: #dbdbdb;--vscode-welcomePage-tileBorder: rgba(0, 0, 0, 0.1);--vscode-welcomePage-progress.background: rgba(86, 99, 119, 0.07);--vscode-welcomePage-progress.foreground: #006ab1;--vscode-walkthrough-stepTitle.foreground: #000000;--vscode-extensionIcon-verifiedForeground: #006ab1;--vscode-keybindingTable-headerBackground: rgba(49, 53, 58, 0.04);--vscode-keybindingTable-rowsBackground: rgba(49, 53, 58, 0.04);--vscode-extensionButton-background: #31353a;--vscode-extensionButton-foreground: #ffffff;--vscode-extensionButton-hoverBackground: #72767b;--vscode-extensionButton-separator: rgba(193, 195, 205, 0.12);--vscode-extensionButton-prominentBackground: #31353a;--vscode-extensionButton-prominentForeground: #ffffff;--vscode-extensionButton-prominentHoverBackground: #72767b;--vscode-debugToolBar-background: #edeff2;--vscode-debugIcon-startForeground: #388a34;--vscode-notebook-cellBorderColor: #e8e8e8;--vscode-notebook-focusedEditorBorder: rgba(0, 0, 0, 0);--vscode-notebookStatusSuccessIcon-foreground: #388a34;--vscode-notebookEditorOverviewRuler-runningCellForeground: #388a34;--vscode-notebookStatusErrorIcon-foreground: #cc4b53;--vscode-notebookStatusRunningIcon-foreground: #31353a;--vscode-notebook-cellToolbarSeparator: rgba(128, 128, 128, 0.35);--vscode-notebook-selectedCellBackground: rgba(200, 221, 241, 0.31);--vscode-notebook-selectedCellBorder: #e8e8e8;--vscode-notebook-focusedCellBorder: rgba(0, 0, 0, 0);--vscode-notebook-inactiveFocusedCellBorder: #e8e8e8;--vscode-notebook-cellStatusBarItemHoverBackground: rgba(0, 0, 0, 0.08);--vscode-notebook-cellInsertionIndicator: rgba(0, 0, 0, 0);--vscode-notebookScrollbarSlider-background: rgba(100, 100, 100, 0.4);--vscode-notebookScrollbarSlider-hoverBackground: rgba(100, 100, 100, 0.7);--vscode-notebookScrollbarSlider-activeBackground: rgba(0, 0, 0, 0.6);--vscode-notebook-symbolHighlightBackground: rgba(253, 255, 0, 0.2);--vscode-notebook-cellEditorBackground: #ffffff;--vscode-notebook-editorBackground: #ffffff;--vscode-inlineChat-foreground: #31353a;--vscode-inlineChat-background: #f3f3f3;--vscode-inlineChat-border: #c8c8c8;--vscode-inlineChat-shadow: rgba(0, 0, 0, 0.08);--vscode-inlineChatInput-border: #c8c8c8;--vscode-inlineChatInput-focusBorder: rgba(0, 0, 0, 0);--vscode-inlineChatInput-placeholderForeground: #5b6066;--vscode-inlineChatInput-background: rgba(86, 99, 119, 0.07);--vscode-inlineChatDiff-inserted: rgba(64, 176, 139, 0.09);--vscode-editorOverviewRuler-inlineChatInserted: rgba(64, 176, 139, 0.14);--vscode-editorMinimap-inlineChatInserted: rgba(64, 176, 139, 0.14);--vscode-inlineChatDiff-removed: rgba(232, 70, 58, 0.08);--vscode-editorOverviewRuler-inlineChatRemoved: rgba(232, 70, 58, 0.13);--vscode-chat-requestBorder: rgba(0, 0, 0, 0.1);--vscode-chat-requestBackground: rgba(255, 255, 255, 0.62);--vscode-chat-slashCommandBackground: rgba(173, 206, 255, 0.48);--vscode-chat-slashCommandForeground: #26569e;--vscode-chat-avatarBackground: #f2f2f2;--vscode-chat-avatarForeground: #31353a;--vscode-chat-editedFileForeground: #895503;--vscode-chat-requestCodeBorder: rgba(14, 99, 156, 0.25);--vscode-chat-requestBubbleBackground: rgba(47, 116, 255, 0.05);--vscode-chat-requestBubbleHoverBackground: rgba(47, 116, 255, 0.11);--vscode-chat-checkpointSeparator: #a9a9a9;--vscode-chat-linesAddedForeground: #107c10;--vscode-chat-linesRemovedForeground: #bc2f32;--vscode-extensionIcon-starForeground: #df6100;--vscode-extensionIcon-preReleaseForeground: #1d9271;--vscode-extensionIcon-sponsorForeground: #b51e78;--vscode-extensionIcon-privateForeground: rgba(0, 0, 0, 0.38);--vscode-debugExceptionWidget-border: #a31515;--vscode-debugExceptionWidget-background: #f1dfde;--vscode-editor-inlineValuesForeground: rgba(0, 0, 0, 0.5);--vscode-editor-inlineValuesBackground: rgba(255, 200, 0, 0.2);--vscode-debugIcon-breakpointForeground: #cc4b53;--vscode-debugIcon-breakpointDisabledForeground: #848484;--vscode-debugIcon-breakpointUnverifiedForeground: #848484;--vscode-debugIcon-breakpointCurrentStackframeForeground: #be8700;--vscode-debugIcon-breakpointStackframeForeground: #89d185;--vscode-editor-stackFrameHighlightBackground: rgba(255, 255, 102, 0.45);--vscode-editor-focusedStackFrameHighlightBackground: rgba(206, 231, 206, 0.45);--vscode-multiDiffEditor-headerBackground: #f8f8f9;--vscode-multiDiffEditor-background: #ffffff;--vscode-multiDiffEditor-border: #cccccc;--vscode-minimap-chatEditHighlight: rgba(255, 255, 255, 0.6);--vscode-chatManagement-sashBorder: rgba(128, 128, 128, 0.35);--vscode-gauge-foreground: #007acc;--vscode-gauge-background: rgba(0, 122, 204, 0.3);--vscode-gauge-warningForeground: #b89500;--vscode-gauge-warningBackground: rgba(184, 149, 0, 0.3);--vscode-gauge-errorForeground: #e8463a;--vscode-gauge-errorBackground: rgba(232, 70, 58, 0.3);--vscode-interactive-activeCodeBorder: #007acc;--vscode-interactive-inactiveCodeBorder: rgba(86, 99, 119, 0.11);--vscode-testing-iconFailed: #f14c4c;--vscode-testing-iconErrored: #f14c4c;--vscode-testing-iconPassed: #73c991;--vscode-testing-runAction: #73c991;--vscode-testing-iconQueued: #cca700;--vscode-testing-iconUnset: #848484;--vscode-testing-iconSkipped: #848484;--vscode-testing-peekBorder: #e51400;--vscode-testing-messagePeekBorder: #0063d3;--vscode-testing-peekHeaderBackground: rgba(229, 20, 0, 0.1);--vscode-testing-messagePeekHeaderBackground: rgba(0, 99, 211, 0.1);--vscode-testing-coveredBackground: rgba(64, 176, 139, 0.18);--vscode-testing-coveredBorder: rgba(64, 176, 139, 0.14);--vscode-testing-coveredGutterBackground: rgba(64, 176, 139, 0.11);--vscode-testing-uncoveredBranchBackground: #f7c3bf;--vscode-testing-uncoveredBackground: rgba(232, 70, 58, 0.16);--vscode-testing-uncoveredBorder: rgba(232, 70, 58, 0.12);--vscode-testing-uncoveredGutterBackground: rgba(232, 70, 58, 0.24);--vscode-testing-coverCountBadgeBackground: #c4c4c4;--vscode-testing-coverCountBadgeForeground: #333333;--vscode-testing-message.error.badgeBackground: #e51400;--vscode-testing-message.error.badgeBorder: #e51400;--vscode-testing-message.error.badgeForeground: #ffffff;--vscode-testing-message.info.decorationForeground: rgba(49, 53, 58, 0.5);--vscode-testing-iconErrored.retired: rgba(241, 76, 76, 0.7);--vscode-testing-iconFailed.retired: rgba(241, 76, 76, 0.7);--vscode-testing-iconPassed.retired: rgba(115, 201, 145, 0.7);--vscode-testing-iconQueued.retired: rgba(204, 167, 0, 0.7);--vscode-testing-iconUnset.retired: rgba(132, 132, 132, 0.7);--vscode-testing-iconSkipped.retired: rgba(132, 132, 132, 0.7);--vscode-searchEditor-textInputBorder: #cecece;--vscode-statusBar-debuggingBackground: #cc6633;--vscode-statusBar-debuggingForeground: #ffffff;--vscode-commandCenter-debuggingBackground: rgba(204, 102, 51, 0.26);--vscode-debugTokenExpression-name: #9b46b0;--vscode-debugTokenExpression-type: #4a90e2;--vscode-debugTokenExpression-value: rgba(108, 108, 108, 0.8);--vscode-debugTokenExpression-string: #a31515;--vscode-debugTokenExpression-boolean: #0000ff;--vscode-debugTokenExpression-number: #098658;--vscode-debugTokenExpression-error: #e51400;--vscode-debugView-exceptionLabelForeground: #ffffff;--vscode-debugView-exceptionLabelBackground: #a31515;--vscode-debugView-stateLabelForeground: #31353a;--vscode-debugView-stateLabelBackground: rgba(136, 136, 136, 0.27);--vscode-debugView-valueChangedHighlight: #569cd6;--vscode-debugConsole-infoForeground: #0063d3;--vscode-debugConsole-warningForeground: #bf8803;--vscode-debugConsole-errorForeground: #cc4b53;--vscode-debugConsole-sourceForeground: #31353a;--vscode-debugConsoleInputIcon-foreground: #31353a;--vscode-debugIcon-pauseForeground: #007acc;--vscode-debugIcon-stopForeground: #a1260d;--vscode-debugIcon-disconnectForeground: #a1260d;--vscode-debugIcon-restartForeground: #388a34;--vscode-debugIcon-stepOverForeground: #007acc;--vscode-debugIcon-stepIntoForeground: #007acc;--vscode-debugIcon-stepOutForeground: #007acc;--vscode-debugIcon-continueForeground: #007acc;--vscode-debugIcon-stepBackForeground: #007acc;--vscode-mergeEditor-change.background: rgba(155, 185, 85, 0.2);--vscode-mergeEditor-change.word.background: rgba(156, 204, 44, 0.4);--vscode-mergeEditor-changeBase.background: #ffcccc;--vscode-mergeEditor-changeBase.word.background: #ffa3a3;--vscode-mergeEditor-conflict.unhandledUnfocused.border: #ffa600;--vscode-mergeEditor-conflict.unhandledFocused.border: #ffa600;--vscode-mergeEditor-conflict.handledUnfocused.border: rgba(134, 134, 134, 0.29);--vscode-mergeEditor-conflict.handledFocused.border: rgba(193, 193, 193, 0.8);--vscode-mergeEditor-conflict.handled.minimapOverViewRuler: rgba(173, 172, 168, 0.93);--vscode-mergeEditor-conflict.unhandled.minimapOverViewRuler: #fcba03;--vscode-mergeEditor-conflictingLines.background: rgba(255, 234, 0, 0.28);--vscode-mergeEditor-conflict.input1.background: rgba(64, 200, 174, 0.2);--vscode-mergeEditor-conflict.input2.background: rgba(64, 166, 255, 0.2);--vscode-terminal-ansiBlack: #000000;--vscode-terminal-ansiRed: #cd3131;--vscode-terminal-ansiGreen: #107c10;--vscode-terminal-ansiYellow: #949800;--vscode-terminal-ansiBlue: #0451a5;--vscode-terminal-ansiMagenta: #bc05bc;--vscode-terminal-ansiCyan: #0598bc;--vscode-terminal-ansiWhite: #555555;--vscode-terminal-ansiBrightBlack: #666666;--vscode-terminal-ansiBrightRed: #cd3131;--vscode-terminal-ansiBrightGreen: #14ce14;--vscode-terminal-ansiBrightYellow: #b5ba00;--vscode-terminal-ansiBrightBlue: #0451a5;--vscode-terminal-ansiBrightMagenta: #bc05bc;--vscode-terminal-ansiBrightCyan: #0598bc;--vscode-terminal-ansiBrightWhite: #a5a5a5;--vscode-simpleFindWidget-sashBorder: #c8c8c8;--vscode-terminalStickyScrollHover-background: #f0f0f0;--vscode-terminalCommandGuide-foreground: rgba(86, 99, 119, 0.11);--vscode-terminalSymbolIcon-flagForeground: #d67e00;--vscode-terminalSymbolIcon-aliasForeground: #b180d7;--vscode-terminalSymbolIcon-optionValueForeground: #007acc;--vscode-terminalSymbolIcon-methodForeground: #b180d7;--vscode-terminalSymbolIcon-argumentForeground: #007acc;--vscode-terminalSymbolIcon-optionForeground: #d67e00;--vscode-terminalSymbolIcon-fileForeground: #31353a;--vscode-terminalSymbolIcon-folderForeground: #31353a;--vscode-terminalSymbolIcon-commitForeground: #31353a;--vscode-terminalSymbolIcon-branchForeground: #31353a;--vscode-terminalSymbolIcon-tagForeground: #31353a;--vscode-terminalSymbolIcon-stashForeground: #31353a;--vscode-terminalSymbolIcon-remoteForeground: #31353a;--vscode-terminalSymbolIcon-pullRequestForeground: #31353a;--vscode-terminalSymbolIcon-pullRequestDoneForeground: #31353a;--vscode-terminalSymbolIcon-symbolicLinkFileForeground: #31353a;--vscode-terminalSymbolIcon-symbolicLinkFolderForeground: #31353a;--vscode-terminalSymbolIcon-symbolText: #31353a;--vscode-markdownAlert-note.foreground: #0063d3;--vscode-markdownAlert-tip.foreground: #388a34;--vscode-markdownAlert-important.foreground: #652d90;--vscode-markdownAlert-warning.foreground: #bf8803;--vscode-markdownAlert-caution.foreground: #e51400;--vscode-walkThrough-embeddedEditorBackground: #f4f4f4;--vscode-profiles-sashBorder: rgba(128, 128, 128, 0.35);--vscode-icube-inlineChat.regionHighlight: rgba(225, 225, 225, 0.2);--vscode-icube-inlineChatDiff.inserted: rgba(64, 176, 139, 0.09);--vscode-icube-inlineChatDiff.removed: rgba(232, 70, 58, 0.08);--vscode-icube-simpleInlineChat.regionHighlight: rgba(225, 225, 225, 0.2);--vscode-icube-simpleInlineChatDiff.inserted: rgba(64, 176, 139, 0.12);--vscode-icube-simpleInlineChatDiff.removed: rgba(232, 70, 58, 0.12);--vscode-gitDecoration-addedResourceForeground: #587c0c;--vscode-gitDecoration-modifiedResourceForeground: #f0a50f;--vscode-gitDecoration-deletedResourceForeground: #ad0707;--vscode-gitDecoration-renamedResourceForeground: #00aa62;--vscode-gitDecoration-untrackedResourceForeground: #00aa62;--vscode-gitDecoration-ignoredResourceForeground: #8e8e90;--vscode-gitDecoration-stageModifiedResourceForeground: #f0a50f;--vscode-gitDecoration-stageDeletedResourceForeground: #ad0707;--vscode-gitDecoration-conflictingResourceForeground: #ad0707;--vscode-gitDecoration-submoduleResourceForeground: #1258a7;--vscode-git-blame.editorDecorationForeground: #969696;}</style><style id="solo-lite-theme-variables">:root {
+  --workspace-gap-width: 4px;
+  --header-height: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+  --radius-2: 2px;
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-16: 16px;
+  --radius-20: 20px;
+  --radius-24: 24px;
+  --radius-32: 32px;
+  --radius-radius-2xs-4: 4px;
+  --radius-radius-xs-6: 6px;
+  --radius-radius-sm-8: 8px;
+  --radius-radius-md-12: 12px;
+  --radius-radius-lg-16: 16px;
+  --radius-radius-xl-20: 20px;
+  --radius-radius-2xl-24: 24px;
+  --radius-radius-3xl-32: 32px;
+  --radius-radius-full: 9999px;
+
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+  --spacing-xxl: 32px;
+
+  --spacer-0: 0px;
+  --spacer-2: 2px;
+  --spacer-4: 4px;
+  --spacer-6: 6px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --spacer-32: 32px;
+  --spacer-40: 40px;
+  --spacer-48: 48px;
+  --spacer-64: 64px;
+
+  --font-size-xs: 10px;
+  --font-size-sm: 11px;
+  --font-size-md: 12px;
+  --font-size-regular: 13px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-size-xxl: 24px;
+
+  --font-family-default:
+    'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'PingFang SC', 'Microsoft YaHei',
+    'Hiragino Sans GB', Roboto, sans-serif;
+  --font-family-heading:
+    'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'PingFang SC', 'Microsoft YaHei',
+    'Hiragino Sans GB', Roboto, sans-serif;
+  --font-family-mono: 'JetBrains Mono', 'SF Mono', Monaco, Consolas, monospace;
+  --font-weight-default: 400;
+  --font-weight-code: 450;
+  --font-weight-medium: 500;
+  --font-weight-strong: 600;
+
+  --chat-body-md: 13px/20px var(--font-family-default);
+  --chat-body-md-strong: 500 13px/20px var(--font-family-default);
+  --chat-body-base: 14px/22px var(--font-family-default);
+  --chat-body-base-strong: 500 14px/22px var(--font-family-default);
+  --chat-spacer-2xs: 2px;
+  --chat-spacer-xs: 4px;
+  --chat-spacer-sm: 8px;
+  --chat-spacer-md: 12px;
+  --chat-spacer-lg: 16px;
+  --chat-spacer-xl: 20px;
+  --chat-radius-xs: 4px;
+  --chat-radius-sm: 8px;
+  --chat-radius-md: 12px;
+  --chat-radius-lg: 16px;
+  --chat-list-item-height: 28px;
+
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.2s ease;
+  --transition-slow: 0.3s ease;
+
+  /* ===== Z-Index Layer System ===== */
+  --z-base: 0;
+  --z-above: 1;
+  --z-above-2: 2;
+
+  --z-sticky: 10;
+  --z-local-overlay: 100;
+
+  --z-dropdown: 1000;
+  --z-popover: 1010;
+
+  --z-modal-backdrop: 1090;
+  --z-modal: 1100;
+  --z-drawer: 1120;
+  --z-confirm: 1150;
+
+  --z-notification: 1200;
+  --z-tooltip: 1300;
+
+  --z-fullscreen: 1400;
+
+  /* 仅限基础设施 / 调试工具，业务组件禁止直接使用 */
+  --z-max: 9999;
+}
+
+[data-theme='light'], .vs.solo-lite {
+  --shadow-elevation-50: 0 1px 2px -1px rgba(24, 24, 24, 0.08);
+  --shadow-elevation-100: 0 3px 9px 0 rgba(24, 24, 24, 0.06);
+  --shadow-elevation-100-float: 0 -3px 9px 0 rgba(24, 24, 24, 0.06);
+  --shadow-elevation-200: 0 6px 24px -1px rgba(24, 24, 24, 0.06);
+  --shadow-elevation-200-reverse: 0 -6px 24px -1px rgba(24, 24, 24, 0.06);
+  --shadow-elevation-300: 0 2px 8px -1px rgba(24, 24, 24, 0.02), 0 10px 24px -1px rgba(24, 24, 24, 0.06);
+
+  --shadow-elevation-100-tooltip: var(--shadow-elevation-100);
+  --shadow-elevation-200-menu-panel: var(--shadow-elevation-200);
+  --shadow-elevation-300-modal-panel: var(--shadow-elevation-300);
+
+  /* 输入框阴影颜色 */
+  --shadow-chat-input: 0 3px 8px 0 rgba(24, 24, 24, 0.04), 0 6px 24px -1px rgba(24, 24, 24, 0.06);
+  --shadow-chat-input-focused: 0 4px 12px 0 rgba(24, 24, 24, 0.04), 0 6px 32px -1px rgba(24, 24, 24, 0.06);
+
+  --bg-bg-base-default: #ffffff;
+  --bg-bg-base-secondary: #f5f5f5;
+  --bg-bg-base-tertiary: #e5e5e5;
+  --bg-bg-menu: #ffffff;
+  --bg-bg-tooltip: #fafafa;
+  --bg-bg-input: #ffffff;
+  --bg-bg-overlay-l1: rgba(115, 115, 115, 0.08);
+  --bg-bg-overlay-l2: rgba(115, 115, 115, 0.12);
+  --bg-bg-overlay-l3: rgba(115, 115, 115, 0.16);
+  --bg-bg-overlay-l4: rgba(115, 115, 115, 0.20);
+  --bg-bg-white: #ffffff;
+  --bg-bg-brand: #4b3fe3;
+  --bg-bg-brand-hover: #6a6fff;
+  --bg-bg-brand-active: #3f31c6;
+  --bg-bg-brand-disabled: rgba(75, 63, 227, 0.22);
+  --bg-bg-brand-popup: rgba(170, 183, 255, 0.36);
+  /* brand-sub 兼容（品牌色已统一，sub 映射为主品牌色） */
+  --bg-bg-brand-sub: var(--bg-bg-brand);
+  --bg-bg-brand-hover-sub: var(--bg-bg-brand-hover);
+  --bg-bg-brand-disabled-sub: var(--bg-bg-brand-disabled);
+  --bg-bg-brand-popup-sub: var(--bg-bg-brand-popup);
+  --bg-bg-invert: #262626;
+  --bg-bg-invert-hover: #404040;
+  --bg-bg-invert-active: #171717;
+  --bg-bg-invert-disabled: rgba(115, 115, 115, 0.20);
+  --bg-bg-marketplace-banner-overlay-start: rgba(82, 130, 193, 0);
+  --bg-bg-marketplace-banner-overlay-end: rgba(82, 130, 193, 0.8);
+  --bg-bg-marketplace-banner-control: rgba(0, 0, 0, 0.25);
+  --bg-bg-card: #fafafa;
+  --bg-bg-card-hover: #ffffff;
+  --bg-bg-marketplace-banner-plugin-tag: #e5f3ff;
+  --bg-bg-marketplace-banner-preview-mask-start: rgba(255, 255, 255, 0.9);
+  --bg-bg-marketplace-banner-preview-mask-end: rgba(255, 255, 255, 0.54);
+  --shadow-marketplace-banner-preview-card: 0px 6px 12px -1px rgba(0, 0, 0, 0.18), 0px 10px 24px -1px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-card-small: 0px 2.8023247718811035px 5.604649543762207px -0.4670540988445282px rgba(0, 0, 0, 0.18), 0px 4.670541763305664px 11.209299087524414px -0.4670540988445282px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-card-large: 0px 4.55377721786499px 9.10755443572998px -0.758962869644165px rgba(0, 0, 0, 0.18), 0px 7.589629650115967px 18.21510887145996px -0.758962869644165px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-input: 0px 0px 24px -1px rgba(24, 24, 24, 0.06), 0px -12px 8px -1px rgba(24, 24, 24, 0.02);
+  --chat-bg-card: var(--bg-bg-card);
+  --chat-bg-card-hover: var(--bg-bg-base-default);
+  --special-bgtabsoverlay: rgba(255, 255, 255, 0.12);
+  --special-tabsoverlay: rgba(193, 195, 205, 0.12);
+  --text-text-default: #171717;
+  --text-text-default-hover: #262626;
+  --text-text-default-active: #262626;
+  --text-text-secondary: #404040;
+  --text-text-secondary-hover: #171717;
+  --text-text-secondary-active: #171717;
+  --text-text-tertiary: #737373;
+  --text-text-disabled: #a1a1a1;
+  --text-text-brand: #4b3fe3;
+  --text-text-brand-hover: #6a6fff;
+  --text-text-brand-sub: var(--text-text-brand);
+  --text-text-brand-hover-sub: var(--text-text-brand-hover);
+  --text-text-onbrand: #171717;
+  --text-text-onaccent: #ffffff;
+  --text-text-marketplace-banner-on-light: #0a0a0a;
+  --text-text-marketplace-banner-plugin-tag: #054c8f;
+  --icon-icon-default: #262626;
+  --icon-icon-default-hover: #171717;
+  --icon-icon-default-active: #171717;
+  --icon-icon-secondary: #404040;
+  --icon-icon-secondary-hover: #262626;
+  --icon-icon-secondary-active: #262626;
+  --icon-icon-tertiary: #737373;
+  --icon-icon-disabled: #a1a1a1;
+  --icon-icon-brand: #4b3fe3;
+  --icon-icon-brand-hover: #6a6fff;
+  --icon-icon-brand-sub: var(--icon-icon-brand);
+  --icon-icon-brand-hover-sub: var(--icon-icon-brand-hover);
+  --icon-icon-onbrand: #0a0a0a;
+  --icon-icon-onaccent: #ffffff;
+  --icon-icon-white: #ffffff;
+  --border-border-neutral-l1: rgba(115, 115, 115, 0.12);
+  --border-border-neutral-l2: rgba(115, 115, 115, 0.18);
+  --border-border-neutral-l3: rgba(115, 115, 115, 0.36);
+  --border-border-brand: #4b3fe3;
+  --border-border-brand-sub: var(--border-border-brand);
+  --border-border-contrast: #000000;
+  --status-primary-default: #2f74ff;
+  --status-primary-hover: #4c88ff;
+  --status-primary-active: #1759dd;
+  --status-primary-surface-l1: rgba(47, 116, 255, 0.12);
+  --status-primary-surface-l2: rgba(47, 116, 255, 0.18);
+  --status-primary-surface-l3: rgba(47, 116, 255, 0.36);
+  --status-success-default: #15a877;
+  --status-success-hover: #2fb287;
+  --status-success-active: #1e8b56;
+  --status-success-surface-l1: rgba(64, 176, 139, 0.12);
+  --status-success-surface-l2: rgba(64, 176, 139, 0.18);
+  --status-success-surface-l3: rgba(64, 176, 139, 0.36);
+  --status-alert-default: #fea900;
+  --status-alert-hover: #ffb700;
+  --status-alert-active: #e59100;
+  --status-alert-surface-l1: rgba(254, 169, 0, 0.14);
+  --status-alert-surface-l2: rgba(254, 169, 0, 0.20);
+  --status-alert-surface-l3: rgba(254, 169, 0, 0.36);
+  --status-warning-default: #e27900;
+  --status-warning-hover: #f39a35;
+  --status-warning-active: #c46f11;
+  --status-warning-surface-l1: rgba(226, 121, 0, 0.12);
+  --status-warning-surface-l2: rgba(226, 121, 0, 0.16);
+  --status-warning-surface-l3: rgba(226, 121, 0, 0.36);
+  --status-error-default: #e8463a;
+  --status-error-hover: #ea574c;
+  --status-error-active: #c9382f;
+  --status-error-surface-l1: rgba(232, 70, 58, 0.12);
+  --status-error-surface-l2: rgba(232, 70, 58, 0.16);
+  --status-error-surface-l3: rgba(232, 70, 58, 0.36);
+  --accent-accent-teal: #00b983;
+  --accent-accent-coral: #ff6b45;
+  --accent-accent-amber: #f2a90c;
+  --accent-accent-lime: #5fc000;
+  --accent-accent-cyan: #00b6f5;
+  --accent-accent-blue: #3f85ff;
+  --accent-accent-magenta: #f53cff;
+  --accent-accent-violet: #9570ff;
+  --accent-accent-slate: #747e94;
+  --code-code-text: #17181a;
+  --code-code-doc: #8393a3;
+  --code-code-link: #2f74ff;
+  --code-code-number: #e54595;
+  --code-code-action: #5f36b2;
+  --code-code-instruction: #b15ef2;
+  --code-code-function: #ff5d4d;
+  --code-code-constant: #175ce6;
+  --code-code-parameter: #4da621;
+  --code-code-attribute: #c99100;
+  --code-code-tag: #e24864;
+  --code-code-terminal: #17181a;
+  --code-code-contrast: #17181a;
+  --code-code-editor: #17181a;
+  --special-white: #ffffff;
+  --special-black: #000000;
+  --viz-viz-series-amber: #edaa45;
+  --viz-viz-series-coral: #f87454;
+  --viz-viz-series-indigo: #b6a3ff;
+  --viz-viz-series-lime: #a6ea39;
+  --viz-viz-series-magenta: #fb9dd7;
+  --viz-viz-series-mint: #1dc981;
+  --viz-viz-series-sky: #22a5f7;
+  --viz-viz-series-slate: #859ead;
+  --viz-viz-series-teal: #59e8e8;
+  --viz-viz-series-violet: #b655fc;
+  --viz-viz-ui-bg-chart: #ffffff;
+  --viz-viz-ui-bg-tooltip: #fafafa;
+  --viz-viz-ui-chart-axis: rgba(115, 115, 115, 0.18);
+  --viz-viz-ui-chart-subtitle: #404040;
+  --viz-viz-ui-chart-tick: #404040;
+  --viz-viz-ui-chart-title: #171717;
+  --viz-viz-ui-legend-label: #404040;
+  --viz-viz-ui-legend-value: #171717;
+  --brand-blue-100: #e5f3ff;
+  --brand-blue-200: #cce6ff;
+  --brand-blue-300: #b2daff;
+  --brand-blue-400: #99ceff;
+  --brand-blue-500: #80c1ff;
+  --brand-blue-600: #64b4ff;
+  --brand-blue-700: #3792e6;
+  --brand-blue-800: #1071cb;
+  --brand-blue-900: #054c8f;
+  --brand-blue-1000: #00284d;
+  --brand-blue-grey-100: #f1eff4;
+  --brand-blue-grey-200: #e0e1e6;
+  --brand-blue-grey-300: #cfd3d8;
+  --brand-blue-grey-400: #bfc5ca;
+  --brand-blue-grey-500: #b0b5ba;
+  --brand-blue-grey-600: #a0a6ab;
+  --brand-blue-grey-700: #80898e;
+  --brand-blue-grey-800: #5e696e;
+  --brand-blue-grey-900: #404a4f;
+  --brand-blue-grey-1000: #21262b;
+  --brand-green-grey-100: #f1f4f4;
+  --brand-green-grey-200: #e0e6e6;
+  --brand-green-grey-300: #cfd8d8;
+  --brand-green-grey-400: #bfcaca;
+  --brand-green-grey-500: #b0baba;
+  --brand-green-grey-600: #a0abab;
+  --brand-green-grey-700: #808e8e;
+  --brand-green-grey-800: #5e6e6e;
+  --brand-green-grey-900: #404f4f;
+  --brand-green-grey-1000: #212b2b;
+  --brand-purple-100: #e8e5ff;
+  --brand-purple-200: #d2ccff;
+  --brand-purple-300: #bbb2ff;
+  --brand-purple-400: #a599ff;
+  --brand-purple-500: #8e80ff;
+  --brand-purple-600: #7864ff;
+  --brand-purple-700: #4c37e6;
+  --brand-purple-800: #2610cb;
+  --brand-purple-900: #15058f;
+  --brand-purple-1000: #09004d;
+  --brand-red-100: #ffe5e5;
+  --brand-red-200: #ffcccc;
+  --brand-red-300: #ffb2b2;
+  --brand-red-400: #ff9999;
+  --brand-red-500: #ff8080;
+  --brand-red-600: #ff6464;
+  --brand-red-700: #e63737;
+  --brand-red-800: #cb1010;
+  --brand-red-900: #8f0505;
+  --brand-red-1000: #4d0000;
+  --brand-yellow-100: #fff6e5;
+  --brand-yellow-200: #ffeccc;
+  --brand-yellow-300: #ffe3b2;
+  --brand-yellow-400: #ffda99;
+  --brand-yellow-500: #ffd080;
+  --brand-yellow-600: #ffc864;
+  --brand-yellow-700: #e6a637;
+  --brand-yellow-800: #cb8710;
+  --brand-yellow-900: #8f5c05;
+  --brand-yellow-1000: #4d3000;
+  --brand-blue-grey-100: #f1eff4;
+  --brand-blue-grey-200: #e0e1e6;
+  --brand-blue-grey-300: #cfd3d8;
+  --brand-blue-grey-400: #bfc5ca;
+  --brand-blue-grey-500: #b0b5ba;
+  --brand-blue-grey-600: #a0a6ab;
+  --brand-blue-grey-700: #80898e;
+  --brand-blue-grey-800: #5e696e;
+  --brand-blue-grey-900: #404a4f;
+  --brand-blue-grey-1000: #21262b;
+  --brand-green-grey-100: #f1f4f4;
+  --brand-green-grey-200: #e0e6e6;
+  --brand-green-grey-300: #cfd8d8;
+  --brand-green-grey-400: #bfcaca;
+  --brand-green-grey-500: #b0baba;
+  --brand-green-grey-600: #a0abab;
+  --brand-green-grey-700: #808e8e;
+  --brand-green-grey-800: #5e6e6e;
+  --brand-green-grey-900: #404f4f;
+  --brand-green-grey-1000: #212b2b;
+  --brand-neutral-grey-100: #f2f2f2;
+  --brand-neutral-grey-200: #e3e3e3;
+  --brand-neutral-grey-300: #d6d6d6;
+  --brand-neutral-grey-400: #c7c7c7;
+  --brand-neutral-grey-500: #bababa;
+  --brand-neutral-grey-600: #ababab;
+  --brand-neutral-grey-700: #8a8a8a;
+  --brand-neutral-grey-800: #686868;
+  --brand-neutral-grey-900: #474747;
+  --brand-neutral-grey-1000: #262626;
+  --brand-brand-50: #f2f7ff;
+  --brand-brand-100: #e5eaff;
+  --brand-brand-200: #cfd8ff;
+  --brand-brand-300: #aab7ff;
+  --brand-brand-400: #8894ff;
+  --brand-brand-500: #6a6fff;
+  --brand-brand-600: #4b3fe3;
+  --brand-brand-700: #3f31c6;
+  --brand-brand-800: #2c2290;
+  --brand-brand-900: #1a1759;
+  --brand-brand-950: #010109;
+  --brand-brand-grey-50: #fafafa;
+  --brand-brand-grey-100: #f5f5f5;
+  --brand-brand-grey-200: #e5e5e5;
+  --brand-brand-grey-300: #d4d4d4;
+  --brand-brand-grey-400: #a1a1a1;
+  --brand-brand-grey-500: #737373;
+  --brand-brand-grey-600: #525252;
+  --brand-brand-grey-700: #404040;
+  --brand-brand-grey-800: #262626;
+  --brand-brand-grey-900: #171717;
+  --brand-brand-grey-950: #0a0a0a;
+  --brand-brand-grey-50: #fafafa;
+  --brand-brand-grey-100: #f5f5f5;
+  --brand-brand-grey-200: #e5e5e5;
+  --brand-brand-grey-300: #d4d4d4;
+  --brand-brand-grey-400: #a1a1a1;
+  --brand-brand-grey-500: #737373;
+  --brand-brand-grey-600: #525252;
+  --brand-brand-grey-700: #404040;
+  --brand-brand-grey-800: #262626;
+  --brand-brand-grey-900: #171717;
+  --brand-brand-grey-950: #0a0a0a;
+
+  --body-body-xs: 10px/1.5 var(--font-family-default);
+  --body-body-sm: 11px/1.5 var(--font-family-default);
+  --body-body-sm-strong: 600 11px/1.5 var(--font-family-default);
+  --body-body-md: 12px/1.5 var(--font-family-default);
+  --body-body-md-strong: 600 12px/1.5 var(--font-family-default);
+  --body-body-base: 14px/1.5 var(--font-family-default);
+  --body-body-base-strong: 600 14px/1.5 var(--font-family-default);
+  --heading-heading-3xs: 600 10px/1.4 var(--font-family-heading);
+  --heading-heading-2xs: 600 11px/1.4 var(--font-family-heading);
+  --heading-heading-xs: 600 12px/1.4 var(--font-family-heading);
+  --heading-heading-sm: 600 13px/1.4 var(--font-family-heading);
+  --heading-heading-md: 600 14px/1.4 var(--font-family-heading);
+  --heading-heading-lg: 600 16px/1.4 var(--font-family-heading);
+  --heading-heading-xl: 600 20px/1.4 var(--font-family-heading);
+  --heading-heading-2xl: 600 24px/1.4 var(--font-family-heading);
+  --heading-heading-3xl: 600 32px/1.4 var(--font-family-heading);
+
+  --bg-bg-overlay-l0: rgba(86, 99, 119, 0.03);
+  --bg-primary-item: rgba(86, 99, 119, 0.15);
+  --bg-primary-item-hover: rgba(86, 99, 119, 0.22);
+  --border-primary-item: rgba(77, 107, 153, 0.09);
+  --border-primary-item-hover: rgba(77, 107, 153, 0.15);
+  --bg-bg-menu-old: #f8f9fa;
+  /* 首页输入框边框颜色（纯色，用于内凹圆弧等需要精确边框的场景） */
+  --homepage-input-border-color: #dfe3eb;
+
+  --welcome-logo-bg: var(--bg-bg-brand, #0fdc78);
+  --welcome-logo-color: #000000;
+
+  --user-message-bg-solid: #E3F8ED;
+  --user-message-bg-solid-transparent: rgba(227, 248, 237, 0);
+  --user-message-bg-solid-sub: #E9E6FF;
+  --user-message-bg-solid-sub-transparent: rgba(233, 230, 255, 0);
+  --sheet-text-color: #000000;
+  --slash-mention-bg: rgba(63, 133, 255, 0.15);
+  --builtin-slash-mention-bg: rgba(149, 112, 255, 0.15);
+
+  --gradient-golden: linear-gradient(180deg, #c0a115 0%, #dfbd27 100%);
+  --special-bggoldoverlay: rgba(210, 181, 19, 0.12);
+
+  --bg-bg-brand-old: #0fdc78;
+  --gradient-brand: linear-gradient(90deg, #0ac27b 0%, #0ecd70 36%, #06c179 72%, #63c5b1 100%);
+  --text-text-preformat-foreground: #a31515;
+}
+
+[data-theme='dark'], .vs-dark.solo-lite {
+  --shadow-elevation-50: 0 1px 2px -1px rgba(0, 0, 0, 0.45);
+  --shadow-elevation-100: 0 3px 9px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevation-100-float: 0 -3px 9px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevation-200: 0 6px 24px -1px rgba(0, 0, 0, 0.25);
+  --shadow-elevation-200-reverse: 0 -6px 24px -1px rgba(0, 0, 0, 0.25);
+  --shadow-elevation-300: 0 2px 8px -1px rgba(0, 0, 0, 0.18), 0 10px 24px -1px rgba(0, 0, 0, 0.30);
+  --shadow-elevation-100-tooltip: var(--shadow-elevation-100);
+  --shadow-elevation-200-menu-panel: var(--shadow-elevation-200);
+  --shadow-elevation-300-modal-panel: var(--shadow-elevation-300);
+
+  /* 输入框阴影颜色 */
+  --shadow-chat-input: 0 3px 8px 0 rgba(24, 24, 24, 0.08), 0 6px 24px -1px rgba(24, 24, 24, 0.12);
+  --shadow-chat-input-focused: 0 4px 12px 0 rgba(24, 24, 24, 0.08), 0 6px 32px -1px rgba(24, 24, 24, 0.12);
+
+  --bg-bg-base-default: #171717;
+  --bg-bg-base-secondary: #262626;
+  --bg-bg-base-tertiary: #404040;
+  --bg-bg-menu: #171717;
+  --bg-bg-tooltip: #171717;
+  --bg-bg-input: #171717;
+  --bg-bg-overlay-l1: rgba(212, 212, 212, 0.04);
+  --bg-bg-overlay-l2: rgba(212, 212, 212, 0.06);
+  --bg-bg-overlay-l3: rgba(212, 212, 212, 0.08);
+  --bg-bg-overlay-l4: rgba(212, 212, 212, 0.12);
+  --bg-bg-white: #ffffff;
+  --bg-bg-brand: #4b3fe3;
+  --bg-bg-brand-hover: #6a6fff;
+  --bg-bg-brand-active: #3f31c6;
+  --bg-bg-brand-disabled: rgba(75, 63, 227, 0.35);
+  --bg-bg-brand-popup: rgba(106, 111, 255, 0.15);
+  --bg-bg-brand-sub: var(--bg-bg-brand);
+  --bg-bg-brand-hover-sub: var(--bg-bg-brand-hover);
+  --bg-bg-brand-disabled-sub: var(--bg-bg-brand-disabled);
+  --bg-bg-brand-popup-sub: var(--bg-bg-brand-popup);
+  --bg-bg-invert: #e5e5e5;
+  --bg-bg-invert-hover: #f5f5f5;
+  --bg-bg-invert-active: #e5e5e5;
+  --bg-bg-invert-disabled: rgba(212, 212, 212, 0.06);
+  --bg-bg-marketplace-banner-overlay-start: rgba(82, 130, 193, 0);
+  --bg-bg-marketplace-banner-overlay-end: rgba(82, 130, 193, 0.8);
+  --bg-bg-marketplace-banner-control: rgba(0, 0, 0, 0.25);
+  --bg-bg-card: #202020;
+  --bg-bg-card-hover: #171717;
+  --bg-bg-marketplace-banner-plugin-tag: #e5f3ff;
+  --bg-bg-marketplace-banner-preview-mask-start: rgba(255, 255, 255, 0.9);
+  --bg-bg-marketplace-banner-preview-mask-end: rgba(255, 255, 255, 0.54);
+  --shadow-marketplace-banner-preview-card: 0px 6px 12px -1px rgba(0, 0, 0, 0.18), 0px 10px 24px -1px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-card-small: 0px 2.8023247718811035px 5.604649543762207px -0.4670540988445282px rgba(0, 0, 0, 0.18), 0px 4.670541763305664px 11.209299087524414px -0.4670540988445282px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-card-large: 0px 4.55377721786499px 9.10755443572998px -0.758962869644165px rgba(0, 0, 0, 0.18), 0px 7.589629650115967px 18.21510887145996px -0.758962869644165px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-input: 0px 0px 24px -1px rgba(24, 24, 24, 0.06), 0px -12px 8px -1px rgba(24, 24, 24, 0.02);
+  --chat-bg-card: #202020;
+  --chat-bg-card-hover: var(--bg-bg-base-default);
+  --special-bgtabsoverlay: rgba(0, 0, 0, 0.20);
+  --special-tabsoverlay: rgba(13, 14, 15, 0.18);
+  --text-text-default: #e5e5e5;
+  --text-text-default-hover: #fafafa;
+  --text-text-default-active: #fafafa;
+  --text-text-secondary: #a1a1a1;
+  --text-text-secondary-hover: #e5e5e5;
+  --text-text-secondary-active: #e5e5e5;
+  --text-text-tertiary: #737373;
+  --text-text-disabled: #525252;
+  --text-text-brand: #6a6fff;
+  --text-text-brand-hover: #4b3fe3;
+  --text-text-brand-sub: var(--text-text-brand);
+  --text-text-brand-hover-sub: var(--text-text-brand-hover);
+  --text-text-onbrand: #171717;
+  --text-text-onaccent: #171717;
+  --text-text-marketplace-banner-on-light: #0a0a0a;
+  --text-text-marketplace-banner-plugin-tag: #054c8f;
+  --icon-icon-default: #e5e5e5;
+  --icon-icon-default-hover: #fafafa;
+  --icon-icon-default-active: #fafafa;
+  --icon-icon-secondary: #a1a1a1;
+  --icon-icon-secondary-hover: #e5e5e5;
+  --icon-icon-secondary-active: #e5e5e5;
+  --icon-icon-tertiary: #737373;
+  --icon-icon-disabled: #525252;
+  --icon-icon-brand: #6a6fff;
+  --icon-icon-brand-hover: #4b3fe3;
+  --icon-icon-brand-sub: var(--icon-icon-brand);
+  --icon-icon-brand-hover-sub: var(--icon-icon-brand-hover);
+  --icon-icon-onbrand: #0a0a0a;
+  --icon-icon-onaccent: #0A0A0A;
+  --icon-icon-white: #ffffff;
+  --border-border-neutral-l1: rgba(229, 229, 229, 0.10);
+  --border-border-neutral-l2: rgba(229, 229, 229, 0.16);
+  --border-border-neutral-l3: rgba(229, 229, 229, 0.20);
+  --border-border-brand: #6a6fff;
+  --border-border-brand-sub: var(--border-border-brand);
+  --border-border-contrast: #ffffff;
+  --status-primary-default: #387bff;
+  --status-primary-hover: #4c88ff;
+  --status-primary-active: #1759dd;
+  --status-primary-surface-l1: rgba(53, 121, 255, 0.18);
+  --status-primary-surface-l2: rgba(53, 121, 255, 0.28);
+  --status-primary-surface-l3: rgba(53, 121, 255, 0.36);
+  --status-success-default: #33c192;
+  --status-success-hover: #5ed4ad;
+  --status-success-active: #27b082;
+  --status-success-surface-l1: rgba(0, 165, 110, 0.18);
+  --status-success-surface-l2: rgba(0, 165, 110, 0.28);
+  --status-success-surface-l3: rgba(0, 165, 110, 0.36);
+  --status-alert-default: #d29d00;
+  --status-alert-hover: #dfb949;
+  --status-alert-active: #ab8820;
+  --status-alert-surface-l1: rgba(210, 157, 0, 0.16);
+  --status-alert-surface-l2: rgba(210, 157, 0, 0.28);
+  --status-alert-surface-l3: rgba(210, 157, 0, 0.36);
+  --status-warning-default: #d27e24;
+  --status-warning-hover: #d78b28;
+  --status-warning-active: #b46510;
+  --status-warning-surface-l1: rgba(210, 126, 36, 0.16);
+  --status-warning-surface-l2: rgba(210, 126, 36, 0.28);
+  --status-warning-surface-l3: rgba(210, 126, 36, 0.36);
+  --status-error-default: #f65a5a;
+  --status-error-hover: #f86262;
+  --status-error-active: #b33636;
+  --status-error-surface-l1: rgba(246, 70, 70, 0.18);
+  --status-error-surface-l2: rgba(246, 70, 70, 0.28);
+  --status-error-surface-l3: rgba(246, 70, 70, 0.36);
+  --accent-accent-teal: #2dd288;
+  --accent-accent-coral: #ff9392;
+  --accent-accent-amber: #dcb364;
+  --accent-accent-lime: #8acb3a;
+  --accent-accent-cyan: #04cbe5;
+  --accent-accent-blue: #7bb8ff;
+  --accent-accent-magenta: #ec93ff;
+  --accent-accent-violet: #bfa5ff;
+  --accent-accent-slate: #afb9cf;
+  --code-code-text: #e0e3ee;
+  --code-code-doc: #7f838c;
+  --code-code-link: #3c7eff;
+  --code-code-number: #f48cca;
+  --code-code-action: #b38cff;
+  --code-code-instruction: #f0d8ff;
+  --code-code-function: #f29d79;
+  --code-code-constant: #80bbff;
+  --code-code-parameter: #82d99f;
+  --code-code-attribute: #ded47e;
+  --code-code-tag: #f2858c;
+  --code-code-terminal: #e0e3ee;
+  --code-code-contrast: #e0e3ee;
+  --code-code-editor: #e0e3ee;
+  --special-white: #ffffff;
+  --special-black: #000000;
+  --viz-viz-series-amber: #edaa45;
+  --viz-viz-series-coral: #f87454;
+  --viz-viz-series-indigo: #b6a3ff;
+  --viz-viz-series-lime: #a6ea39;
+  --viz-viz-series-magenta: #fb9dd7;
+  --viz-viz-series-mint: #1dc981;
+  --viz-viz-series-sky: #22a5f7;
+  --viz-viz-series-slate: #859ead;
+  --viz-viz-series-teal: #78f2f2;
+  --viz-viz-series-violet: #b655fc;
+  --viz-viz-ui-bg-chart: #171717;
+  --viz-viz-ui-bg-tooltip: #0a0a0a;
+  --viz-viz-ui-chart-axis: rgba(229, 229, 229, 0.16);
+  --viz-viz-ui-chart-subtitle: #737373;
+  --viz-viz-ui-chart-tick: #737373;
+  --viz-viz-ui-chart-title: #e5e5e5;
+  --viz-viz-ui-legend-label: #737373;
+  --viz-viz-ui-legend-value: #e5e5e5;
+  --brand-blue-100: #e5f3ff;
+  --brand-blue-200: #cce6ff;
+  --brand-blue-300: #b2daff;
+  --brand-blue-400: #99ceff;
+  --brand-blue-500: #80c1ff;
+  --brand-blue-600: #64b4ff;
+  --brand-blue-700: #3792e6;
+  --brand-blue-800: #1071cb;
+  --brand-blue-900: #054c8f;
+  --brand-blue-1000: #00284d;
+  --brand-blue-grey-100: #f1eff4;
+  --brand-blue-grey-200: #e0e1e6;
+  --brand-blue-grey-300: #cfd3d8;
+  --brand-blue-grey-400: #bfc5ca;
+  --brand-blue-grey-500: #b0b5ba;
+  --brand-blue-grey-600: #a0a6ab;
+  --brand-blue-grey-700: #80898e;
+  --brand-blue-grey-800: #5e696e;
+  --brand-blue-grey-900: #404a4f;
+  --brand-blue-grey-1000: #21262b;
+  --brand-green-grey-100: #f1f4f4;
+  --brand-green-grey-200: #e0e6e6;
+  --brand-green-grey-300: #cfd8d8;
+  --brand-green-grey-400: #bfcaca;
+  --brand-green-grey-500: #b0baba;
+  --brand-green-grey-600: #a0abab;
+  --brand-green-grey-700: #808e8e;
+  --brand-green-grey-800: #5e6e6e;
+  --brand-green-grey-900: #404f4f;
+  --brand-green-grey-1000: #212b2b;
+  --brand-purple-100: #e8e5ff;
+  --brand-purple-200: #d2ccff;
+  --brand-purple-300: #bbb2ff;
+  --brand-purple-400: #a599ff;
+  --brand-purple-500: #8e80ff;
+  --brand-purple-600: #7864ff;
+  --brand-purple-700: #4c37e6;
+  --brand-purple-800: #2610cb;
+  --brand-purple-900: #15058f;
+  --brand-purple-1000: #09004d;
+  --brand-red-100: #ffe5e5;
+  --brand-red-200: #ffcccc;
+  --brand-red-300: #ffb2b2;
+  --brand-red-400: #ff9999;
+  --brand-red-500: #ff8080;
+  --brand-red-600: #ff6464;
+  --brand-red-700: #e63737;
+  --brand-red-800: #cb1010;
+  --brand-red-900: #8f0505;
+  --brand-red-1000: #4d0000;
+  --brand-yellow-100: #fff6e5;
+  --brand-yellow-200: #ffeccc;
+  --brand-yellow-300: #ffe3b2;
+  --brand-yellow-400: #ffda99;
+  --brand-yellow-500: #ffd080;
+  --brand-yellow-600: #ffc864;
+  --brand-yellow-700: #e6a637;
+  --brand-yellow-800: #cb8710;
+  --brand-yellow-900: #8f5c05;
+  --brand-yellow-1000: #4d3000;
+  --brand-blue-grey-100: #f1eff4;
+  --brand-blue-grey-200: #e0e1e6;
+  --brand-blue-grey-300: #cfd3d8;
+  --brand-blue-grey-400: #bfc5ca;
+  --brand-blue-grey-500: #b0b5ba;
+  --brand-blue-grey-600: #a0a6ab;
+  --brand-blue-grey-700: #80898e;
+  --brand-blue-grey-800: #5e696e;
+  --brand-blue-grey-900: #404a4f;
+  --brand-blue-grey-1000: #21262b;
+  --brand-green-grey-100: #f1f4f4;
+  --brand-green-grey-200: #e0e6e6;
+  --brand-green-grey-300: #cfd8d8;
+  --brand-green-grey-400: #bfcaca;
+  --brand-green-grey-500: #b0baba;
+  --brand-green-grey-600: #a0abab;
+  --brand-green-grey-700: #808e8e;
+  --brand-green-grey-800: #5e6e6e;
+  --brand-green-grey-900: #404f4f;
+  --brand-green-grey-1000: #212b2b;
+  --brand-neutral-grey-100: #f2f2f2;
+  --brand-neutral-grey-200: #e3e3e3;
+  --brand-neutral-grey-300: #d6d6d6;
+  --brand-neutral-grey-400: #c7c7c7;
+  --brand-neutral-grey-500: #bababa;
+  --brand-neutral-grey-600: #ababab;
+  --brand-neutral-grey-700: #8a8a8a;
+  --brand-neutral-grey-800: #686868;
+  --brand-neutral-grey-900: #474747;
+  --brand-neutral-grey-1000: #262626;
+  --brand-brand-50: #f2f7ff;
+  --brand-brand-100: #e5eaff;
+  --brand-brand-200: #cfd8ff;
+  --brand-brand-300: #aab7ff;
+  --brand-brand-400: #8894ff;
+  --brand-brand-500: #6a6fff;
+  --brand-brand-600: #4b3fe3;
+  --brand-brand-700: #3f31c6;
+  --brand-brand-800: #2c2290;
+  --brand-brand-900: #1a1759;
+  --brand-brand-950: #010109;
+  --brand-brand-grey-50: #fafafa;
+  --brand-brand-grey-100: #f5f5f5;
+  --brand-brand-grey-200: #e5e5e5;
+  --brand-brand-grey-300: #d4d4d4;
+  --brand-brand-grey-400: #a1a1a1;
+  --brand-brand-grey-500: #737373;
+  --brand-brand-grey-600: #525252;
+  --brand-brand-grey-700: #404040;
+  --brand-brand-grey-800: #262626;
+  --brand-brand-grey-900: #171717;
+  --brand-brand-grey-950: #0a0a0a;
+  --brand-brand-grey-50: #fafafa;
+  --brand-brand-grey-100: #f5f5f5;
+  --brand-brand-grey-200: #e5e5e5;
+  --brand-brand-grey-300: #d4d4d4;
+  --brand-brand-grey-400: #a1a1a1;
+  --brand-brand-grey-500: #737373;
+  --brand-brand-grey-600: #525252;
+  --brand-brand-grey-700: #404040;
+  --brand-brand-grey-800: #262626;
+  --brand-brand-grey-900: #171717;
+  --brand-brand-grey-950: #0a0a0a;
+
+  --body-body-xs: 10px/1.5 var(--font-family-default);
+  --body-body-sm: 11px/1.5 var(--font-family-default);
+  --body-body-sm-strong: 600 11px/1.5 var(--font-family-default);
+  --body-body-md: 12px/1.5 var(--font-family-default);
+  --body-body-md-strong: 600 12px/1.5 var(--font-family-default);
+  --body-body-base: 14px/1.5 var(--font-family-default);
+  --body-body-base-strong: 600 14px/1.5 var(--font-family-default);
+  --heading-heading-3xs: 600 10px/1.4 var(--font-family-heading);
+  --heading-heading-2xs: 600 11px/1.4 var(--font-family-heading);
+  --heading-heading-xs: 600 12px/1.4 var(--font-family-heading);
+  --heading-heading-sm: 600 13px/1.4 var(--font-family-heading);
+  --heading-heading-md: 600 14px/1.4 var(--font-family-heading);
+  --heading-heading-lg: 600 16px/1.4 var(--font-family-heading);
+  --heading-heading-xl: 600 20px/1.4 var(--font-family-heading);
+  --heading-heading-2xl: 600 24px/1.4 var(--font-family-heading);
+  --heading-heading-3xl: 600 32px/1.4 var(--font-family-heading);
+
+  --bg-bg-overlay-l0: rgba(224, 226, 242, 0.03);
+  --bg-primary-item: rgba(224, 226, 242, 0.08);
+  --bg-primary-item-hover: rgba(224, 226, 242, 0.12);
+  --border-primary-item: rgba(224, 226, 242, 0.06);
+  --border-primary-item-hover: rgba(224, 226, 242, 0.1);
+  /* 首页输入框边框颜色（纯色，用于内凹圆弧等需要精确边框的场景） */
+  --homepage-input-border-color: #343538;
+
+  --welcome-logo-bg: #000000;
+  --welcome-logo-color: var(--bg-bg-brand, #0fdc78);
+
+  --user-message-bg-solid: #1D352A;
+  --user-message-bg-solid-transparent: rgba(29, 53, 42, 0);
+  --user-message-bg-solid-sub: #2B2A38;
+  --user-message-bg-solid-sub-transparent: rgba(43, 42, 56, 0);
+  --sheet-text-color: #ffffff;
+  --slash-mention-bg: rgba(63, 133, 255, 0.15);
+  --builtin-slash-mention-bg: rgba(149, 112, 255, 0.15);
+
+  --gradient-golden: linear-gradient(180deg, #DAB444 0%, #FFEA8E 100%);
+  --special-bggoldoverlay: rgba(139, 128, 65, 0.12);
+
+  --bg-bg-brand-old: #32f08c;
+  --gradient-brand: linear-gradient(90deg, #3ee1a3 0%, #32f08c 36%, #60f2bd 71.63%, #a0fde7 100%);
+  --text-text-preformat-foreground: #d7ba7d;
+}
+
+[data-theme='dark-blue'], .vs-dark.solo-lite {
+  --shadow-elevation-50: 0 1px 2px -1px rgba(0, 0, 0, 0.45);
+  --shadow-elevation-100: 0 3px 9px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevation-100-float: 0 -3px 9px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevation-200: 0 6px 24px -1px rgba(0, 0, 0, 0.25);
+  --shadow-elevation-200-reverse: 0 -6px 24px -1px rgba(0, 0, 0, 0.25);
+  --shadow-elevation-300: 0 2px 8px -1px rgba(0, 0, 0, 0.18), 0 10px 24px -1px rgba(0, 0, 0, 0.30);
+  --shadow-elevation-100-tooltip: var(--shadow-elevation-100);
+  --shadow-elevation-200-menu-panel: var(--shadow-elevation-200);
+  --shadow-elevation-300-modal-panel: var(--shadow-elevation-300);
+
+  /* 输入框阴影颜色 */
+  --shadow-chat-input: 0 3px 8px 0 rgba(24, 24, 24, 0.08), 0 6px 24px -1px rgba(24, 24, 24, 0.12);
+  --shadow-chat-input-focused: 0 4px 12px 0 rgba(24, 24, 24, 0.08), 0 6px 32px -1px rgba(24, 24, 24, 0.12);
+
+  --bg-bg-base-default: #171717;
+  --bg-bg-base-secondary: #262626;
+  --bg-bg-base-tertiary: #404040;
+  --bg-bg-menu: #171717;
+  --bg-bg-tooltip: #171717;
+  --bg-bg-input: #171717;
+  --bg-bg-overlay-l1: rgba(212, 212, 212, 0.04);
+  --bg-bg-overlay-l2: rgba(212, 212, 212, 0.06);
+  --bg-bg-overlay-l3: rgba(212, 212, 212, 0.08);
+  --bg-bg-overlay-l4: rgba(212, 212, 212, 0.12);
+  --bg-bg-white: #ffffff;
+  --bg-bg-brand: #4b3fe3;
+  --bg-bg-brand-hover: #6a6fff;
+  --bg-bg-brand-active: #3f31c6;
+  --bg-bg-brand-disabled: rgba(75, 63, 227, 0.35);
+  --bg-bg-brand-popup: rgba(106, 111, 255, 0.15);
+  --bg-bg-brand-sub: var(--bg-bg-brand);
+  --bg-bg-brand-hover-sub: var(--bg-bg-brand-hover);
+  --bg-bg-brand-disabled-sub: var(--bg-bg-brand-disabled);
+  --bg-bg-brand-popup-sub: var(--bg-bg-brand-popup);
+  --bg-bg-invert: #e5e5e5;
+  --bg-bg-invert-hover: #f5f5f5;
+  --bg-bg-invert-active: #e5e5e5;
+  --bg-bg-invert-disabled: rgba(212, 212, 212, 0.06);
+  --bg-bg-marketplace-banner-overlay-start: rgba(82, 130, 193, 0);
+  --bg-bg-marketplace-banner-overlay-end: rgba(82, 130, 193, 0.8);
+  --bg-bg-marketplace-banner-control: rgba(0, 0, 0, 0.25);
+  --bg-bg-card: #202020;
+  --bg-bg-card-hover: #171717;
+  --bg-bg-marketplace-banner-plugin-tag: #e5f3ff;
+  --bg-bg-marketplace-banner-preview-mask-start: rgba(255, 255, 255, 0.9);
+  --bg-bg-marketplace-banner-preview-mask-end: rgba(255, 255, 255, 0.54);
+  --shadow-marketplace-banner-preview-card: 0px 6px 12px -1px rgba(0, 0, 0, 0.18), 0px 10px 24px -1px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-card-small: 0px 2.8023247718811035px 5.604649543762207px -0.4670540988445282px rgba(0, 0, 0, 0.18), 0px 4.670541763305664px 11.209299087524414px -0.4670540988445282px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-card-large: 0px 4.55377721786499px 9.10755443572998px -0.758962869644165px rgba(0, 0, 0, 0.18), 0px 7.589629650115967px 18.21510887145996px -0.758962869644165px rgba(0, 0, 0, 0.2);
+  --shadow-marketplace-banner-preview-input: 0px 0px 24px -1px rgba(24, 24, 24, 0.06), 0px -12px 8px -1px rgba(24, 24, 24, 0.02);
+  --chat-bg-card: var(--bg-bg-card);
+  --chat-bg-card-hover: var(--bg-bg-base-default);
+  --special-bgtabsoverlay: rgba(0, 0, 0, 0.20);
+  --special-tabsoverlay: rgba(13, 14, 15, 0.18);
+  --text-text-default: #e5e5e5;
+  --text-text-default-hover: #fafafa;
+  --text-text-default-active: #fafafa;
+  --text-text-secondary: #a1a1a1;
+  --text-text-secondary-hover: #e5e5e5;
+  --text-text-secondary-active: #e5e5e5;
+  --text-text-tertiary: #737373;
+  --text-text-disabled: #525252;
+  --text-text-brand: #6a6fff;
+  --text-text-brand-hover: #4b3fe3;
+  --text-text-brand-sub: var(--text-text-brand);
+  --text-text-brand-hover-sub: var(--text-text-brand-hover);
+  --text-text-onbrand: #171717;
+  --text-text-onaccent: #171717;
+  --text-text-marketplace-banner-on-light: #0a0a0a;
+  --text-text-marketplace-banner-plugin-tag: #054c8f;
+  --icon-icon-default: #e5e5e5;
+  --icon-icon-default-hover: #fafafa;
+  --icon-icon-default-active: #fafafa;
+  --icon-icon-secondary: #a1a1a1;
+  --icon-icon-secondary-hover: #e5e5e5;
+  --icon-icon-secondary-active: #e5e5e5;
+  --icon-icon-tertiary: #737373;
+  --icon-icon-disabled: #525252;
+  --icon-icon-brand: #6a6fff;
+  --icon-icon-brand-hover: #4b3fe3;
+  --icon-icon-brand-sub: var(--icon-icon-brand);
+  --icon-icon-brand-hover-sub: var(--icon-icon-brand-hover);
+  --icon-icon-onbrand: #0a0a0a;
+  --icon-icon-onaccent: #0A0A0A;
+  --icon-icon-white: #ffffff;
+  --border-border-neutral-l1: rgba(229, 229, 229, 0.10);
+  --border-border-neutral-l2: rgba(229, 229, 229, 0.16);
+  --border-border-neutral-l3: rgba(229, 229, 229, 0.20);
+  --border-border-brand: #6a6fff;
+  --border-border-brand-sub: var(--border-border-brand);
+  --border-border-contrast: #ffffff;
+  --status-primary-default: #387bff;
+  --status-primary-hover: #4c88ff;
+  --status-primary-active: #1759dd;
+  --status-primary-surface-l1: rgba(53, 121, 255, 0.18);
+  --status-primary-surface-l2: rgba(53, 121, 255, 0.28);
+  --status-primary-surface-l3: rgba(53, 121, 255, 0.36);
+  --status-success-default: #33c192;
+  --status-success-hover: #5ed4ad;
+  --status-success-active: #27b082;
+  --status-success-surface-l1: rgba(0, 165, 110, 0.18);
+  --status-success-surface-l2: rgba(0, 165, 110, 0.28);
+  --status-success-surface-l3: rgba(0, 165, 110, 0.36);
+  --status-alert-default: #d29d00;
+  --status-alert-hover: #dfb949;
+  --status-alert-active: #ab8820;
+  --status-alert-surface-l1: rgba(210, 157, 0, 0.16);
+  --status-alert-surface-l2: rgba(210, 157, 0, 0.28);
+  --status-alert-surface-l3: rgba(210, 157, 0, 0.36);
+  --status-warning-default: #d27e24;
+  --status-warning-hover: #d78b28;
+  --status-warning-active: #b46510;
+  --status-warning-surface-l1: rgba(210, 126, 36, 0.16);
+  --status-warning-surface-l2: rgba(210, 126, 36, 0.28);
+  --status-warning-surface-l3: rgba(210, 126, 36, 0.36);
+  --status-error-default: #f65a5a;
+  --status-error-hover: #f86262;
+  --status-error-active: #b33636;
+  --status-error-surface-l1: rgba(246, 70, 70, 0.18);
+  --status-error-surface-l2: rgba(246, 70, 70, 0.28);
+  --status-error-surface-l3: rgba(246, 70, 70, 0.36);
+  --accent-accent-teal: #2dd288;
+  --accent-accent-coral: #ff9392;
+  --accent-accent-amber: #dcb364;
+  --accent-accent-lime: #8acb3a;
+  --accent-accent-cyan: #04cbe5;
+  --accent-accent-blue: #7bb8ff;
+  --accent-accent-magenta: #ec93ff;
+  --accent-accent-violet: #bfa5ff;
+  --accent-accent-slate: #afb9cf;
+  --code-code-text: #e0e3ee;
+  --code-code-doc: #7f838c;
+  --code-code-link: #3c7eff;
+  --code-code-number: #f48cca;
+  --code-code-action: #b38cff;
+  --code-code-instruction: #f0d8ff;
+  --code-code-function: #f29d79;
+  --code-code-constant: #80bbff;
+  --code-code-parameter: #82d99f;
+  --code-code-attribute: #ded47e;
+  --code-code-tag: #f2858c;
+  --code-code-terminal: #e0e3ee;
+  --code-code-contrast: #e0e3ee;
+  --code-code-editor: #e0e3ee;
+  --special-white: #ffffff;
+  --special-black: #000000;
+  --viz-viz-series-amber: #edaa45;
+  --viz-viz-series-coral: #f87454;
+  --viz-viz-series-indigo: #b6a3ff;
+  --viz-viz-series-lime: #a6ea39;
+  --viz-viz-series-magenta: #fb9dd7;
+  --viz-viz-series-mint: #1dc981;
+  --viz-viz-series-sky: #22a5f7;
+  --viz-viz-series-slate: #859ead;
+  --viz-viz-series-teal: #78f2f2;
+  --viz-viz-series-violet: #b655fc;
+  --viz-viz-ui-bg-chart: #171717;
+  --viz-viz-ui-bg-tooltip: #0a0a0a;
+  --viz-viz-ui-chart-axis: rgba(229, 229, 229, 0.16);
+  --viz-viz-ui-chart-subtitle: #737373;
+  --viz-viz-ui-chart-tick: #737373;
+  --viz-viz-ui-chart-title: #e5e5e5;
+  --viz-viz-ui-legend-label: #737373;
+  --viz-viz-ui-legend-value: #e5e5e5;
+  --brand-blue-100: #e5f3ff;
+  --brand-blue-200: #cce6ff;
+  --brand-blue-300: #b2daff;
+  --brand-blue-400: #99ceff;
+  --brand-blue-500: #80c1ff;
+  --brand-blue-600: #64b4ff;
+  --brand-blue-700: #3792e6;
+  --brand-blue-800: #1071cb;
+  --brand-blue-900: #054c8f;
+  --brand-blue-1000: #00284d;
+  --brand-blue-grey-100: #f1eff4;
+  --brand-blue-grey-200: #e0e1e6;
+  --brand-blue-grey-300: #cfd3d8;
+  --brand-blue-grey-400: #bfc5ca;
+  --brand-blue-grey-500: #b0b5ba;
+  --brand-blue-grey-600: #a0a6ab;
+  --brand-blue-grey-700: #80898e;
+  --brand-blue-grey-800: #5e696e;
+  --brand-blue-grey-900: #404a4f;
+  --brand-blue-grey-1000: #21262b;
+  --brand-green-grey-100: #f1f4f4;
+  --brand-green-grey-200: #e0e6e6;
+  --brand-green-grey-300: #cfd8d8;
+  --brand-green-grey-400: #bfcaca;
+  --brand-green-grey-500: #b0baba;
+  --brand-green-grey-600: #a0abab;
+  --brand-green-grey-700: #808e8e;
+  --brand-green-grey-800: #5e6e6e;
+  --brand-green-grey-900: #404f4f;
+  --brand-green-grey-1000: #212b2b;
+  --brand-purple-100: #e8e5ff;
+  --brand-purple-200: #d2ccff;
+  --brand-purple-300: #bbb2ff;
+  --brand-purple-400: #a599ff;
+  --brand-purple-500: #8e80ff;
+  --brand-purple-600: #7864ff;
+  --brand-purple-700: #4c37e6;
+  --brand-purple-800: #2610cb;
+  --brand-purple-900: #15058f;
+  --brand-purple-1000: #09004d;
+  --brand-red-100: #ffe5e5;
+  --brand-red-200: #ffcccc;
+  --brand-red-300: #ffb2b2;
+  --brand-red-400: #ff9999;
+  --brand-red-500: #ff8080;
+  --brand-red-600: #ff6464;
+  --brand-red-700: #e63737;
+  --brand-red-800: #cb1010;
+  --brand-red-900: #8f0505;
+  --brand-red-1000: #4d0000;
+  --brand-yellow-100: #fff6e5;
+  --brand-yellow-200: #ffeccc;
+  --brand-yellow-300: #ffe3b2;
+  --brand-yellow-400: #ffda99;
+  --brand-yellow-500: #ffd080;
+  --brand-yellow-600: #ffc864;
+  --brand-yellow-700: #e6a637;
+  --brand-yellow-800: #cb8710;
+  --brand-yellow-900: #8f5c05;
+  --brand-yellow-1000: #4d3000;
+  --brand-blue-grey-100: #f1eff4;
+  --brand-blue-grey-200: #e0e1e6;
+  --brand-blue-grey-300: #cfd3d8;
+  --brand-blue-grey-400: #bfc5ca;
+  --brand-blue-grey-500: #b0b5ba;
+  --brand-blue-grey-600: #a0a6ab;
+  --brand-blue-grey-700: #80898e;
+  --brand-blue-grey-800: #5e696e;
+  --brand-blue-grey-900: #404a4f;
+  --brand-blue-grey-1000: #21262b;
+  --brand-green-grey-100: #f1f4f4;
+  --brand-green-grey-200: #e0e6e6;
+  --brand-green-grey-300: #cfd8d8;
+  --brand-green-grey-400: #bfcaca;
+  --brand-green-grey-500: #b0baba;
+  --brand-green-grey-600: #a0abab;
+  --brand-green-grey-700: #808e8e;
+  --brand-green-grey-800: #5e6e6e;
+  --brand-green-grey-900: #404f4f;
+  --brand-green-grey-1000: #212b2b;
+  --brand-neutral-grey-100: #f2f2f2;
+  --brand-neutral-grey-200: #e3e3e3;
+  --brand-neutral-grey-300: #d6d6d6;
+  --brand-neutral-grey-400: #c7c7c7;
+  --brand-neutral-grey-500: #bababa;
+  --brand-neutral-grey-600: #ababab;
+  --brand-neutral-grey-700: #8a8a8a;
+  --brand-neutral-grey-800: #686868;
+  --brand-neutral-grey-900: #474747;
+  --brand-neutral-grey-1000: #262626;
+  --brand-brand-50: #f2f7ff;
+  --brand-brand-100: #e5eaff;
+  --brand-brand-200: #cfd8ff;
+  --brand-brand-300: #aab7ff;
+  --brand-brand-400: #8894ff;
+  --brand-brand-500: #6a6fff;
+  --brand-brand-600: #4b3fe3;
+  --brand-brand-700: #3f31c6;
+  --brand-brand-800: #2c2290;
+  --brand-brand-900: #1a1759;
+  --brand-brand-950: #010109;
+  --brand-brand-grey-50: #fafafa;
+  --brand-brand-grey-100: #f5f5f5;
+  --brand-brand-grey-200: #e5e5e5;
+  --brand-brand-grey-300: #d4d4d4;
+  --brand-brand-grey-400: #a1a1a1;
+  --brand-brand-grey-500: #737373;
+  --brand-brand-grey-600: #525252;
+  --brand-brand-grey-700: #404040;
+  --brand-brand-grey-800: #262626;
+  --brand-brand-grey-900: #171717;
+  --brand-brand-grey-950: #0a0a0a;
+  --brand-brand-grey-50: #fafafa;
+  --brand-brand-grey-100: #f5f5f5;
+  --brand-brand-grey-200: #e5e5e5;
+  --brand-brand-grey-300: #d4d4d4;
+  --brand-brand-grey-400: #a1a1a1;
+  --brand-brand-grey-500: #737373;
+  --brand-brand-grey-600: #525252;
+  --brand-brand-grey-700: #404040;
+  --brand-brand-grey-800: #262626;
+  --brand-brand-grey-900: #171717;
+  --brand-brand-grey-950: #0a0a0a;
+
+  --body-body-xs: 10px/1.5 var(--font-family-default);
+  --body-body-sm: 11px/1.5 var(--font-family-default);
+  --body-body-sm-strong: 600 11px/1.5 var(--font-family-default);
+  --body-body-md: 12px/1.5 var(--font-family-default);
+  --body-body-md-strong: 600 12px/1.5 var(--font-family-default);
+  --body-body-base: 14px/1.5 var(--font-family-default);
+  --body-body-base-strong: 600 14px/1.5 var(--font-family-default);
+  --heading-heading-3xs: 600 10px/1.4 var(--font-family-heading);
+  --heading-heading-2xs: 600 11px/1.4 var(--font-family-heading);
+  --heading-heading-xs: 600 12px/1.4 var(--font-family-heading);
+  --heading-heading-sm: 600 13px/1.4 var(--font-family-heading);
+  --heading-heading-md: 600 14px/1.4 var(--font-family-heading);
+  --heading-heading-lg: 600 16px/1.4 var(--font-family-heading);
+  --heading-heading-xl: 600 20px/1.4 var(--font-family-heading);
+  --heading-heading-2xl: 600 24px/1.4 var(--font-family-heading);
+  --heading-heading-3xl: 600 32px/1.4 var(--font-family-heading);
+
+  --bg-bg-overlay-l0: rgba(176, 192, 244, 0.03);
+  --bg-primary-item: rgba(176, 192, 244, 0.09);
+  --bg-primary-item-hover: rgba(176, 192, 244, 0.13);
+  --border-primary-item: rgba(176, 192, 244, 0.06);
+  --border-primary-item-hover: rgba(176, 192, 244, 0.1);
+  /* 首页输入框边框颜色（纯色，用于内凹圆弧等需要精确边框的场景） */
+  --homepage-input-border-color: #343538;
+
+  --user-message-bg-solid: #1D352A;
+  --user-message-bg-solid-transparent: rgba(29, 53, 42, 0);
+  --user-message-bg-solid-sub: #2B2A38;
+  --user-message-bg-solid-sub-transparent: rgba(43, 42, 56, 0);
+  --sheet-text-color: #ffffff;
+  --slash-mention-bg: rgba(63, 133, 255, 0.15);
+  --builtin-slash-mention-bg: rgba(149, 112, 255, 0.15);
+
+  --gradient-golden: linear-gradient(180deg, #DAB444 0%, #FFEA8E 100%);
+  --special-bggoldoverlay: rgba(139, 128, 65, 0.12);
+
+  --bg-bg-brand-old: #32f08c;
+  --gradient-brand: linear-gradient(90deg, #3ee1a3 0%, #32f08c 36%, #60f2bd 71.63%, #a0fde7 100%);
+}
+</style><style data-trae-edit-ui="true" id="trae-previewer-tools-styles">:root {
+  --trae-layer-browser-inspect-overlay: 90000;
+  --trae-layer-browser-inspect-highlight: 90010;
+  --trae-layer-browser-inspect-action: 90020;
+  --trae-layer-text-selection-action: 90030;
+  --trae-layer-edit-tooltip: 100095;
+}
+:root,
+[data-trae-theme='dark'] {
+  --trae-bg-base-default: #171717;
+  --trae-bg-menu: #222427;
+  --trae-bg-overlay-l1: rgba(255, 255, 255, 0.04);
+  --trae-bg-overlay-l2: rgba(255, 255, 255, 0.08);
+  --trae-bg-overlay-l3: rgba(255, 255, 255, 0.12);
+  --trae-bg-overlay-l4: rgba(255, 255, 255, 0.16);
+  --trae-bg-invert: #f5f9fe;
+  --trae-bg-invert-hover: #e8ecf0;
+  --trae-bg-invert-active: #dce0e4;
+  --trae-bg-invert-disabled: rgba(224, 226, 242, 0.12);
+  --trae-border-l1: #e0e2f217;
+  --trae-border-l2: rgba(255, 255, 255, 0.12);
+  --trae-border-l3: rgba(255, 255, 255, 0.08);
+  --trae-border-neutral-l3: rgba(229, 229, 229, 0.20);
+  --trae-border-brand: #6a6fff;
+  --trae-text-default: #f5f9fe;
+  --trae-text-default-hover: #f5f9fe;
+  --trae-text-default-active: #f5f9fe;
+  --trae-text-secondary: rgba(245, 249, 254, 0.5);
+  --trae-text-tertiary: rgba(245, 249, 254, 0.4);
+  --trae-text-disabled: #666b75;
+  --trae-text-onaccent: #222427;
+  --trae-icon-default: #f5f9fe;
+  --trae-icon-secondary: rgba(245, 249, 254, 0.5);
+  --trae-icon-brand: #6a6fff;
+  --trae-icon-onaccent: #222427;
+  --trae-status-success: #22c55e;
+  --trae-status-primary: #3b82f6;
+  --trae-status-primary-default: #387bff;
+  --trae-status-primary-surface-l1: rgba(53, 121, 255, 0.18);
+  --trae-status-success-default: #33c192;
+  --trae-status-success-surface-l1: rgba(0, 165, 110, 0.18);
+  --trae-status-error-default: #f65a5a;
+  --trae-status-error-surface-l1: rgba(246, 70, 70, 0.18);
+  --trae-annotation-marker-bg: #4b3fe3;
+  --trae-annotation-marker-text: #ffffff;
+  --trae-annotation-region-border: var(--trae-status-primary-default);
+  --trae-region-outside-mask-bg: rgba(0, 0, 0, 0.32);
+  --trae-annotation-rect-border: var(--trae-status-error-default);
+  --trae-annotation-arrow-anchor-bg: var(--trae-status-primary-default);
+  --trae-panel-shadow: 0px 6px 24px -1px rgba(0, 0, 0, 0.16);
+  --trae-floating-shadow: 0px 2px 8px 0px rgba(0, 0, 0, 0.2);
+  --trae-shadow-elevation-50: 0 1px 2px -1px rgba(0, 0, 0, 0.45);
+  --trae-tab-active-shadow: 0px 1px 2px -1px rgba(0, 0, 0, 0.16);
+}
+
+[data-trae-theme='light'] {
+  --trae-bg-base-default: #fafafa;
+  --trae-bg-menu: #ffffff;
+  --trae-bg-overlay-l1: rgba(0, 0, 0, 0.04);
+  --trae-bg-overlay-l2: rgba(0, 0, 0, 0.06);
+  --trae-bg-overlay-l3: rgba(0, 0, 0, 0.08);
+  --trae-bg-overlay-l4: rgba(0, 0, 0, 0.12);
+  --trae-bg-invert: #1f2328;
+  --trae-bg-invert-hover: #32383f;
+  --trae-bg-invert-active: #444d56;
+  --trae-bg-invert-disabled: rgba(115, 115, 115, 0.20);
+  --trae-border-l1: rgba(0, 0, 0, 0.1);
+  --trae-border-l2: rgba(0, 0, 0, 0.12);
+  --trae-border-l3: rgba(0, 0, 0, 0.08);
+  --trae-border-neutral-l3: rgba(115, 115, 115, 0.36);
+  --trae-border-brand: #4b3fe3;
+  --trae-text-default: #1f2328;
+  --trae-text-default-hover: #111214;
+  --trae-text-default-active: #111214;
+  --trae-text-secondary: rgba(31, 35, 40, 0.5);
+  --trae-text-tertiary: rgba(31, 35, 40, 0.4);
+  --trae-text-disabled: #a1a1a1;
+  --trae-text-onaccent: #ffffff;
+  --trae-icon-default: #1f2328;
+  --trae-icon-secondary: rgba(31, 35, 40, 0.5);
+  --trae-icon-brand: #4b3fe3;
+  --trae-icon-onaccent: #ffffff;
+  --trae-status-success: #22c55e;
+  --trae-status-primary: #3b82f6;
+  --trae-status-primary-default: #2f74ff;
+  --trae-status-primary-surface-l1: rgba(47, 116, 255, 0.12);
+  --trae-status-success-default: #15a877;
+  --trae-status-success-surface-l1: rgba(64, 176, 139, 0.12);
+  --trae-status-error-default: #e8463a;
+  --trae-status-error-surface-l1: rgba(232, 70, 58, 0.12);
+  --trae-annotation-marker-bg: #4b3fe3;
+  --trae-annotation-marker-text: #ffffff;
+  --trae-annotation-region-border: var(--trae-status-primary-default);
+  --trae-region-outside-mask-bg: rgba(0, 0, 0, 0.18);
+  --trae-annotation-rect-border: var(--trae-status-error-default);
+  --trae-annotation-arrow-anchor-bg: var(--trae-status-primary-default);
+  --trae-panel-shadow: 0px 6px 24px -1px rgba(24, 24, 24, 0.06);
+  --trae-floating-shadow: 0px 2px 8px 0px rgba(24, 24, 24, 0.2);
+  --trae-shadow-elevation-50: 0 1px 2px -1px rgba(24, 24, 24, 0.08);
+  --trae-tab-active-shadow: 0px 1px 2px -1px rgba(24, 24, 24, 0.08);
+}
+
+@keyframes trae-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.trae-edit-mode-active body *:not([data-trae-edit-ui]):not([data-trae-edit-ui] *) {
+  transition: none !important;
+  animation-play-state: paused !important;
+}
+
+.trae-browser-inspect-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: var(--trae-layer-browser-inspect-overlay);
+  pointer-events: auto;
+  background: transparent;
+}
+
+.trae-browser-inspect-highlight-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: var(--trae-layer-browser-inspect-highlight);
+  display: none;
+}
+
+.trae-browser-inspect-highlight-tag {
+  position: absolute;
+  left: 0px;
+  top: 0px;
+  height: 18px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  background-color: var(--trae-status-success-default);
+  color: var(--trae-text-onaccent);
+  font-size: 12px;
+  font-weight: 400;
+  display: none;
+  align-items: center;
+  z-index: var(--trae-layer-browser-inspect-action);
+}
+
+.trae-browser-inspect-highlight-box-show {
+  display: flex;
+}
+
+.trae-browser-inspect-highlight-tag.trae-browser-inspect-highlight-box-show {
+  display: none;
+}
+
+.trae-browser-inspect-select-button.trae-browser-inspect-highlight-box-show {
+  display: block !important;
+}
+
+.trae-browser-inspect-select-button {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: none;
+  z-index: var(--trae-layer-browser-inspect-action);
+}
+
+.trae-browser-inspect-select-highlight-box {
+  background: transparent !important;
+}
+
+.trae-browser-inspect-select-highlight-box .trae-browser-inspect-highlight-tag {
+  background-color: var(--trae-status-success-default);
+}
+
+.trae-add-to-chat-card {
+  display: block;
+  overflow: hidden;
+  background: var(--trae-bg-menu);
+  border: 1px solid var(--trae-border-l1);
+  border-radius: 8px;
+  box-shadow: var(--trae-floating-shadow);
+  transition:
+    width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+    height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.trae-add-to-chat-content {
+  position: relative;
+  width: max-content;
+}
+
+.trae-fade-exit {
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+}
+
+.trae-fade-enter {
+  opacity: 1;
+  transition: opacity 0.2s ease-in;
+}
+
+.trae-buttons-view {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 4px;
+  background: transparent;
+}
+
+.trae-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transform: none !important;
+  transition: none !important;
+  animation: none !important;
+}
+
+.trae-action-button:hover {
+  background: var(--trae-bg-overlay-l2);
+}
+
+.trae-action-button:active {
+  background: var(--trae-bg-overlay-l3);
+}
+
+.trae-action-button:focus-visible {
+  outline: 2px solid var(--trae-status-primary);
+  outline-offset: 1px;
+}
+
+.trae-action-button-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--trae-icon-default);
+  flex-shrink: 0;
+}
+
+.trae-action-button-title {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--trae-text-default);
+  white-space: nowrap;
+}
+
+.trae-edit-toolbar-button-active {
+  background: var(--trae-status-primary-surface-l1) !important;
+  color: var(--trae-status-primary-default) !important;
+}
+
+.trae-edit-toolbar button[data-action='alignment-dropdown']:hover,
+.trae-edit-toolbar button[data-action='text-align-dropdown']:hover,
+.trae-edit-toolbar button[data-action='font-decrease']:hover,
+.trae-edit-toolbar button[data-action='font-increase']:hover,
+.trae-edit-toolbar button[data-action^='align-']:hover {
+  border-radius: 8px;
+  background: var(--bg-bg-overlay-l1, rgba(115, 115, 115, 0.08)) !important;
+}
+
+.trae-edit-toolbar button[data-action='alignment-dropdown']:active,
+.trae-edit-toolbar button[data-action='text-align-dropdown']:active,
+.trae-edit-toolbar button[data-action='font-decrease']:active,
+.trae-edit-toolbar button[data-action='font-increase']:active,
+.trae-edit-toolbar button[data-action^='align-']:active {
+  border-radius: 8px;
+  background: var(--bg-bg-overlay-l2, rgba(115, 115, 115, 0.12)) !important;
+}
+
+.trae-comment-input {
+  background: transparent;
+  color: var(--trae-text-default);
+  caret-color: var(--trae-text-default);
+}
+
+.trae-comment-input::placeholder {
+  color: var(--trae-text-tertiary);
+}
+
+.trae-edit-panel [data-trae-tooltip] {
+  position: relative;
+}
+
+.trae-edit-panel [data-trae-tooltip]::after {
+  content: attr(data-trae-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: var(--trae-layer-edit-tooltip);
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-bg-invert, var(--trae-bg-invert));
+  color: var(--text-text-onaccent, var(--trae-text-onaccent));
+  box-shadow: var(--trae-floating-shadow);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  letter-spacing: 0.039px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-sizing: border-box;
+  opacity: 0;
+  transform: translateX(-50%);
+  visibility: hidden;
+}
+
+.trae-edit-panel [data-trae-tooltip]::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 5px);
+  z-index: var(--trae-layer-edit-tooltip);
+  width: 8px;
+  height: 4px;
+  background: var(--bg-bg-invert, var(--trae-bg-invert));
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  transform: translateX(-50%);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+}
+
+.trae-edit-panel [data-trae-tooltip]:hover::after,
+.trae-edit-panel [data-trae-tooltip]:focus-visible::after,
+.trae-edit-panel [data-trae-tooltip]:hover::before,
+.trae-edit-panel [data-trae-tooltip]:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
+}
+
+.trae-comment-btn {
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.trae-comment-btn:disabled {
+  cursor: not-allowed;
+}
+
+.trae-comment-btn:focus-visible {
+  outline: 2px solid var(--trae-status-primary);
+  outline-offset: 1px;
+}
+
+.trae-comment-btn-primary {
+  background: var(--trae-bg-invert);
+  color: var(--trae-text-onaccent);
+}
+
+.trae-comment-btn-primary:hover:not(:disabled) {
+  background: var(--trae-bg-invert-hover);
+}
+
+.trae-comment-btn-primary:active:not(:disabled) {
+  background: var(--trae-bg-invert-active);
+}
+
+.trae-comment-btn-primary:disabled {
+  background: var(--trae-bg-invert-disabled);
+  color: var(--trae-text-disabled);
+}
+
+.trae-comment-btn-secondary {
+  background: var(--trae-bg-overlay-l2);
+  color: var(--trae-text-default);
+}
+
+.trae-comment-btn-secondary:hover:not(:disabled) {
+  background: var(--trae-bg-overlay-l3);
+}
+
+.trae-comment-btn-secondary:active:not(:disabled) {
+  background: var(--trae-bg-overlay-l4);
+}
+
+.trae-comment-btn-secondary:disabled {
+  background: var(--trae-bg-overlay-l2);
+  color: var(--trae-text-disabled);
+}
+
+.trae-comment-btn-text {
+  background: transparent;
+  color: var(--trae-text-default);
+}
+
+.trae-comment-btn-text:hover:not(:disabled) {
+  border-radius: 8px;
+  background: var(--bg-bg-overlay-l1, var(--trae-bg-overlay-l1));
+  color: var(--trae-text-default-hover);
+}
+
+.trae-comment-btn-text:active:not(:disabled) {
+  border-radius: 8px;
+  background: var(--trae-bg-overlay-l2);
+  color: var(--trae-text-default-active);
+}
+
+.trae-comment-btn-text:disabled {
+  background: transparent;
+  color: var(--trae-text-disabled);
+}
+
+.trae-marking-btn {
+  justify-content: center;
+}
+
+.trae-marking-btn:hover:not(:disabled) {
+  background: var(--trae-bg-overlay-l1) !important;
+}
+
+.trae-marking-btn:active:not(:disabled) {
+  background: var(--trae-bg-overlay-l2) !important;
+}
+
+.trae-marking-btn-active {
+  background: var(--trae-status-primary-surface-l1) !important;
+  color: var(--trae-status-primary-default) !important;
+}
+
+.trae-marking-btn:disabled {
+  color: var(--trae-text-disabled) !important;
+  cursor: not-allowed !important;
+}
+
+.trae-action-button-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--trae-icon-secondary);
+  flex-shrink: 0;
+}
+
+.trae-shortcut-container {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.trae-shortcut-key {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 12px;
+  color: var(--trae-icon-secondary);
+}
+
+.trae-add-to-chat-divider {
+  width: 2px;
+  height: 12px;
+  padding: 0 6px;
+  box-sizing: content-box;
+  background-clip: content-box;
+  background-color: var(--trae-border-l2);
+  flex-shrink: 0;
+}
+
+.trae-editor-view {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  padding: 8px;
+  background: transparent;
+}
+
+.trae-editor-text-container {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  background: var(--trae-bg-overlay-l1);
+  border: 1px solid var(--trae-border-l3);
+  border-radius: 4px;
+  gap: 8px;
+}
+
+.trae-editor-textarea {
+  flex: 1;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+  color: var(--trae-text-default);
+  resize: none;
+  outline: none;
+  overflow-y: auto;
+  max-height: 140px;
+}
+
+.trae-editor-textarea::placeholder {
+  color: var(--trae-text-tertiary);
+}
+
+.trae-editor-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    max-height 0.2s ease-out,
+    opacity 0.2s ease-out,
+    margin-top 0.2s ease-out;
+}
+
+.trae-editor-action-bar-visible {
+  max-height: 32px;
+  opacity: 1;
+  margin-top: 8px;
+}
+
+.trae-editor-cancel-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 4px;
+  background: var(--trae-bg-overlay-l2);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.trae-editor-cancel-button:hover {
+  background: var(--trae-bg-overlay-l3);
+}
+
+.trae-editor-cancel-button:active {
+  background: var(--trae-bg-overlay-l3);
+}
+
+.trae-editor-cancel-button:focus-visible {
+  outline: 2px solid var(--trae-status-primary);
+  outline-offset: 1px;
+}
+
+.trae-editor-cancel-text {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--trae-text-default);
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+.trae-editor-submit-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--trae-bg-invert);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.trae-editor-submit-button:hover {
+  background: var(--trae-bg-invert-hover);
+}
+
+.trae-editor-submit-button:active {
+  background: var(--trae-bg-invert-active);
+}
+
+.trae-editor-submit-button:focus-visible {
+  outline: 2px solid var(--trae-status-primary);
+  outline-offset: 1px;
+}
+
+.trae-editor-submit-text {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--trae-text-onaccent);
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+.trae-editor-submit-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  color: var(--trae-icon-onaccent);
+  flex-shrink: 0;
+}
+
+.trae-success-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 32px;
+  white-space: nowrap;
+}
+
+.trae-success-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--trae-status-success);
+  flex-shrink: 0;
+}
+
+.trae-success-text {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: var(--trae-text-default);
+  user-select: none;
+}
+</style><script src="https://unpkg.byted-static.com/jszip/3.10.1/dist/jszip.min.js"></script></head>
+<body>
+  <!-- Hero -->
+  <div class="hero">
+    <h1>GitHub 开源抓包/网络代理工具全景调研</h1>
+    <p class="subtitle">涵盖 HTTP 代理拦截、流量录制回放、网络协议分析、移动端抓包、渗透测试等方向，整理各工具的功能、特色与产品重心</p>
+    <div class="meta">数据截止: 2026-07-21 &nbsp;|&nbsp; 筛选条件: GitHub Stars &gt; 100</div>
+  </div>
+
+  <article class="page">
+
+    <!-- ===================== 总览对比表 ===================== -->
+    <h2>总览对比表</h2>
+    <p>以下列出所有搜集到的 GitHub star &gt; 100 的开源抓包/网络代理工具，按 star 数降序排列。</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>工具名</th>
+            <th>Stars (约)</th>
+            <th>语言</th>
+            <th>许可证</th>
+            <th>类型</th>
+            <th>产品重心</th>
+            <th>主要特色</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Clash</td><td>~48.2k</td><td>Go</td><td>闭源(已删)</td><td>规则代理</td><td>翻墙/科学上网</td><td>规则分流、多协议支持、自定义规则引擎</td></tr>
+          <tr><td><a href="https://github.com/mitmproxy/mitmproxy" style="color:var(--accent)">mitmproxy</a></td><td>~37k</td><td>Python/TS</td><td>MIT</td><td>HTTP代理拦截</td><td>API调试/安全测试</td><td>CLI+Web+Console三模式、Python脚本自动化、HTTP/2+QUIC</td></tr>
+          <tr><td><a href="https://github.com/wireshark/wireshark" style="color:var(--accent)">Wireshark</a></td><td>~7k(镜像)</td><td>C/C++</td><td>GPL-2.0</td><td>协议分析</td><td>网络故障排查/协议分析</td><td>数千协议解析、行业标准、深度dissector</td></tr>
+          <tr><td><a href="https://github.com/nmap/nmap" style="color:var(--accent)">Nmap</a></td><td>~10k+</td><td>C/C++/Lua</td><td>NPSL</td><td>网络扫描/审计</td><td>安全审计/渗透测试</td><td>NSE脚本引擎、OS指纹、端口扫描</td></tr>
+          <tr><td><a href="https://github.com/avwo/whistle" style="color:var(--accent)">Whistle</a></td><td>~19k</td><td>Node.js</td><td>MIT</td><td>HTTP代理调试</td><td>前端调试/移动端抓包</td><td>规则灵活如hosts、插件生态、Weinre集成</td></tr>
+          <tr><td><a href="https://github.com/buger/goreplay" style="color:var(--accent)">GoReplay</a></td><td>~19.2k</td><td>Go</td><td>LGPL-3.0</td><td>流量录制回放</td><td>Shadow测试/持续集成</td><td>非侵入式旁路监听、生产环境零影响</td></tr>
+          <tr><td><a href="https://github.com/alibaba/anyproxy" style="color:var(--accent)">AnyProxy</a></td><td>~18k</td><td>Node.js</td><td>Apache-2.0</td><td>HTTP代理</td><td>爬虫开发/接口调试</td><td>阿里出品、完全可编程、中文文档完善</td></tr>
+          <tr><td><a href="https://github.com/bettercap/bettercap" style="color:var(--accent)">Bettercap</a></td><td>~18k</td><td>Go</td><td>GPL-3.0</td><td>渗透测试框架</td><td>网络安全/渗透测试</td><td>MitM+ARP+WiFi+BLE、REST API、模块化</td></tr>
+          <tr><td><a href="https://github.com/projectdiscovery/httpx" style="color:var(--accent)">httpx</a></td><td>~10k</td><td>Go</td><td>MIT</td><td>HTTP探测</td><td>Bug Bounty/资产发现</td><td>极速批量探测、技术栈识别、pipeline模式</td></tr>
+          <tr><td><a href="https://github.com/alibaba/lightproxy" style="color:var(--accent)">LightProxy</a></td><td>~2.5k</td><td>TypeScript</td><td>MIT</td><td>桌面端抓包</td><td>前端调试/移动端抓包</td><td>零配置证书安装、自动代理设置</td></tr>
+          <tr><td><a href="https://github.com/elazarl/goproxy" style="color:var(--accent)">GoProxy</a></td><td>~1.8k</td><td>Go</td><td>BSD-3</td><td>HTTP代理库</td><td>Go项目集成代理</td><td>轻量高性能、可嵌入Go程序</td></tr>
+          <tr><td><a href="https://github.com/monkeyWie/proxyee" style="color:var(--accent)">Proxyee</a></td><td>~1.2k</td><td>Java</td><td>Apache-2.0</td><td>HTTP代理</td><td>Java后端集成/调试</td><td>双向TLS认证、MITM代理</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ===================== 一、HTTP/HTTPS 代理拦截类 ===================== -->
+    <h2>一、HTTP/HTTPS 代理拦截类</h2>
+
+    <!-- mitmproxy -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/mitmproxy/mitmproxy">mitmproxy</a></span>
+        <span class="stars">★ ~37,000</span>
+        <span class="lang">Python 79.9% / TypeScript 14.7%</span>
+        <span class="license">MIT</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>交互式 SSL/TLS 拦截代理，支持 HTTP/1、HTTP/2、WebSocket、TCP<sup><a href="#cite-1">[1]</a></sup></li>
+        <li>三种界面模式：<code>mitmproxy</code>（终端控制台）、<code>mitmweb</code>（Web UI）、<code>mitmdump</code>（无头命令行）</li>
+        <li>实时拦截、修改、重放 HTTP 请求和响应</li>
+        <li>强大的 Python 脚本/插件系统，支持自定义 addon 热加载</li>
+        <li>支持反向代理模式、上游代理、透明代理</li>
+        <li>内置 Flowfilter 过滤语言，精准筛选流量</li>
+        <li>被超过 5,200 个项目依赖<sup><a href="#cite-1">[1]</a></sup></li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>三种交互模式并存：</strong>CLI 控制台适合快速调试、Web UI 适合可视化审查、mitmdump 适合自动化流水线集成。这是同类工具中独一无二的设计。
+      </div>
+      <ul>
+        <li>Python 插件生态极强，可编写 <code>request</code>/<code>response</code> 钩子完全控制代理行为</li>
+        <li>对 HTTP/2 和 QUIC 支持业界领先，最新版本 v12.2.3（2026-05）</li>
+        <li>活跃维护：2026年7月仍有频繁提交<sup><a href="#cite-1">[1]</a></sup></li>
+      </ul>
+      <h3>产品重心</h3>
+      <p>面向<strong>开发者和安全测试人员</strong>的全方位 HTTP 代理工具。重心在于<strong>可编程自动化</strong>——通过 Python 脚本实现复杂的流量操控逻辑，是渗透测试、爬虫开发、API 调试的首选。同时兼顾交互式调试需求。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">HTTP/HTTPS拦截</span><span class="tag">Python脚本</span><span class="tag">HTTP/2</span><span class="tag">WebSocket</span><span class="tag">重放</span><span class="tag">自动化</span><span class="tag">Web UI</span><span class="tag">CLI</span><span class="tag">QUIC</span>
+      </div>
+    </div>
+
+    <!-- Whistle -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/avwo/whistle">Whistle</a></span>
+        <span class="stars">★ ~19,000</span>
+        <span class="lang">JavaScript 94.1%</span>
+        <span class="license">MIT</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>基于 Node.js 的 HTTP/HTTPS/HTTP2/WebSocket/TCP 代理调试工具<sup><a href="#cite-2">[2]</a></sup></li>
+        <li>Web 管理界面（默认 http://127.0.0.1:8899），浏览器中直接抓包</li>
+        <li>支持正则匹配、变量、分组规则配置</li>
+        <li>支持 Mock 数据、请求转发、请求头修改、延迟注入、断网模拟</li>
+        <li>支持 WebSocket 抓包、构造请求及修改数据</li>
+        <li>内置 Weinre（远程 DOM 检查）、Console 日志查看、Composer 请求编辑</li>
+        <li>丰富的插件体系，支持自定义扩展规则和界面<sup><a href="#cite-2">[2]</a></sup></li>
+        <li>支持无界面 Linux 服务器环境部署</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>规则系统极其灵活：</strong>类似 hosts 文件语法但功能强大得多，一行规则即可实现请求转发、Mock、延迟、Header 修改等多种操作。插件生态丰富，可作为 NPM 模块引用。
+      </div>
+      <ul>
+        <li>一站式管理界面：抓包、规则、插件、Weinre/Console/Composer 集中管理</li>
+        <li>提供桌面客户端 <a href="https://github.com/avwo/whistle-client" style="color:var(--accent)">whistle-client</a>，免大部分手动安装配置步骤</li>
+        <li>中文文档极其完善，国内社区活跃</li>
+        <li>活跃维护：2026年7月最新版本 v2.10.6<sup><a href="#cite-2">[2]</a></sup></li>
+      </ul>
+      <h3>产品重心</h3>
+      <p>面向<strong>前端开发者</strong>的调试代理工具。重心在于<strong>规则驱动的流量操控</strong>——通过简洁的规则语法实现 Mock、转发、延迟注入等前端调试常见需求。插件化和客户端化降低了使用门槛，适合前端团队日常开发和移动端调试。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">规则驱动</span><span class="tag">插件生态</span><span class="tag">Mock</span><span class="tag">延迟注入</span><span class="tag">Weinre</span><span class="tag">跨平台</span><span class="tag">客户端</span><span class="tag">中文友好</span><span class="tag">TCP</span>
+      </div>
+    </div>
+
+    <!-- AnyProxy -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/alibaba/anyproxy">AnyProxy</a></span>
+        <span class="stars">★ ~18,000</span>
+        <span class="lang">Node.js (JavaScript)</span>
+        <span class="license">Apache-2.0</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>阿里巴巴前端团队开发的开放 HTTP 代理服务器</li>
+        <li>支持 HTTPS 拦截（需安装证书）</li>
+        <li>提供 Web 界面查看请求详情</li>
+        <li>完全可编程：通过自定义 rule 模块处理所有请求/响应</li>
+        <li>支持 WebSocket 代理</li>
+        <li>支持二次开发，可作为爬虫中间件</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>阿里出品，中文生态：</strong>文档和社区以中文为主，对国内开发者友好。完全可编程的 rule 模块让用户可以精确控制每个请求的处理逻辑。
+      </div>
+      <ul>
+        <li>Rule 模块可拦截请求前、收到响应前等多个阶段</li>
+        <li>适合作为爬虫代理中间件使用</li>
+        <li>维护频率较低，功能相对稳定但更新慢</li>
+      </ul>
+      <h3>产品重心</h3>
+      <p>面向<strong>爬虫开发者和前端测试人员</strong>的代理工具。重心在于<strong>可编程的流量处理</strong>——通过 rule 模块实现请求拦截和修改。适合需要深度定制代理行为的场景，但在活跃度和功能丰富度上已被 Whistle 超越。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">可编程Rule</span><span class="tag">WebSocket</span><span class="tag">爬虫中间件</span><span class="tag">阿里出品</span><span class="tag">中文友好</span>
+      </div>
+    </div>
+
+    <!-- LightProxy -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/alibaba/lightproxy">LightProxy</a></span>
+        <span class="stars">★ ~2,500</span>
+        <span class="lang">TypeScript / Electron</span>
+        <span class="license">MIT</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>阿里团队开发的桌面端抓包工具，基于 Electron</li>
+        <li>自动完成 CA 证书安装和系统代理设置（零配置）</li>
+        <li>支持规则转发、修改每一个请求和响应</li>
+        <li>GUI 界面，操作简单</li>
+        <li>跨平台（macOS / Windows）</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>零配置体验：</strong>自动安装证书、自动设置系统代理，极大降低了抓包工具的使用门槛。配合 Whistle 使用效果更佳。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>前端开发者和测试人员</strong>的轻量级桌面抓包工具。重心在于<strong>降低使用门槛</strong>——自动化的证书和代理配置让非技术用户也能快速上手抓包。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">零配置</span><span class="tag">自动证书</span><span class="tag">Electron</span><span class="tag">GUI</span><span class="tag">跨平台</span>
+      </div>
+    </div>
+
+    <!-- GoProxy -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/elazarl/goproxy">GoProxy</a></span>
+        <span class="stars">★ ~1,800</span>
+        <span class="lang">Go</span>
+        <span class="license">BSD-3-Clause</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>Go 语言编写的 HTTP/HTTPS 代理库（不是独立应用）</li>
+        <li>支持中间人 HTTPS 拦截</li>
+        <li>可作为库嵌入到 Go 程序中</li>
+        <li>支持请求/响应修改、过滤</li>
+        <li>支持连接级别控制（如 CONNECT 方法）</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>Go 原生库：</strong>不提供独立 GUI 或 CLI 应用，而是作为 Go package 嵌入到其他程序中。性能优秀、体积小，适合在 Go 项目中快速集成代理能力。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>Go 开发者</strong>的代理库。重心在于<strong>嵌入集成</strong>——为 Go 项目提供可编程的代理能力，而非面向终端用户的抓包工具。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">Go库</span><span class="tag">可嵌入</span><span class="tag">MITM</span><span class="tag">轻量</span><span class="tag">高性能</span>
+      </div>
+    </div>
+
+    <!-- Proxyee -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/monkeyWie/proxyee">Proxyee</a></span>
+        <span class="stars">★ ~1,200</span>
+        <span class="lang">Java</span>
+        <span class="license">Apache-2.0</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>Java 编写的 HTTP 代理服务器</li>
+        <li>支持 HTTPS、WebSocket 协议</li>
+        <li>支持 MITM（中间人攻击），可捕获和篡改 HTTP/HTTPS 数据包</li>
+        <li>支持 HTTP 基础认证和 HTTPS 双向认证</li>
+        <li>支持上游代理</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>Java 生态方案：</strong>支持双向 TLS 认证是区别于其他代理工具的关键能力，适合需要证书双向验证的企业级场景。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>Java 后端开发者</strong>的代理方案。重心在于<strong>Java 生态集成</strong>——提供双向 TLS 等企业级代理能力，填补了 Java 世界中 MITM 代理的空白。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">Java</span><span class="tag">双向TLS</span><span class="tag">MITM</span><span class="tag">WebSocket</span><span class="tag">上游代理</span>
+      </div>
+    </div>
+
+    <!-- ===================== 二、流量录制与回放类 ===================== -->
+    <h2>二、流量录制与回放类</h2>
+
+    <!-- GoReplay -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/buger/goreplay">GoReplay</a></span>
+        <span class="stars">★ ~19,200</span>
+        <span class="lang">Go</span>
+        <span class="license">LGPL-3.0 (核心) / 商业PRO</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>捕获生产环境实时 HTTP 流量并回放到测试环境<sup><a href="#cite-3">[3]</a></sup></li>
+        <li>基于 libpcap 在网络接口层旁路监听，无需修改生产架构</li>
+        <li>支持流量过滤、修改、速率限制</li>
+        <li>支持 Kafka 输入/输出、Elasticsearch 集成</li>
+        <li>支持 WebSocket 流量回放</li>
+        <li>中间件系统允许用 Go 编写自定义处理逻辑</li>
+        <li>支持 TCP 流量录制与回放</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>非侵入式旁路监听：</strong>GoReplay 不是代理，而是在网络层旁听流量，对生产环境零影响、零延迟。这是与 mitmproxy/Whistle 等代理型工具的根本区别。
+      </div>
+      <ul>
+        <li>被 GOV.UK、The Guardian、TomTom 等大型机构使用<sup><a href="#cite-3">[3]</a></sup></li>
+        <li>PRO 版本支持二进制协议（Thrift/ProtocolBuffers）、云存储、TCP 会话复制</li>
+        <li>支持 Docker、Kubernetes 部署</li>
+      </ul>
+      <h3>产品重心</h3>
+      <p>面向<strong>DevOps 和 QA 团队</strong>的流量录制回放工具。重心在于<strong>基于真实流量的持续验证</strong>——用生产环境的真实流量在测试/预发环境进行 Shadow 测试、回归测试和性能验证，提升发布信心。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag red">非侵入式</span><span class="tag">旁路监听</span><span class="tag">Shadow测试</span><span class="tag">Kafka</span><span class="tag">Elasticsearch</span><span class="tag">TCP</span><span class="tag">Docker</span><span class="tag">K8s</span>
+      </div>
+    </div>
+
+    <!-- ===================== 三、网络协议分析类 ===================== -->
+    <h2>三、网络协议分析类</h2>
+
+    <!-- Wireshark -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/wireshark/wireshark">Wireshark</a></span>
+        <span class="stars">★ ~7,000 (GitHub镜像)</span>
+        <span class="lang">C / C++ / Lua</span>
+        <span class="license">GPL-2.0</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>全球最流行的网络协议分析工具（GUI 版）<sup><a href="#cite-4">[4]</a></sup></li>
+        <li>实时捕获和离线分析网络数据包</li>
+        <li>支持数千种网络协议的深度解析（TCP/UDP/ICMP/HTTP/DNS/TLS/SMB等）</li>
+        <li>强大的显示过滤器（BPF 语法 + Wireshark 专有语法）</li>
+        <li>支持色彩规则、协议分层展示</li>
+        <li>统计与图表生成（IO 图表、端点统计、协议分布）</li>
+        <li>命令行版 TShark 适合服务器环境</li>
+        <li>支持 pcap/pcapng 文件格式读写</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>行业标准级协议分析器：</strong>支持协议数量最多、深度协议解析能力无可匹敌。拥有丰富的 Dissector 生态，社区贡献的协议解析插件覆盖几乎所有已知协议。
+      </div>
+      <ul>
+        <li>主代码仓库在 GitLab，GitHub 为镜像（实际用户量远超 star 数）</li>
+        <li>极其活跃，持续更新</li>
+        <li>不仅支持 HTTP，更擅长 TCP/UDP/DNS/TLS 等底层协议分析</li>
+      </ul>
+      <h3>产品重心</h3>
+      <p>面向<strong>网络工程师和安全审计人员</strong>的专业协议分析工具。重心在于<strong>底层网络协议的深度解析</strong>——从网络层到应用层的全面覆盖。不适合 HTTP API 的快速调试，但在网络故障排查、安全审计、协议逆向分析领域无可替代。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">协议解析</span><span class="tag">BPF过滤</span><span class="tag">IO图表</span><span class="tag">TShark</span><span class="tag">pcap</span><span class="tag yellow">行业标准</span><span class="tag">Dissector</span>
+      </div>
+    </div>
+
+    <!-- Nmap -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/nmap/nmap">Nmap</a></span>
+        <span class="stars">★ ~10,000</span>
+        <span class="lang">C / C++ / Python / Lua</span>
+        <span class="license">NPSL (类GPL)</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>网络发现和安全审计工具</li>
+        <li>主机发现（Ping 扫描、ARP 扫描）</li>
+        <li>端口扫描（TCP SYN/Connect/UDP 等多种技术）</li>
+        <li>服务/版本检测</li>
+        <li>操作系统指纹识别</li>
+        <li>Ncat（Netcat 增强版）— 网络数据读写</li>
+        <li>Ndiff — 扫描结果对比</li>
+        <li>Nping — 网络包生成和响应分析</li>
+        <li>NSE（Nmap Scripting Engine）Lua 脚本引擎，数千个社区脚本</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>网络扫描领域标杆：</strong>NSE 脚本引擎极其强大，数千个社区脚本覆盖漏洞检测、服务枚举、暴力破解等场景。不仅是扫描器，更是完整的网络安全审计框架。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>网络安全工程师和渗透测试人员</strong>的扫描审计工具。重心在于<strong>网络资产发现与安全评估</strong>——从主机发现到服务指纹、从漏洞检测到利用验证的一站式框架。抓包只是其众多能力中的一部分。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag red">安全审计</span><span class="tag">端口扫描</span><span class="tag">NSE脚本</span><span class="tag">OS指纹</span><span class="tag">Ncat</span><span class="tag">漏洞检测</span>
+      </div>
+    </div>
+
+    <!-- ===================== 四、渗透测试/安全工具类 ===================== -->
+    <h2>四、渗透测试/安全工具类</h2>
+
+    <!-- Bettercap -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/bettercap/bettercap">Bettercap</a></span>
+        <span class="stars">★ ~18,000</span>
+        <span class="lang">Go</span>
+        <span class="license">GPL-3.0</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>网络攻击和嗅探框架（"Swiss Army Knife for Network Attacks"）</li>
+        <li>支持网络层流量的实时监控、修改和注入</li>
+        <li>ARP 欺骗 / DNS 欺骗 / DHCP 欺骗</li>
+        <li>内置 HTTP/HTTPS 代理，支持 SSL MitM</li>
+        <li>WiFi 监控和攻击模块</li>
+        <li>BLE 和 HID 设备监控</li>
+        <li>REST API 和 WebSocket 事件流</li>
+        <li>可编写自定义模块（Go 或 Ruby 脚本）</li>
+        <li>交互式终端 UI（基于 caplets 脚本）</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>全能渗透测试框架：</strong>集网络嗅探、MitM 攻击、协议解析、WiFi 攻击、BLE 监控于一体。通过 caplets 脚本实现自动化攻击流程，REST API 支持远程控制。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>渗透测试人员和安全研究者</strong>的攻击框架。重心在于<strong>网络层面的主动攻击</strong>——不仅仅是被动抓包，更能主动操控流量（ARP欺骗、DNS劫持、WiFi攻击）。适合红队作战和安全研究场景。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag red">渗透框架</span><span class="tag red">ARP欺骗</span><span class="tag">WiFi攻击</span><span class="tag">BLE监控</span><span class="tag">MitM</span><span class="tag">REST API</span><span class="tag">Caplets脚本</span>
+      </div>
+    </div>
+
+    <!-- httpx -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/projectdiscovery/httpx">httpx</a></span>
+        <span class="stars">★ ~10,000</span>
+        <span class="lang">Go</span>
+        <span class="license">MIT</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>快速多功能的 HTTP 探测工具包</li>
+        <li>批量探测目标主机是否存活及运行 HTTP 服务</li>
+        <li>自动识别技术栈（Tech Detect）</li>
+        <li>支持 HTTP/HTTPS、标题提取、状态码检测</li>
+        <li>支持 SSL 证书信息提取</li>
+        <li>支持自定义请求头、请求方法</li>
+        <li>输出 JSON/CSV 格式，pipeline 模式（stdin/stdout）</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>极速批量探测：</strong>专为大规模资产发现设计，单机可高速扫描数万目标。与 ProjectDiscovery 生态（nuclei、subfinder 等）完美集成，形成完整的攻击面管理工具链。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>Bug Bounty 猎人和安全团队</strong>的 HTTP 探测工具。重心在于<strong>大规模资产发现</strong>——快速确认目标是否存活、识别技术栈、提取关键信息。不是一个完整的抓包工具，而是攻击面管理的第一步。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag">批量探测</span><span class="tag">技术栈识别</span><span class="tag">Pipeline</span><span class="tag">JSON/CSV</span><span class="tag">SSL证书</span><span class="tag">Bug Bounty</span>
+      </div>
+    </div>
+
+    <!-- ===================== 五、规则代理/翻墙类 ===================== -->
+    <h2>五、规则代理/翻墙类</h2>
+
+    <!-- Clash -->
+    <div class="tool-card">
+      <div class="tool-header">
+        <span class="tool-name"><a href="https://github.com/Dreamacro/clash">Clash</a></span>
+        <span class="stars">★ ~48,200 (已删仓)</span>
+        <span class="lang">Go 99.3%</span>
+        <span class="license">已闭源</span>
+      </div>
+      <h3>功能概览</h3>
+      <ul>
+        <li>入站：HTTP、HTTPS、SOCKS5 服务器、TUN 设备</li>
+        <li>出站：Shadowsocks(R)、VMess、Trojan、Snell、WireGuard 等多种协议</li>
+        <li>规则分流：按域名、IP CIDR、进程名等维度灵活分流</li>
+        <li>支持规则组（fallback/url-test/select等）实现策略路由</li>
+        <li>GeoIP/GeoSite 数据库支持</li>
+        <li>RESTful API 进行运行时配置更新</li>
+      </ul>
+      <h3>特色</h3>
+      <div class="highlight-box">
+        <strong>规则分流引擎：</strong>Clash 的核心不是抓包，而是基于规则的流量分流。通过 YAML 配置实现精细化的代理策略——哪些流量走直连、哪些走代理、哪些走特定节点。
+      </div>
+      <div class="highlight-box" style="border-color:var(--accent2);background:rgba(255,107,107,0.06);">
+        <strong style="color:var(--accent2)">注意：</strong>原版 Clash 已于 2023 年删除仓库并闭源。目前社区分支（Clash Meta/Mihomo）继续活跃开发，star 数不计入原仓库。
+      </div>
+      <h3>产品重心</h3>
+      <p>面向<strong>普通用户和开发者</strong>的科学上网工具。重心在于<strong>规则驱动的流量分流</strong>——让不同类型的网络请求走不同的出口。虽不是抓包工具，但其网络层流量处理架构值得参考。</p>
+      <div style="margin-top:0.5rem;">
+        <span class="tag yellow">规则分流</span><span class="tag yellow">多协议</span><span class="tag yellow">TUN</span><span class="tag">GeoIP</span><span class="tag">策略路由</span><span class="tag">REST API</span><span class="tag red">已闭源</span>
+      </div>
+    </div>
+
+    <!-- ===================== 六、Star 数分布图 ===================== -->
+    <h2>六、Star 数分布</h2>
+    <figure class="chart-figure">
+      <figcaption>各工具 GitHub Star 数对比（对数刻度）</figcaption>
+      <div id="chart-stars" style="width:100%;min-height:420px" _echarts_instance_="ec_1785555854671"><div style="position: relative; overflow: hidden; width: 631px; height: 420px;"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" baseProfile="full" width="631" height="420" style="position: absolute; left: 0px; top: 0px; user-select: none;"><rect width="631" height="420" x="0" y="0" fill="none"></rect><g><path d="M50 320.5L601 320.5" fill="transparent" stroke="#2e3348" stroke-dasharray="4,2"></path><path d="M50 281.5L601 281.5" fill="transparent" stroke="#2e3348" stroke-dasharray="4,2"></path><path d="M50 150.5L601 150.5" fill="transparent" stroke="#2e3348" stroke-dasharray="4,2"></path><path d="M50 20.5L601 20.5" fill="transparent" stroke="#2e3348" stroke-dasharray="4,2"></path><path d="M50 320.5L601 320.5" fill="transparent" stroke="#2e3348" stroke-linecap="round"></path><text dominant-baseline="central" text-anchor="end" transform="translate(42 320)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">500</text><text dominant-baseline="central" text-anchor="end" transform="translate(42 280.7528)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">1k</text><text dominant-baseline="central" text-anchor="end" transform="translate(42 150.3764)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">10k</text><text dominant-baseline="central" text-anchor="end" transform="translate(42 20)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">100k</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,72.9583,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">Clash</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,118.875,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">mitmproxy</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,164.7917,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">Nmap</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,210.7083,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">httpx</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,256.625,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">Whistle</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,302.5417,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">GoReplay</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,348.4583,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">AnyProxy</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,394.375,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">Bettercap</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,440.2917,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">LightProxy</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,486.2083,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">GoProxy</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,532.125,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">Proxyee</text><text dominant-baseline="central" text-anchor="end" transform="matrix(0.819,-0.574,0.574,0.819,578.0417,328)" fill="#8b8fa3" style="font-size: 11px; font-family: &quot;Microsoft YaHei&quot;;">Wireshark</text><path d="M60.1171 61.3232L85.7996 61.3232A3 3 0 0 1 88.7996 64.3232L88.7996 320L57.1171 320L57.1171 64.3232A3 3 0 0 1 60.1171 61.3232" fill="#555555"></path><path d="M106.0338 76.2963L131.7163 76.2963A3 3 0 0 1 134.7163 79.2963L134.7163 320L103.0338 320L103.0338 79.2963A3 3 0 0 1 106.0338 76.2963" fill="#00d4aa"></path><path d="M151.9504 150.3764L177.6329 150.3764A3 3 0 0 1 180.6329 153.3764L180.6329 320L148.9504 320L148.9504 153.3764A3 3 0 0 1 151.9504 150.3764" fill="#ff6b6b"></path><path d="M197.8671 150.3764L223.5496 150.3764A3 3 0 0 1 226.5496 153.3764L226.5496 320L194.8671 320L194.8671 153.3764A3 3 0 0 1 197.8671 150.3764" fill="#ff6b6b"></path><path d="M243.7838 114.0335L269.4663 114.0335A3 3 0 0 1 272.4663 117.0335L272.4663 320L240.7838 320L240.7838 117.0335A3 3 0 0 1 243.7838 114.0335" fill="#00d4aa"></path><path d="M289.7004 113.4406L315.3829 113.4406A3 3 0 0 1 318.3829 116.4406L318.3829 320L286.7004 320L286.7004 116.4406A3 3 0 0 1 289.7004 113.4406" fill="#ffc857"></path><path d="M335.6171 117.0949L361.2996 117.0949A3 3 0 0 1 364.2996 120.0949L364.2996 320L332.6171 320L332.6171 120.0949A3 3 0 0 1 335.6171 117.0949" fill="#8b8fa3"></path><path d="M381.5337 117.0949L407.2162 117.0949A3 3 0 0 1 410.2162 120.0949L410.2162 320L378.5337 320L378.5337 120.0949A3 3 0 0 1 381.5337 117.0949" fill="#ff6b6b"></path><path d="M427.4504 228.8708L453.1329 228.8708A3 3 0 0 1 456.1329 231.8708L456.1329 320L424.4504 320L424.4504 231.8708A3 3 0 0 1 427.4504 228.8708" fill="#8b8fa3"></path><path d="M473.3671 247.4713L499.0496 247.4713A3 3 0 0 1 502.0496 250.4713L502.0496 320L470.3671 320L470.3671 250.4713A3 3 0 0 1 473.3671 247.4713" fill="#8b8fa3"></path><path d="M519.2838 270.4294L544.9663 270.4294A3 3 0 0 1 547.9663 273.4294L547.9663 320L516.2838 320L516.2838 273.4294A3 3 0 0 1 519.2838 270.4294" fill="#8b8fa3"></path><path d="M565.2004 170.572L590.8829 170.572A3 3 0 0 1 593.8829 173.572L593.8829 320L562.2004 320L562.2004 173.572A3 3 0 0 1 565.2004 170.572" fill="#00d4aa"></path><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(72.9583 56.3232)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">48.2k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(118.875 71.2963)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">37k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(164.7917 145.3764)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">10k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(210.7083 145.3764)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">10k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(256.625 109.0335)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">19k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(302.5417 108.4406)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">19.2k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(348.4583 112.0949)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">18k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(394.375 112.0949)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">18k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(440.2917 223.8708)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">2.5k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(486.2083 242.4713)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">1.8k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(532.125 265.4294)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">1.2k</text><text dominant-baseline="central" text-anchor="middle" y="-5" transform="translate(578.0417 165.572)" fill="#8b8fa3" style="font-size: 10px; font-family: &quot;Microsoft YaHei&quot;;">7k</text></g></svg><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: 0px auto auto 0px !important;"></div><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: 0px 0px auto auto !important;"></div><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: auto auto 0px 0px !important;"></div><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: auto 0px 0px auto !important;"></div></div></div>
+    </figure>
+
+    <!-- ===================== 七、功能矩阵对比 ===================== -->
+    <h2>七、核心功能矩阵对比</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>功能维度</th>
+            <th>mitmproxy</th>
+            <th>Whistle</th>
+            <th>GoReplay</th>
+            <th>Wireshark</th>
+            <th>Bettercap</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>HTTP/HTTPS 拦截</td><td style="color:var(--accent)">完整</td><td style="color:var(--accent)">完整</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">解析层</td><td style="color:var(--accent)">完整</td></tr>
+          <tr><td>TCP/UDP 抓包</td><td style="color:var(--accent3)">基础TCP</td><td style="color:var(--accent3)">基础TCP</td><td style="color:var(--accent)">完整</td><td style="color:var(--accent)">完整</td><td style="color:var(--accent)">完整</td></tr>
+          <tr><td>请求/响应修改</td><td style="color:var(--accent)">完整</td><td style="color:var(--accent)">完整</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td><td style="color:var(--accent)">完整</td></tr>
+          <tr><td>流量录制/回放</td><td style="color:var(--accent3)">基础</td><td style="color:var(--muted)">不支持</td><td style="color:var(--accent)">核心功能</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td></tr>
+          <tr><td>Mock/延迟注入</td><td style="color:var(--muted)">脚本实现</td><td style="color:var(--accent)">内置规则</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td></tr>
+          <tr><td>协议深度解析</td><td style="color:var(--muted)">HTTP层</td><td style="color:var(--muted)">HTTP层</td><td style="color:var(--muted)">HTTP层</td><td style="color:var(--accent)">数千协议</td><td style="color:var(--accent3)">多协议</td></tr>
+          <tr><td>脚本/插件扩展</td><td style="color:var(--accent)">Python Addon</td><td style="color:var(--accent)">NPM插件</td><td style="color:var(--accent3)">Go中间件</td><td style="color:var(--accent3)">Lua Dissector</td><td style="color:var(--accent)">Caplets模块</td></tr>
+          <tr><td>Web UI</td><td style="color:var(--accent)">mitmweb</td><td style="color:var(--accent)">内置</td><td style="color:var(--muted)">无</td><td style="color:var(--muted)">无</td><td style="color:var(--muted)">无</td></tr>
+          <tr><td>移动端支持</td><td style="color:var(--accent)">代理+证书</td><td style="color:var(--accent)">代理+证书</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td><td style="color:var(--accent3)">WiFi中间人</td></tr>
+          <tr><td>ARP/DNS欺骗</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td><td style="color:var(--muted)">不支持</td><td style="color:var(--accent)">核心功能</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ===================== 八、产品定位象限 ===================== -->
+    <h2>八、产品定位象限分析</h2>
+    <p>以<strong>「功能深度」</strong>为 X 轴（从基础代理到全功能框架）和<strong>「使用门槛」</strong>为 Y 轴（从零配置到专业运维）来分析各工具的定位：</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>象限</th><th>特征</th><th>代表工具</th></tr>
+        </thead>
+        <tbody>
+          <tr><td style="color:var(--accent)">高深度 + 低门槛</td><td>功能强大且易于上手</td><td>Whistle、LightProxy</td></tr>
+          <tr><td style="color:var(--accent3)">高深度 + 高门槛</td><td>专业级全功能框架</td><td>Wireshark、Bettercap、Nmap</td></tr>
+          <tr><td style="color:var(--muted)">低深度 + 低门槛</td><td>轻量级简单工具</td><td>GoProxy、Proxyee</td></tr>
+          <tr><td style="color:var(--accent2)">垂直场景</td><td>专注特定领域</td><td>GoReplay（流量回放）、httpx（资产发现）、Clash（规则分流）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:1rem;"><strong>mitmproxy</strong> 处于特殊位置——功能深度高但 CLI 模式门槛较高、Web UI 模式门槛适中，横跨两个象限。</p>
+
+  </article>
+
+  <!-- Footer -->
+  <footer>
+    <div class="sources">
+      <h2>Sources</h2>
+      <ol>
+        <li id="cite-1">
+          <span class="src-title">mitmproxy GitHub 仓库 — 官方仓库，含 README、语言分布、许可证、提交记录（2026-07-18 最新提交）</span>
+          <a class="src-url" href="https://github.com/mitmproxy/mitmproxy" target="_blank" rel="noopener">https://github.com/mitmproxy/mitmproxy</a>
+        </li>
+        <li id="cite-2">
+          <span class="src-title">Whistle GitHub 仓库 — 官方仓库，含功能介绍、版本记录（v2.10.6, 2026-07-11）</span>
+          <a class="src-url" href="https://github.com/avwo/whistle" target="_blank" rel="noopener">https://github.com/avwo/whistle</a>
+        </li>
+        <li id="cite-3">
+          <span class="src-title">GoReplay GitHub 仓库 — 官方仓库，19.2k stars，含使用企业列表和功能说明</span>
+          <a class="src-url" href="https://github.com/buger/goreplay" target="_blank" rel="noopener">https://github.com/buger/goreplay</a>
+        </li>
+        <li id="cite-4">
+          <span class="src-title">Wireshark — 行业标准网络协议分析器（GitHub 为镜像，主仓库在 GitLab）</span>
+          <a class="src-url" href="https://github.com/wireshark/wireshark" target="_blank" rel="noopener">https://github.com/wireshark/wireshark</a>
+        </li>
+        <li id="cite-5">
+          <span class="src-title">Nmap GitHub 仓库 — 网络发现和安全审计工具</span>
+          <a class="src-url" href="https://github.com/nmap/nmap" target="_blank" rel="noopener">https://github.com/nmap/nmap</a>
+        </li>
+        <li id="cite-6">
+          <span class="src-title">Bettercap GitHub 仓库 — 网络攻击和嗅探框架</span>
+          <a class="src-url" href="https://github.com/bettercap/bettercap" target="_blank" rel="noopener">https://github.com/bettercap/bettercap</a>
+        </li>
+        <li id="cite-7">
+          <span class="src-title">腾讯云开发者社区 — mitmproxy 介绍文章，含 star 数和功能描述</span>
+          <a class="src-url" href="https://cloud.tencent.com.cn/developer/article/2414987" target="_blank" rel="noopener">https://cloud.tencent.com.cn/developer/article/2414987</a>
+        </li>
+        <li id="cite-8">
+          <span class="src-title">掘金 — Whistle 抓包工具使用介绍</span>
+          <a class="src-url" href="https://juejin.cn/post/7250107647213649981" target="_blank" rel="noopener">https://juejin.cn/post/7250107647213649981</a>
+        </li>
+        <li id="cite-9">
+          <span class="src-title">掘金 — HTTP 流量神器 GoReplay 核心源码详解</span>
+          <a class="src-url" href="https://juejin.cn/post/7065880313020284935" target="_blank" rel="noopener">https://juejin.cn/post/7065880313020284935</a>
+        </li>
+      </ol>
+    </div>
+  </footer>
+
+  <!-- ECharts -->
+  <script src="./_shared/js/echarts.min.js"></script>
+  <script src="./assets/charts.js"></script><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: 0px auto auto 0px !important;"></div><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: 0px 0px auto auto !important;"></div><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: auto auto 0px 0px !important;"></div><div style="position: absolute !important; visibility: hidden !important; padding: 0px !important; margin: 0px !important; border-width: 0px !important; user-select: none !important; width: 0px !important; height: 0px !important; inset: auto 0px 0px auto !important;"></div><div class=""></div>
+
+
+<div class="light"></div><div data-trae-edit-ui="true"></div></body></html>

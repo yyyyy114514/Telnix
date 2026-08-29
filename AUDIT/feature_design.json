@@ -1,0 +1,175 @@
+{
+  "findings": [
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 576,
+      "type": "数据模型",
+      "current": "flow_groups 表中 flow_ids 字段存储为逗号分隔字符串 '1,2,3'",
+      "description": "流量分组使用逗号分隔字符串存储 flow_ids，而非关系型中间表。这导致：1) 无法建立外键约束；2) 查询需要字符串解析；3) 无法利用级联删除；4) 大量 flow_ids 时可能超出限制。",
+      "suggestion": "改用关系型中间表 flow_group_flows(flow_group_id, flow_id)，支持外键约束和级联操作。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 582,
+      "type": "恢复机制缺失",
+      "current": "ignored_processes 表迁移代码完全静默捕获所有异常",
+      "description": "迁移失败时数据库可能处于不一致状态，但代码静默吞掉所有异常继续运行。",
+      "suggestion": "迁移失败时应记录错误日志并设置迁移状态标志，添加迁移版本号机制确保幂等。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1214,
+      "type": "恢复机制缺失",
+      "current": "_flush_update_batch 中失败计数限制为 3 条后静默丢弃其余失败",
+      "description": "UPDATE 批量执行失败时，最多只记录前 3 条错误日志。长时间运行后可能出现大量更新失败但用户完全不知情。",
+      "suggestion": "所有失败都应记录到错误日志表；失败数量超过阈值时主动告警。"
+    },
+    {
+      "file": "src/host/telnix/settings_store.py",
+      "line": 106,
+      "type": "恢复机制缺失",
+      "current": "get_setting 对空值和默认值处理不一致",
+      "description": "无法区分'未设置'和'显式设置为空'两种状态。",
+      "suggestion": "添加 _has_key() 方法区分 null 和 missing，或使用 sentinel 值。"
+    },
+    {
+      "file": "src/host/telnix/cli.py",
+      "line": 2107,
+      "type": "配置问题",
+      "current": "AGENT_IGNORE_PROCESSES = ['TRAE SOLO CN.exe'] 硬编码了特定进程名",
+      "description": "平台特定配置写死在代码中，不支持用户自定义。",
+      "suggestion": "将忽略进程列表移至 settings_store，支持用户自定义配置。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 42,
+      "type": "配置问题",
+      "current": "MAX_RECORDED_BODY = 512 * 1024, MAX_STREAM_BODY = 256 * 1024 * 1024 等硬编码阈值",
+      "description": "关键性能参数硬编码，用户无法根据场景调整。",
+      "suggestion": "这些参数应移至 settings_store 支持动态配置。"
+    },
+    {
+      "file": "src/host/telnix/auto_reply/rules.py",
+      "line": 33,
+      "type": "配置问题",
+      "current": "ReDoS 防护参数硬编码：_MAX_PATTERN_LEN = 256, _MAX_WILDCARDS = 16, _MAX_REGEX_QUANTIFIERS = 12",
+      "description": "正则表达式 DoS 防护参数固定，可能过于严格或过于宽松。",
+      "suggestion": "添加配置接口允许用户根据实际需求调整阈值。"
+    },
+    {
+      "file": "src/host/telnix/mcp_server.py",
+      "line": 58,
+      "type": "配置问题",
+      "current": "MAX_OUTPUT_BYTES = 64 * 1024, MAX_FIELD_BYTES = 16 * 1024 硬编码",
+      "description": "MCP 输出截断阈值硬编码，64KB 对于某些场景可能不够用或超出上下文窗口。",
+      "suggestion": "添加环境变量配置：TELNIX_MCP_MAX_OUTPUT 和 TELNIX_MCP_MAX_FIELD。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 678,
+      "type": "配置问题",
+      "current": "并发信号量上限 500，worker 线程池 2 个",
+      "description": "_client_sem = threading.Semaphore(500) 和 _preinsert_executor = ThreadPoolExecutor(max_workers=2) 硬编码。",
+      "suggestion": "添加 settings 配置项支持动态调整这些并发参数。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 1536,
+      "type": "设计不合理",
+      "current": "SSL bump 决策逻辑分散在多个条件分支，逻辑复杂",
+      "description": "do_bump 决策涉及 6+ 个条件分支，分散在 100+ 行代码中，难以理解和维护。",
+      "suggestion": "提取为独立函数如 _should_ssl_bump()，返回值包含决策原因，便于调试和测试。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1758,
+      "type": "设计不合理",
+      "current": "_overview_cache 和 _stats_cache 各自独立实现缓存逻辑",
+      "description": "代码重复，维护成本高。",
+      "suggestion": "抽象统一的缓存工具类，支持 TTL、LRU 淘汰、批量清理。"
+    },
+    {
+      "file": "src/host/telnix/cli.py",
+      "line": 1395,
+      "type": "可用性问题",
+      "current": "cmd_packets_stats 的 --by endpoint 选项拉取所有流后再客户端处理",
+      "description": "数据量大时导致 CLI 卡顿和内存问题。",
+      "suggestion": "将 endpoint 统计逻辑下沉到后端 API，后端使用 SQL GROUP BY + path 模板归一化处理。"
+    },
+    {
+      "file": "src/host/telnix/api/auto_reply.py",
+      "line": 522,
+      "type": "功能缺失",
+      "current": "脚本错误只返回最后一条错误，无历史记录",
+      "description": "/auto-reply/rules/{rule_id}/script-error 只返回最后一条脚本执行错误。",
+      "suggestion": "在数据库中维护脚本错误历史（限制条数如最近 10 条），提供 API 查询历史错误。"
+    },
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 234,
+      "type": "功能缺失",
+      "current": "localStorage 缓存超过阈值时直接截断到 70% 大小，无用户确认",
+      "description": "用户不知道重要数据已丢失。",
+      "suggestion": "缓存达到阈值时向用户发送通知，让用户选择处理方式。"
+    },
+    {
+      "file": "src/host/telnix/api/sessions.py",
+      "line": 109,
+      "type": "边界缺失",
+      "current": "SSE stream_flows 心跳间隔 15 秒，可能被某些代理关闭空闲连接",
+      "description": "某些反向代理/负载均衡器默认关闭空闲连接的时间可能短于 15 秒。",
+      "suggestion": "心跳间隔应该可配置，默认值不超过 10 秒。"
+    },
+    {
+      "file": "src/host/telnix/api/capture.py",
+      "line": 91,
+      "type": "边界缺失",
+      "current": "auto_stop_seconds 没有上限检查，可设置为极大值",
+      "description": "用户可能误设置 999999 秒导致长时间无人看管。",
+      "suggestion": "添加上限如 86400 秒（24小时），超过后返回警告或拒绝请求。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 2032,
+      "type": "边界缺失",
+      "current": "get_flows_heatmap 时间解析使用 substr(timestamp, 0, 19) 假设 ISO 8601 格式",
+      "description": "如果时间戳格式因时区或毫秒精度变化，查询可能失败或返回错误结果。",
+      "suggestion": "使用 datetime.fromisoformat 或统一的解析器处理各种时间格式变体。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 1566,
+      "type": "边界缺失",
+      "current": "do_bump 计算依赖多个独立缓存状态，可能出现不一致",
+      "description": "SSL bump 决策依赖 ssl_bump_failed_hosts 字典、ignored 集合、focused_out 状态等多个独立数据源。",
+      "suggestion": "在请求级别快照所有决策相关状态，避免决策过程中状态变化导致不一致。"
+    },
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 233,
+      "type": "边界缺失",
+      "current": "restoreFromCache 对超大缓存(>5MB)直接删除，用户失去所有历史数据",
+      "description": "没有任何确认机制或备份。",
+      "suggestion": "删除前提示用户确认，或自动将大缓存压缩归档到 IndexedDB。"
+    },
+    {
+      "file": "src/ui/src/views/CaptureView.vue",
+      "line": 325,
+      "type": "边界缺失",
+      "current": "onClear 清空所有会话流量，但可能影响其他会话",
+      "description": "用户可能只想清空当前会话。",
+      "suggestion": "添加清空范围选项：当前会话/所有会话。"
+    }
+  ],
+  "summary": {
+    "total": 20,
+    "数据模型": 1,
+    "恢复机制缺失": 3,
+    "配置问题": 4,
+    "设计不合理": 2,
+    "可用性问题": 1,
+    "功能缺失": 2,
+    "边界缺失": 4,
+    "可扩展性": 3
+  }
+}

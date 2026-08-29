@@ -1,5 +1,6 @@
-"""Clash/Mihomo 集成模块。
+"""Clash/Mihomo integration module.
 
-外接模式：Telnix 不启动 Mihomo 进程，只通过 external-controller API 连接用户已运行的 Clash/Mihomo。
-Telnix 代理把流量转发到 Mihomo 的 mixed-port，实现抓包 + 节点代理。
+External mode: Telnix does not start the Mihomo process; it only connects to a
+user-running Clash/Mihomo via the external-controller API.
+The Telnix proxy forwards traffic to Mihomo's mixed-port, enabling capture + node proxy.
 """

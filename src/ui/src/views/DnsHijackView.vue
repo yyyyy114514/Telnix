@@ -1,56 +1,110 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Key, Plus, Refresh } from '@element-plus/icons-vue'
+import {
+  Delete, Histogram, Key, Plus, Refresh, WarningFilled,
+  Top, Bottom, Sort, Folder, FolderOpened, FolderAdd
+} from '@element-plus/icons-vue'
+import Sortable from 'sortablejs'
 import { api, type DnsHijackStatus } from '../api/client'
+import DohWarningDialog from '../components/DohWarningDialog.vue'
 
-// DNS 劫持页：基于 WinDivert 的本地 DNS 响应篡改
-// 卡片式布局：顶部状态卡 + 规则编辑表 + 实时日志
-const status = ref<DnsHijackStatus | null>(null)
+const { t } = useI18n()
+
+// DoH 对话框 ref
+const dohDialogRef = ref<InstanceType<typeof DohWarningDialog> | null>(null)
+
+// ============ 状态定义 ============
+const status = shallowRef<DnsHijackStatus | null>(null)
 const loading = ref(false)
 const toggling = ref(false)
 const saving = ref(false)
-// 管理员重启中（调用 /system/restart-as-admin 期间）
 const restartingAsAdmin = ref(false)
 
-// 规则编辑（前端独立维护，保存时整体提交）
-interface Rule {
-  domain: string
-  ip: string
+// DoH 检测相关
+const checkingDoh = ref(false)
+
+// ============ DNS 分组管理状态 ============
+interface DnsGroup {
+  id: number
+  name: string
+  priority: number
+  enabled: boolean
+  rule_count: number
 }
-const rules = ref<Rule[]>([])
-const defaultIp = ref('')
 
-// dirty 标志：本地有未保存修改时为 true，避免被轮询/刷新覆盖
-const dirty = ref(false)
+interface DnsRule {
+  id: number
+  group_id: number
+  pattern: string
+  mode: string
+  action: string
+  redirect_to: string | null
+}
 
-// 实时日志（从后端 status.log 同步）
-const logs = ref<DnsHijackStatus['log']>([])
+const groups = ref<DnsGroup[]>([])
+const selectedGroupId = ref<number | null>(null)
+const rules = ref<DnsRule[]>([])
+const groupDirty = ref(false)
+const editingGroup = ref<{ id: number | null; name: string; priority: number; enabled: boolean } | null>(null)
+const showGroupDialog = ref(false)
+
+const logs = shallowRef<DnsHijackStatus['log']>([])
 
 let pollTimer: number | null = null
+let loadingTimer: number | null = null
+let pollThrottleTimer: number | null = null
+let pendingPoll = false
+const LOADING_TIMEOUT_MS = 5000
+const POLL_INTERVAL_MS = 3000
+const POLL_THROTTLE_MS = 500
 
-// 拉取后端状态；poll=false 时会同步规则到本地编辑器（仅在无 dirty 时）
-async function refresh(opts: { silent?: boolean; syncRules?: boolean } = {}) {
-  const { silent = false, syncRules = false } = opts
+// ============ 辅助函数 ============
+function clearLoadingTimer() {
+  if (loadingTimer !== null) {
+    clearTimeout(loadingTimer)
+    loadingTimer = null
+  }
+}
+
+function schedulePoll() {
+  if (pollThrottleTimer !== null) {
+    pendingPoll = true
+    return
+  }
+  pollThrottleTimer = window.setTimeout(() => {
+    pollThrottleTimer = null
+    if (pendingPoll) {
+      pendingPoll = false
+      schedulePoll()
+    }
+  }, POLL_THROTTLE_MS)
+}
+
+// ============ 状态 API ============
+async function refresh(opts: { silent?: boolean } = {}) {
+  const { silent = false } = opts
+  clearLoadingTimer()
   if (!silent) loading.value = true
+  loadingTimer = window.setTimeout(() => {
+    loading.value = false
+  }, LOADING_TIMEOUT_MS)
   try {
     const s = await api.dnsHijackStatus()
-    // 状态字段始终更新（轮询只更新这些）
     status.value = s
-    logs.value = s.log || []
-    // 仅在显式请求且无本地未保存修改时同步规则
-    if (syncRules && !dirty.value) {
-      const entries = Object.entries(s.rules || {})
-      rules.value = entries.map(([domain, ip]) => ({ domain, ip }))
-      defaultIp.value = s.default_ip || ''
+    if (s.log) {
+      logs.value = [...s.log]
     }
   } catch (e: any) {
-    ElMessage.error('获取状态失败: ' + e.message)
+    ElMessage.error(t('dns.getStatusFailed', { msg: e?.message || String(e) }))
   } finally {
+    clearLoadingTimer()
     loading.value = false
   }
 }
 
+// ============ DNS 劫持开关 ============
 async function onToggle(val: boolean | string | number) {
   if (val === true) {
     await startHijack()
@@ -62,14 +116,12 @@ async function onToggle(val: boolean | string | number) {
 async function startHijack() {
   toggling.value = true
   try {
-    const body = buildBody()
-    await api.dnsHijackStart(body)
-    ElMessage.success('DNS 劫持已启动')
-    dirty.value = false // 启动时已提交，本地与后端一致
+    // 从分组规则生成劫持规则
+    await api.applyDnsGroupRules()
+    ElMessage.success(t('dns.started'))
     await refresh({ syncRules: true })
   } catch (e: any) {
-    ElMessage.error('启动失败: ' + e.message)
-    await refresh({ syncRules: true })
+    ElMessage.error(t('dns.startFailed', { msg: e?.message || String(e) }))
   } finally {
     toggling.value = false
   }
@@ -79,106 +131,321 @@ async function stopHijack() {
   toggling.value = true
   try {
     await api.dnsHijackStop()
-    ElMessage.info('DNS 劫持已停止')
-    dirty.value = false
-    await refresh({ syncRules: true })
+    ElMessage.info(t('dns.stopped'))
   } catch (e: any) {
-    ElMessage.error('停止失败: ' + e.message)
+    ElMessage.error(t('dns.stopFailed', { msg: e?.message || String(e) }))
   } finally {
     toggling.value = false
   }
 }
 
-function buildBody() {
-  // 把规则数组转为 {domain: ip} 字典，过滤空行
-  const dict: Record<string, string> = {}
-  for (const r of rules.value) {
-    const d = r.domain.trim()
-    const ip = r.ip.trim()
-    if (d && ip) dict[d] = ip
+// ============ 分组管理 ============
+async function loadGroups() {
+  try {
+    groups.value = await api.getDnsGroups()
+    if (groups.value.length > 0 && selectedGroupId.value === null) {
+      selectedGroupId.value = groups.value[0].id
+    }
+    if (selectedGroupId.value !== null) {
+      await loadRules(selectedGroupId.value)
+    }
+  } catch (e: any) {
+    ElMessage.error('加载分组失败: ' + (e?.message || String(e)))
   }
-  return { rules: dict, default_ip: defaultIp.value.trim() }
 }
 
-async function saveRules() {
+async function loadRules(groupId: number) {
+  try {
+    rules.value = await api.getDnsGroupRules(groupId)
+  } catch (e: any) {
+    ElMessage.error('加载规则失败: ' + (e?.message || String(e)))
+  }
+}
+
+function selectGroup(groupId: number) {
+  selectedGroupId.value = groupId
+  loadRules(groupId)
+}
+
+function openCreateGroupDialog() {
+  editingGroup.value = {
+    id: null,
+    name: '',
+    priority: groups.value.length,
+    enabled: true,
+  }
+  showGroupDialog.value = true
+}
+
+function openEditGroupDialog(group: DnsGroup) {
+  editingGroup.value = {
+    id: group.id,
+    name: group.name,
+    priority: group.priority,
+    enabled: group.enabled,
+  }
+  showGroupDialog.value = true
+}
+
+async function saveGroup() {
+  if (!editingGroup.value) return
+  if (!editingGroup.value.name.trim()) {
+    ElMessage.warning('分组名称不能为空')
+    return
+  }
+  try {
+    if (editingGroup.value.id === null) {
+      // 创建新分组
+      const result = await api.createDnsGroup({
+        name: editingGroup.value.name.trim(),
+        priority: editingGroup.value.priority,
+        enabled: editingGroup.value.enabled,
+      })
+      ElMessage.success('分组创建成功')
+      showGroupDialog.value = false
+      await loadGroups()
+      if (result.id) {
+        selectGroup(result.id)
+      }
+    } else {
+      // 更新分组
+      await api.updateDnsGroup(editingGroup.value.id, {
+        name: editingGroup.value.name.trim(),
+        priority: editingGroup.value.priority,
+        enabled: editingGroup.value.enabled,
+      })
+      ElMessage.success('分组更新成功')
+      showGroupDialog.value = false
+      await loadGroups()
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  }
+}
+
+async function deleteGroup(groupId: number) {
+  try {
+    await ElMessageBox.confirm('确定要删除该分组及其所有规则吗？', '删除分组', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+  try {
+    await api.deleteDnsGroup(groupId)
+    ElMessage.success('分组已删除')
+    if (selectedGroupId.value === groupId) {
+      selectedGroupId.value = null
+      rules.value = []
+    }
+    await loadGroups()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '删除失败')
+  }
+}
+
+async function toggleGroupEnabled(group: DnsGroup) {
+  try {
+    await api.updateDnsGroup(group.id, { enabled: !group.enabled })
+    await loadGroups()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '更新失败')
+    // 回滚 UI
+    group.enabled = !group.enabled
+  }
+}
+
+async function applyGroupRules() {
   saving.value = true
   try {
-    const body = buildBody()
-    const r = await api.dnsHijackSetRules(body)
-    ElMessage.success(`已保存 ${Object.keys(body.rules).length} 条规则` + (body.default_ip ? `，默认 IP: ${body.default_ip}` : ''))
-    // 保存成功后从后端回填规范化的规则（小写化、去空白）
-    const entries = Object.entries(r.rules || {})
-    rules.value = entries.map(([domain, ip]) => ({ domain, ip }))
-    defaultIp.value = r.default_ip || ''
-    status.value = r
-    logs.value = r.log || []
-    dirty.value = false
+    const result = await api.applyDnsGroupRules()
+    ElMessage.success(`已应用 ${result.rule_count} 条规则`)
   } catch (e: any) {
-    ElMessage.error('保存失败: ' + e.message)
+    ElMessage.error(e?.message || '应用规则失败')
   } finally {
     saving.value = false
   }
 }
 
-function addRule() {
-  rules.value.push({ domain: '', ip: '' })
-  dirty.value = true
-}
-
-function removeRule(idx: number) {
-  rules.value.splice(idx, 1)
-  dirty.value = true
-}
-
-// 输入框修改时标记 dirty
-function onRuleInput() {
-  dirty.value = true
-}
-
-// 主动刷新按钮：有未保存修改时提示丢弃，否则正常同步规则
-async function onRefreshClick() {
-  if (dirty.value) {
-    try {
-      await ElMessageBox.confirm('有未保存的修改，是否丢弃本地改动并从后端重新加载？', '丢弃修改', {
-        confirmButtonText: '丢弃并刷新', cancelButtonText: '取消', type: 'warning',
-      })
-    } catch {
-      return
-    }
-    dirty.value = false
+// 初始化拖拽排序
+let sortableInstance: any = null
+function initSortable(el: HTMLElement) {
+  if (sortableInstance) {
+    sortableInstance.destroy()
   }
-  await refresh({ syncRules: true })
+  sortableInstance = Sortable.create(el, {
+    animation: 150,
+    handle: '.drag-handle',
+    onEnd: async (evt: any) => {
+      const { oldIndex, newIndex } = evt
+      if (oldIndex === newIndex) return
+      // 更新排序
+      const movedItem = groups.value.splice(oldIndex, 1)[0]
+      groups.value.splice(newIndex, 0, movedItem)
+      // 同步更新优先级
+      const groupIds = groups.value.map(g => g.id)
+      try {
+        await api.reorderDnsGroups(groupIds)
+      } catch (e: any) {
+        ElMessage.error(e?.message || '排序保存失败')
+        await loadGroups() // 回滚
+      }
+    },
+  })
 }
 
-// 以管理员身份重启 Telnix（WinDivert 需要管理员权限）
+// ============ 规则管理 ============
+function openCreateRuleDialog() {
+  if (selectedGroupId.value === null) {
+    ElMessage.warning('请先选择一个分组')
+    return
+  }
+  editingRule.value = {
+    id: null,
+    pattern: '',
+    mode: 'wildcard',
+    action: 'block',
+    redirect_to: '',
+  }
+  showRuleDialog.value = true
+}
+
+const editingRule = ref<{
+  id: number | null
+  pattern: string
+  mode: string
+  action: string
+  redirect_to: string
+} | null>(null)
+const showRuleDialog = ref(false)
+
+async function saveRule() {
+  if (!editingRule.value) return
+  if (!editingRule.value.pattern.trim()) {
+    ElMessage.warning('域名模式不能为空')
+    return
+  }
+  if (editingRule.value.action === 'redirect' && !editingRule.value.redirect_to.trim()) {
+    ElMessage.warning('重定向动作需要指定目标 IP')
+    return
+  }
+  try {
+    if (editingRule.value.id === null) {
+      // 创建规则
+      await api.createDnsRule(selectedGroupId.value!, {
+        pattern: editingRule.value.pattern.trim(),
+        mode: editingRule.value.mode,
+        action: editingRule.value.action,
+        redirect_to: editingRule.value.action === 'redirect' ? editingRule.value.redirect_to.trim() : undefined,
+      })
+      ElMessage.success('规则创建成功')
+    } else {
+      // 更新规则
+      await api.updateDnsRule(editingRule.value.id, {
+        pattern: editingRule.value.pattern.trim(),
+        mode: editingRule.value.mode,
+        action: editingRule.value.action,
+        redirect_to: editingRule.value.action === 'redirect' ? editingRule.value.redirect_to.trim() : undefined,
+      })
+      ElMessage.success('规则更新成功')
+    }
+    showRuleDialog.value = false
+    await loadRules(selectedGroupId.value!)
+    await loadGroups() // 更新 rule_count
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  }
+}
+
+function openEditRuleDialog(rule: DnsRule) {
+  editingRule.value = {
+    id: rule.id,
+    pattern: rule.pattern,
+    mode: rule.mode,
+    action: rule.action,
+    redirect_to: rule.redirect_to || '',
+  }
+  showRuleDialog.value = true
+}
+
+async function deleteRule(ruleId: number) {
+  try {
+    await ElMessageBox.confirm('确定要删除该规则吗？', '删除规则', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+  try {
+    await api.deleteDnsRule(ruleId)
+    ElMessage.success('规则已删除')
+    await loadRules(selectedGroupId.value!)
+    await loadGroups() // 更新 rule_count
+  } catch (e: any) {
+    ElMessage.error(e?.message || '删除失败')
+  }
+}
+
+// ============ 其他操作 ============
 async function restartAsAdmin() {
   restartingAsAdmin.value = true
   try {
     await api.restartAsAdmin()
-    ElMessage.success('正在以管理员身份重启，请稍候...')
+    ElMessage.success(t('dns.restartingAsAdmin'))
   } catch (e: any) {
-    ElMessage.error('重启失败：' + (e?.message || e))
+    ElMessage.error(t('dns.restartFailed', { msg: e?.message || e }))
     restartingAsAdmin.value = false
   }
 }
 
 async function clearLog() {
   try {
-    await ElMessageBox.confirm('确定清空劫持日志和统计计数器？', '清空日志', {
-      confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('dns.clearLogConfirmMsg'), t('dns.clearLog'), {
+      confirmButtonText: t('dns.clear'),
+      cancelButtonText: t('dns.cancel'),
+      type: 'warning',
     })
   } catch {
     return
   }
   try {
     await api.dnsHijackClearLog()
-    ElMessage.success('已清空')
+    ElMessage.success(t('dns.cleared'))
     await refresh({ silent: true })
   } catch (e: any) {
-    ElMessage.error('清空失败: ' + e.message)
+    ElMessage.error(t('dns.clearFailed', { msg: e?.message || String(e) }))
   }
 }
 
+function formatTime(ts: string) {
+  if (!ts) return ''
+  return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+// ============ DoH 检测 ============
+async function checkDohFlows() {
+  checkingDoh.value = true
+  try {
+    // 获取最近100条日志流量的 host 用于检测
+    const flows = logs.value.map(l => ({
+      host: l.domain,
+      sni: l.domain,
+    }))
+    if (flows.length === 0) {
+      ElMessage.info('暂无流量数据，请先抓包后再检测')
+      return
+    }
+    await dohDialogRef.value?.checkForDoh(flows)
+  } finally {
+    checkingDoh.value = false
+  }
+}
+
+// ============ 计算属性 ============
 const isAdmin = computed(() => status.value?.is_admin ?? false)
 const isWindows = computed(() => status.value?.is_windows ?? true)
 const running = computed(() => status.value?.running ?? false)
@@ -186,69 +453,68 @@ const stats = computed(() => status.value?.stats || { total_packets: 0, hijacked
 const backend = computed(() => status.value?.backend || (isWindows.value ? 'windivert' : 'none'))
 const supported = computed(() => status.value?.supported ?? isWindows.value)
 
-// 后端友好显示名
 const backendDisplayName = computed(() => {
   const b = backend.value
   if (b === 'windivert') return 'WinDivert'
-  if (b === 'iptables+local_dns') return 'iptables + 本地 DNS'
-  if (b === 'pf+local_dns') return 'pf + 本地 DNS'
-  return 'DNS 劫持'
+  if (b === 'iptables+local_dns') return t('dns.backendIptablesLocal')
+  if (b === 'pf+local_dns') return t('dns.backendPfLocal')
+  return t('dns.hijack')
 })
 
-// 权限术语：Windows 用"管理员"，Unix 用"root"
-const adminTerm = computed(() => isWindows.value ? '管理员' : 'root')
-
+const adminTerm = computed(() => isWindows.value ? t('dns.adminTerm') : 'root')
 const canStart = computed(() => supported.value && isAdmin.value)
+const selectedGroup = computed(() => groups.value.find(g => g.id === selectedGroupId.value))
 
-function formatTime(ts: string) {
-  if (!ts) return ''
-  return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
-}
-
+// ============ 生命周期 ============
 onMounted(() => {
-  refresh({ syncRules: true })
-  // 3 秒轮询：只更新 stats/logs/running 等状态字段，不触碰 rules
+  refresh()
+  loadGroups()
   pollTimer = window.setInterval(() => {
-    if (running.value) refresh({ silent: true })
-  }, 3000)
+    if (running.value) {
+      schedulePoll()
+    }
+  }, POLL_INTERVAL_MS)
 })
 
 onUnmounted(() => {
   if (pollTimer !== null) clearInterval(pollTimer)
+  if (pollThrottleTimer !== null) clearTimeout(pollThrottleTimer)
+  if (sortableInstance) sortableInstance.destroy()
 })
 </script>
 
 <template>
   <div class="dns-view full flex flex-col">
+    <!-- 工具栏 -->
     <div class="dns-toolbar">
-      <span class="dns-title">DNS 劫持</span>
-      <span v-if="dirty" class="dirty-badge">未保存</span>
+      <span class="dns-title">
+        <el-icon><Histogram /></el-icon>&nbsp;{{ t('dns.title') }}
+      </span>
       <div class="flex-1"></div>
-      <!-- 非管理员/root：提供提权重启按钮 -->
-      <el-button
-        v-if="supported && !isAdmin"
-        size="small"
-        type="warning"
-        :loading="restartingAsAdmin"
-        @click="restartAsAdmin"
-      >
-        <el-icon><Key /></el-icon>&nbsp;{{ isWindows ? '管理员重启' : '提权重启' }}
+      <el-button v-if="supported && !isAdmin" size="small" type="warning" :loading="restartingAsAdmin" @click="restartAsAdmin">
+        <el-icon><Key /></el-icon>&nbsp;{{ isWindows ? t('dns.adminRestart') : t('dns.elevateRestart') }}
       </el-button>
-      <el-button size="small" @click="onRefreshClick" :loading="loading">
-        <el-icon><Refresh /></el-icon>&nbsp;刷新
+      <el-button size="small" @click="refresh({ silent: false })" :loading="loading">
+        <el-icon><Refresh /></el-icon>&nbsp;{{ t('dns.refresh') }}
       </el-button>
       <el-button size="small" type="danger" @click="clearLog">
-        <el-icon><Delete /></el-icon>&nbsp;清空日志
+        <el-icon><Delete /></el-icon>&nbsp;{{ t('dns.clearLog') }}
+      </el-button>
+      <el-button size="small" type="primary" @click="applyGroupRules" :loading="saving">
+        {{ t('dns.applyRules') }}
+      </el-button>
+      <el-button size="small" type="info" @click="checkDohFlows" :loading="checkingDoh">
+        <el-icon><WarningFilled /></el-icon>&nbsp;{{ t('doh.detectBtn') || 'DoH检测' }}
       </el-button>
     </div>
 
     <div class="dns-body flex-1 overflow-auto">
-      <!-- 顶部状态卡 -->
-      <div class="dns-card" v-loading="loading">
+      <!-- 状态卡 -->
+      <div class="dns-card">
         <div class="dns-card-header">
           <div class="dns-card-title">
-            <div class="title-text">DNS 劫持开关</div>
-            <div class="title-sub">{{ backendDisplayName }} · 修改本机 DNS 响应中的 A 记录</div>
+            <div class="title-text">{{ t('dns.toggleSwitch') }}</div>
+            <div class="title-sub">{{ backendDisplayName }} · {{ t('dns.modifyAR') }}</div>
           </div>
           <el-switch
             :model-value="running"
@@ -261,96 +527,160 @@ onUnmounted(() => {
         <div class="dns-card-body">
           <div class="dns-status-tags">
             <el-tag size="small" :type="isAdmin ? 'success' : 'danger'">
-              {{ isAdmin ? adminTerm : `非${adminTerm}` }}
+              {{ isAdmin ? adminTerm : t('dns.nonAdmin', { term: adminTerm }) }}
             </el-tag>
             <el-tag v-if="backend !== 'none'" size="small" type="info">
               {{ backendDisplayName }}
             </el-tag>
-            <el-tag v-if="running" size="small" type="success">劫持中</el-tag>
+            <el-tag v-if="running" size="small" type="success">{{ t('dns.hijacking') }}</el-tag>
           </div>
           <div v-if="!supported" class="dns-hint warn" style="margin-top: 10px">
-            <el-icon><WarningFilled /></el-icon>&nbsp;当前平台不支持 DNS 劫持
+            <el-icon><WarningFilled /></el-icon>&nbsp;{{ t('dns.platformNotSupported') }}
           </div>
           <div v-else-if="!isAdmin" class="dns-hint warn" style="margin-top: 10px">
-            <el-icon><WarningFilled /></el-icon>&nbsp;需要{{ adminTerm }}权限，请用{{ adminTerm }}身份重启 Telnix
+            <el-icon><WarningFilled /></el-icon>&nbsp;{{ t('dns.needAdminRestart', { term: adminTerm }) }}
           </div>
           <div v-else-if="status?.last_error" class="dns-hint err" style="margin-top: 10px">
-            <el-icon><CircleCloseFilled /></el-icon>&nbsp;{{ status.last_error }}
+            <el-icon><WarningFilled /></el-icon>&nbsp;{{ status.last_error }}
           </div>
           <div v-else-if="running" class="dns-hint ok" style="margin-top: 10px">
-            <el-icon><CircleCheckFilled /></el-icon>&nbsp;劫持运行中，规则已生效
+            <el-icon><Histogram /></el-icon>&nbsp;{{ t('dns.runningHint') }}
           </div>
           <div v-else class="dns-hint" style="margin-top: 10px">
-            <el-icon><InfoFilled /></el-icon>&nbsp;已就绪，编辑规则后点击开关启动
+            <el-icon><Histogram /></el-icon>&nbsp;{{ t('dns.readyHint') }}
           </div>
 
           <!-- 统计 -->
           <div class="dns-stats" v-if="running || stats.total_packets > 0">
             <div class="stat-item">
-              <div class="stat-label">截获包</div>
+              <div class="stat-label">{{ t('dns.capturedPackets') }}</div>
               <div class="stat-val mono">{{ stats.total_packets }}</div>
             </div>
             <div class="stat-item hl">
-              <div class="stat-label">已劫持</div>
+              <div class="stat-label">{{ t('dns.hijacked') }}</div>
               <div class="stat-val mono">{{ stats.hijacked_packets }}</div>
             </div>
             <div class="stat-item">
-              <div class="stat-label">未匹配</div>
+              <div class="stat-label">{{ t('dns.notMatched') }}</div>
               <div class="stat-val mono">{{ stats.skipped_no_match }}</div>
             </div>
             <div class="stat-item">
-              <div class="stat-label">错误</div>
+              <div class="stat-label">{{ t('dns.errors') }}</div>
               <div class="stat-val mono">{{ stats.errors }}</div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- 规则编辑区 -->
-      <div class="dns-card">
+      <!-- 分组管理区 -->
+      <div class="dns-card dns-groups-card">
         <div class="dns-card-header">
           <div class="dns-card-title">
-            <div class="title-text">劫持规则</div>
-            <div class="title-sub">域名 → IP 映射；支持 <code>*.example.com</code>、<code>*baidu*</code> 通配；留空则跳过</div>
+            <div class="title-text">{{ t('dns.groupManagement') }}</div>
+            <div class="title-sub">{{ t('dns.groupSubtitle') }}</div>
           </div>
           <div class="dns-card-actions">
-            <el-button size="small" @click="addRule" type="primary" plain>
-              <el-icon><Plus /></el-icon>&nbsp;新增
-            </el-button>
-            <el-button size="small" @click="saveRules" :loading="saving" type="primary">
-              <el-icon><Check /></el-icon>&nbsp;保存
+            <el-button size="small" type="primary" plain @click="openCreateGroupDialog">
+              <el-icon><Plus /></el-icon>&nbsp;{{ t('dns.addGroup') }}
             </el-button>
           </div>
         </div>
-        <div class="dns-card-body">
-          <div class="rules-table">
-            <div class="rule-row rule-header">
-              <div class="rule-cell c-domain">域名</div>
-              <div class="rule-cell c-ip">劫持 IP</div>
-              <div class="rule-cell c-op">操作</div>
-            </div>
-            <div v-if="!rules.length" class="empty-text text-dim rule-empty">
-              （无规则，点击「新增」添加；或仅设置默认 IP 劫持所有域名）
-            </div>
-            <div v-for="(r, i) in rules" :key="i" class="rule-row">
-              <div class="rule-cell c-domain">
-                <el-input v-model="r.domain" size="small" placeholder="example.com / *.baidu.com / *baidu*" @input="onRuleInput" />
+        <div class="dns-card-body dns-groups-body">
+          <!-- 分组列表 -->
+          <div class="groups-list" ref="groupsListRef">
+            <div
+              v-for="group in groups"
+              :key="group.id"
+              class="group-item"
+              :class="{ active: selectedGroupId === group.id, disabled: !group.enabled }"
+              @click="selectGroup(group.id)"
+            >
+              <div class="drag-handle">
+                <el-icon><Sort /></el-icon>
               </div>
-              <div class="rule-cell c-ip">
-                <el-input v-model="r.ip" size="small" placeholder="127.0.0.1" class="mono" @input="onRuleInput" />
+              <div class="group-icon">
+                <el-icon v-if="selectedGroupId === group.id"><FolderOpened /></el-icon>
+                <el-icon v-else><Folder /></el-icon>
               </div>
-              <div class="rule-cell c-op">
-                <el-button size="small" circle @click="removeRule(i)" type="danger" plain>
+              <div class="group-info">
+                <div class="group-name">{{ group.name }}</div>
+                <div class="group-meta">{{ group.rule_count }} {{ t('dns.rules') }}</div>
+              </div>
+              <div class="group-actions" @click.stop>
+                <el-switch
+                  :model-value="group.enabled"
+                  size="small"
+                  @change="toggleGroupEnabled(group)"
+                />
+                <el-button size="small" circle @click="openEditGroupDialog(group)" text>
+                  <el-icon><Refresh /></el-icon>
+                </el-button>
+                <el-button size="small" circle @click="deleteGroup(group.id)" text type="danger">
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </div>
             </div>
+            <div v-if="!groups.length" class="empty-text text-dim">
+              {{ t('dns.noGroups') }}
+            </div>
           </div>
 
-          <div class="default-ip-row">
-            <label class="default-ip-label">默认劫持 IP</label>
-            <el-input v-model="defaultIp" size="small" placeholder="留空则只劫持规则中明确列出的域名" class="mono default-ip-input" @input="onRuleInput" />
-            <span class="text-dim default-ip-hint">未匹配规则的 A 记录查询都会返回此 IP</span>
+          <!-- 规则列表 -->
+          <div class="rules-panel">
+            <div class="rules-panel-header">
+              <span class="rules-panel-title">
+                {{ selectedGroup ? selectedGroup.name : t('dns.selectGroup') }}
+                <span v-if="selectedGroup" class="rules-count">({{ rules.length }})</span>
+              </span>
+              <el-button
+                v-if="selectedGroup"
+                size="small"
+                type="primary"
+                plain
+                @click="openCreateRuleDialog"
+              >
+                <el-icon><Plus /></el-icon>&nbsp;{{ t('dns.addRule') }}
+              </el-button>
+            </div>
+            <div class="rules-table">
+              <div class="rule-row rule-header">
+                <div class="rule-cell c-pattern">{{ t('dns.domainPattern') }}</div>
+                <div class="rule-cell c-mode">{{ t('dns.matchMode') }}</div>
+                <div class="rule-cell c-action">{{ t('dns.action') }}</div>
+                <div class="rule-cell c-redirect">{{ t('dns.redirectTo') }}</div>
+                <div class="rule-cell c-op">{{ t('dns.operation') }}</div>
+              </div>
+              <div v-if="!rules.length" class="empty-text text-dim rule-empty">
+                {{ selectedGroup ? t('dns.noRules') : t('dns.selectGroupToViewRules') }}
+              </div>
+              <div v-for="rule in rules" :key="rule.id" class="rule-row">
+                <div class="rule-cell c-pattern">
+                  <code class="pattern-text">{{ rule.pattern }}</code>
+                </div>
+                <div class="rule-cell c-mode">
+                  <el-tag size="small" type="info">{{ rule.mode }}</el-tag>
+                </div>
+                <div class="rule-cell c-action">
+                  <el-tag
+                    size="small"
+                    :type="rule.action === 'allow' ? 'success' : rule.action === 'block' ? 'danger' : 'warning'"
+                  >
+                    {{ rule.action }}
+                  </el-tag>
+                </div>
+                <div class="rule-cell c-redirect mono text-dim">
+                  {{ rule.redirect_to || '-' }}
+                </div>
+                <div class="rule-cell c-op">
+                  <el-button size="small" circle @click="openEditRuleDialog(rule)" text>
+                    <el-icon><Refresh /></el-icon>
+                  </el-button>
+                  <el-button size="small" circle @click="deleteRule(rule.id)" text type="danger">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -359,25 +689,89 @@ onUnmounted(() => {
       <div class="dns-card">
         <div class="dns-card-header">
           <div class="dns-card-title">
-            <div class="title-text">劫持日志</div>
-            <div class="title-sub">最近 200 条劫持记录</div>
+            <div class="title-text">{{ t('dns.hijackLog') }}</div>
+            <div class="title-sub">{{ t('dns.logSubtitle') }}</div>
           </div>
         </div>
         <div class="dns-card-body">
-          <div v-if="!logs.length" class="empty-text text-dim">（暂无劫持记录）</div>
+          <div v-if="!logs.length" class="empty-text text-dim">{{ t('dns.noHijackLogs') }}</div>
           <div v-else class="log-list">
             <div v-for="(l, i) in logs" :key="i" class="log-row">
               <span class="log-ts mono text-dim">{{ formatTime(l.ts) }}</span>
               <span class="log-domain mono">{{ l.domain }}</span>
               <span class="log-arrow">→</span>
               <span class="log-new mono hl">{{ l.new_ip }}</span>
-              <span class="log-old text-dim mono">（原 {{ l.original_ips.join(', ') }}）</span>
+              <span class="log-old text-dim mono">{{ t('dns.original', { ips: l.original_ips.join(', ') }) }}</span>
               <span class="log-src text-dim mono">{{ l.dns_server }}</span>
             </div>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- 分组编辑对话框 -->
+    <el-dialog
+      v-model="showGroupDialog"
+      :title="editingGroup?.id === null ? t('dns.createGroup') : t('dns.editGroup')"
+      width="400px"
+    >
+      <el-form v-if="editingGroup" label-position="top">
+        <el-form-item :label="t('dns.groupName')">
+          <el-input v-model="editingGroup.name" :placeholder="t('dns.groupNamePlaceholder')" />
+        </el-form-item>
+        <el-form-item :label="t('dns.priority')">
+          <el-input-number v-model="editingGroup.priority" :min="0" :max="999" />
+          <span class="text-dim" style="margin-left: 8px; font-size: 12px;">{{ t('dns.priorityHint') }}</span>
+        </el-form-item>
+        <el-form-item :label="t('dns.enabled')">
+          <el-switch v-model="editingGroup.enabled" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showGroupDialog = false">{{ t('dns.cancel') }}</el-button>
+        <el-button type="primary" @click="saveGroup">{{ t('dns.save') }}</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 规则编辑对话框 -->
+    <el-dialog
+      v-model="showRuleDialog"
+      :title="editingRule?.id === null ? t('dns.createRule') : t('dns.editRule')"
+      width="500px"
+    >
+      <el-form v-if="editingRule" label-position="top">
+        <el-form-item :label="t('dns.domainPattern')" required>
+          <el-input v-model="editingRule.pattern" :placeholder="t('dns.patternPlaceholder')" />
+          <span class="text-dim" style="font-size: 12px; margin-top: 4px; display: block;">
+            {{ t('dns.patternHint') }}
+          </span>
+        </el-form-item>
+        <el-form-item :label="t('dns.matchMode')">
+          <el-select v-model="editingRule.mode" style="width: 100%">
+            <el-option value="wildcard" label="Wildcard (通配符 * ?)" />
+            <el-option value="exact" label="Exact (精确匹配)" />
+            <el-option value="regex" label="Regex (正则表达式)" />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('dns.action')">
+          <el-select v-model="editingRule.action" style="width: 100%">
+            <el-option value="block" label="Block (拦截 → 0.0.0.0)" />
+            <el-option value="allow" label="Allow (放行)" />
+            <el-option value="redirect" label="Redirect (重定向)" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="editingRule.action === 'redirect'" :label="t('dns.redirectTo')" required>
+          <el-input v-model="editingRule.redirect_to" :placeholder="t('dns.redirectToPlaceholder')" class="mono" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showRuleDialog = false">{{ t('dns.cancel') }}</el-button>
+        <el-button type="primary" @click="saveRule">{{ t('dns.save') }}</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- DoH 检测提示对话框 -->
+    <DohWarningDialog ref="dohDialogRef" />
   </div>
 </template>
 
@@ -388,17 +782,7 @@ onUnmounted(() => {
   padding: 8px 12px; border-bottom: 1px solid var(--on-border-light);
   background: var(--on-bg-elevated);
 }
-.dns-title { font-size: 14px; font-weight: 600; color: var(--on-text); }
-.dirty-badge {
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 10px;
-  background: var(--on-amber-glow, rgba(245, 158, 11, 0.15));
-  color: var(--on-amber, #fbbf24);
-  border: 1px solid var(--on-amber, #fbbf24);
-  font-weight: 500;
-  user-select: none;
-}
+.dns-title { font-size: 14px; font-weight: 600; color: var(--on-text); display: flex; align-items: center; }
 .dns-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 14px; }
 
 .dns-card {
@@ -420,8 +804,7 @@ onUnmounted(() => {
 .dns-card-body { padding: 14px 16px; }
 
 .dns-status-tags {
-  display: flex; align-items: center; gap: 8px;
-  margin-bottom: 4px;
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
 }
 
 .dns-hint {
@@ -437,23 +820,69 @@ onUnmounted(() => {
 
 .dns-stats {
   display: flex; gap: 12px;
-  margin-top: 14px;
-  padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.18);
-  border-radius: 6px;
+  margin-top: 14px; padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.18); border-radius: 6px;
 }
 .stat-item { flex: 1; text-align: center; }
-.stat-item.hl .stat-val { color: var(--on-accent, #2dd4bf); }
+.stat-item.hl .stat-val { color: var(--on-accent); }
 .stat-label { font-size: 11px; color: var(--on-text-dim); margin-bottom: 2px; }
 .stat-val { font-size: 18px; font-weight: 700; color: var(--on-text); }
 
+/* 分组管理 */
+.dns-groups-card .dns-card-body { padding: 0; }
+.dns-groups-body {
+  display: flex;
+  min-height: 300px;
+}
+.groups-list {
+  width: 280px;
+  border-right: 1px solid var(--on-border-light);
+  overflow-y: auto;
+  padding: 8px;
+}
+.group-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.group-item:hover { background: var(--on-bg-hover); }
+.group-item.active { background: var(--on-accent-bg, rgba(59, 130, 246, 0.1)); }
+.group-item.disabled { opacity: 0.6; }
+.drag-handle { cursor: grab; color: var(--on-text-dim); padding: 4px; }
+.drag-handle:active { cursor: grabbing; }
+.group-icon { font-size: 18px; color: var(--on-accent); }
+.group-info { flex: 1; min-width: 0; }
+.group-name { font-size: 13px; font-weight: 500; color: var(--on-text); }
+.group-meta { font-size: 11px; color: var(--on-text-dim); }
+.group-actions { display: flex; align-items: center; gap: 4px; }
+
+.rules-panel {
+  flex: 1;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.rules-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--on-border-light);
+  background: var(--on-bg-elevated, var(--on-bg-card));
+}
+.rules-panel-title { font-size: 14px; font-weight: 600; color: var(--on-text); }
+.rules-count { font-weight: normal; color: var(--on-text-dim); }
+
 /* 规则表 */
-.rules-table { display: flex; flex-direction: column; gap: 6px; }
+.rules-table {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex; flex-direction: column; gap: 6px;
+}
 .rule-row {
   display: grid;
-  grid-template-columns: 1fr 180px 50px;
-  gap: 8px;
-  align-items: center;
+  grid-template-columns: 1fr 100px 80px 120px 80px;
+  gap: 8px; align-items: center;
 }
 .rule-header {
   font-size: 11px; color: var(--on-text-dim);
@@ -461,33 +890,22 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--on-border-light);
 }
 .rule-empty { padding: 20px 0; text-align: center; }
-.default-ip-row {
-  display: flex; align-items: center; gap: 10px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--on-border-light);
-}
-.default-ip-label { font-size: 13px; color: var(--on-text-muted); white-space: nowrap; }
-.default-ip-input { width: 220px; }
-.default-ip-hint { font-size: 12px; }
+.pattern-text { font-size: 12px; }
 
 /* 日志 */
 .log-list {
   max-height: 320px; overflow-y: auto;
-  display: flex; flex-direction: column;
-  gap: 2px;
+  display: flex; flex-direction: column; gap: 2px;
 }
 .log-row {
   display: flex; align-items: center; gap: 8px;
-  padding: 4px 8px;
-  font-size: 12px;
-  border-radius: 3px;
+  padding: 4px 8px; font-size: 12px; border-radius: 3px;
 }
 .log-row:hover { background: var(--on-bg-hover); }
 .log-ts { width: 70px; font-size: 11px; flex-shrink: 0; }
 .log-domain { flex: 1; min-width: 0; color: var(--on-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-arrow { color: var(--on-text-dim); flex-shrink: 0; }
-.log-new { color: var(--on-accent, #2dd4bf); font-weight: 600; flex-shrink: 0; }
+.log-new { color: var(--on-accent); font-weight: 600; flex-shrink: 0; }
 .log-old { flex-shrink: 0; font-size: 11px; }
 .log-src { flex-shrink: 0; font-size: 11px; margin-left: auto; }
 

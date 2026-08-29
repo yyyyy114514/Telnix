@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { ElMessage } from 'element-plus'
 
-// TLS 证书信息展示
+const { t } = useI18n()
 const props = defineProps<{
   certInfo: string | null | undefined
 }>()
@@ -27,100 +29,106 @@ const info = computed<CertInfo | null>(() => {
   }
 })
 
-// 格式化时间：2024-01-01T00:00:00 → 2024-01-01 00:00:00
 function fmtTime(s?: string): string {
   if (!s) return ''
   return s.replace('T', ' ')
 }
 
-// 指纹分行展示（每行 16 字节，每组 2 字节）
-function fmtFingerprint(fp?: string): string {
-  if (!fp) return ''
-  // 已经是 AB:CD:EF 格式，直接返回
-  return fp
-}
+type CertStatus = 'success' | 'warning' | 'danger' | 'info'
+const certStatus = computed<{ type: CertStatus; text: string }>(() => {
+  if (!info.value) return { type: 'info', text: '' }
+  if (info.value.is_expired) return { type: 'danger', text: t('cert.expired') }
+  const days = info.value.days_remaining ?? 0
+  if (days <= 30) return { type: 'warning', text: t('cert.expiringSoon', { n: days }) }
+  return { type: 'success', text: t('cert.daysRemaining', { n: days }) }
+})
 
-// 截断长字符串
-function truncate(s: string, n = 80): string {
-  return s.length > n ? s.slice(0, n) + '...' : s
+function copy(text: string) {
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    ElMessage.success(t('common.copied'))
+  }).catch(() => {})
 }
 </script>
 
 <template>
   <div class="cert-info-view overflow-auto">
-    <div v-if="!info" class="empty-text text-dim">（无证书信息）</div>
-    <table v-else class="kv-table mono">
-      <tbody>
-        <tr>
-          <td class="k">主题</td>
-          <td class="v" :title="info.subject">{{ info.subject || '-' }}</td>
-        </tr>
-        <tr>
-          <td class="k">颁发者</td>
-          <td class="v" :title="info.issuer">{{ info.issuer || '-' }}</td>
-        </tr>
-        <tr>
-          <td class="k">生效时间</td>
-          <td class="v">{{ fmtTime(info.not_before) || '-' }}</td>
-        </tr>
-        <tr>
-          <td class="k">过期时间</td>
-          <td class="v">
-            <div>{{ fmtTime(info.not_after) || '-' }}</div>
-            <div v-if="info.is_expired" class="tag tag-expired">已过期</div>
-            <div v-else class="tag tag-valid">
-              剩余 {{ info.days_remaining ?? 0 }} 天
-            </div>
-          </td>
-        </tr>
-        <tr v-if="info.san && info.san.length">
-          <td class="k">SAN 域名</td>
-          <td class="v">
-            <div class="san-list">
-              <span v-for="(d, i) in info.san" :key="i" class="san-item">{{ d }}</span>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td class="k">序列号</td>
-          <td class="v">{{ info.serial_number || '-' }}</td>
-        </tr>
-        <tr>
-          <td class="k">SHA256 指纹</td>
-          <td class="v fingerprint">{{ fmtFingerprint(info.fingerprint_sha256) || '-' }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div v-if="!info" class="empty-text text-dim">{{ t('cert.noCertInfo') }}</div>
+    <div v-else class="cert-content">
+      <div class="cert-status-row">
+        <el-tag :type="certStatus.type" effect="dark">{{ certStatus.text }}</el-tag>
+      </div>
+      <table class="kv-table mono">
+        <tbody>
+          <tr>
+            <td class="k">{{ t('cert.subject') }}</td>
+            <td class="v copyable" @click="copy(info.subject || '')">{{ info.subject || '-' }}</td>
+          </tr>
+          <tr>
+            <td class="k">{{ t('cert.issuer') }}</td>
+            <td class="v copyable" @click="copy(info.issuer || '')">{{ info.issuer || '-' }}</td>
+          </tr>
+          <tr>
+            <td class="k">{{ t('cert.notBefore') }}</td>
+            <td class="v">{{ fmtTime(info.not_before) || '-' }}</td>
+          </tr>
+          <tr>
+            <td class="k">{{ t('cert.notAfter') }}</td>
+            <td class="v">
+              <div>{{ fmtTime(info.not_after) || '-' }}</div>
+              <el-tag :type="certStatus.type" size="small" effect="plain" style="margin-top: 3px">
+                {{ certStatus.text }}
+              </el-tag>
+            </td>
+          </tr>
+          <tr v-if="info.san && info.san.length">
+            <td class="k">{{ t('cert.san') }}</td>
+            <td class="v">
+              <div class="san-list">
+                <span v-for="(d, i) in info.san" :key="i" class="san-item copyable" :title="d" @click="copy(d)">{{ d }}</span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="k">{{ t('cert.serialNumber') }}</td>
+            <td class="v copyable" @click="copy(info.serial_number || '')">{{ info.serial_number || '-' }}</td>
+          </tr>
+          <tr>
+            <td class="k">{{ t('cert.sha256Fingerprint') }}</td>
+            <td class="v fingerprint copyable" @click="copy(info.fingerprint_sha256 || '')">
+              <span>{{ info.fingerprint_sha256 || '-' }}</span>
+              <span v-if="info.fingerprint_sha256" class="copy-hint">{{ t('common.copy') }}</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .cert-info-view { padding: 8px; }
+.cert-content { display: flex; flex-direction: column; gap: 10px; }
+.cert-status-row { display: flex; }
 .empty-text { text-align: center; padding: 18px; }
 .kv-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
 .kv-table td { padding: 6px 8px; border-bottom: 1px solid var(--on-border-light); vertical-align: top; word-break: break-all; }
 .kv-table td.k {
-  width: 90px; color: var(--on-text-muted); white-space: nowrap;
+  width: 110px; color: var(--on-text-muted); white-space: nowrap;
   font-weight: 500;
 }
 .kv-table td.v { color: var(--on-text); }
-.tag {
-  display: inline-block; padding: 1px 6px; border-radius: 3px;
-  font-size: 11px; margin-top: 4px; font-weight: 600;
-}
-.tag-expired {
-  color: var(--on-error); background: rgba(248,81,73,0.12);
-  border: 1px solid rgba(248,81,73,0.4);
-}
-.tag-valid {
-  color: var(--on-ok); background: rgba(63,185,80,0.12);
-  border: 1px solid rgba(63,185,80,0.4);
-}
+.copyable { cursor: pointer; border-radius: 3px; padding: 1px 4px; }
+.copyable:hover { background: var(--on-bg-hover); }
+.copy-hint { display: none; font-size: 10px; color: var(--on-text-dim); margin-left: 4px; }
+.copyable:hover .copy-hint { display: inline; }
 .san-list { display: flex; flex-wrap: wrap; gap: 4px; }
 .san-item {
   display: inline-block; padding: 1px 6px; border-radius: 3px;
   background: var(--on-bg); border: 1px solid var(--on-border-light);
-  font-size: 11px; color: var(--on-text-muted);
+  font-size: 11px; color: var(--on-text-muted); max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.fingerprint { word-break: break-all; line-height: 1.5; }
+.san-item:hover { background: var(--on-bg-hover); color: var(--on-text); }
+.fingerprint { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; line-height: 1.6; }
 </style>

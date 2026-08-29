@@ -1,12 +1,15 @@
-"""SSL bump：根证书管理 + 动态证书签发。
+"""SSL bump: root certificate management + dynamic certificate issuance.
 
-用 cryptography 库生成自签根证书，并为每个域名动态签发叶证书（用根证书签）。
-证书缓存避免重复签发。安装/检查/移除根证书走 certutil（安装需 UAC）。
+Uses the cryptography library to generate a self-signed root certificate and
+dynamically issue leaf certificates for each domain (signed by the root).
+Certificate caching avoids repeated issuance. Install/check/remove of the root
+certificate uses certutil (installation requires UAC elevation).
 
-跨平台说明：
-- Windows：用 certutil + ShellExecuteEx 提权安装到 Root 信任库。
-- macOS：用 security add-trusted-cert 安装到钥匙串（需用户授权）。
-- Linux：不自动安装（不同发行版证书库不同），提示用户手动安装。
+Cross-platform notes:
+- Windows: uses certutil + ShellExecuteEx with elevation to install into the Root trust store.
+- macOS: uses `security add-trusted-cert` to install into the keychain (requires user authorization).
+- Linux: no automatic installation (different distros use different certificate stores);
+  the user is prompted to install manually.
 """
 
 import os
@@ -41,7 +44,7 @@ _HOST_RE = re.compile(r'^[A-Za-z0-9.\-:]+$')
 
 
 def _strip_port(host: str) -> str:
-    """去掉 host 末尾的端口，正确处理 IPv6 字面量。"""
+    """Strip the trailing port from host, correctly handling IPv6 literals."""
     if host.startswith("["):
         idx = host.find("]")
         if idx != -1:
@@ -53,7 +56,7 @@ def _strip_port(host: str) -> str:
 
 
 def _is_valid_host(host: str) -> bool:
-    """校验 host 是否合法（防路径遍历：拒绝包含 / \\ .. 等字符的 host）。"""
+    """Validate host legitimacy (path traversal protection: reject / \\ .. etc.)."""
     if not host or len(host) > 253:
         return False
     # 拒绝包含路径分隔符或 .. 段（防止写入 cert_dir 之外）
@@ -63,7 +66,7 @@ def _is_valid_host(host: str) -> bool:
 
 
 class SSLBumpManager:
-    """SSL bump：根证书管理 + 动态证书签发。"""
+    """SSL bump: root certificate management + dynamic certificate issuance."""
 
     def __init__(self, cert_dir: str):
         self.cert_dir = cert_dir
@@ -79,7 +82,7 @@ class SSLBumpManager:
         self._ensure_root_cert()
 
     def _get_host_lock(self, host: str) -> threading.Lock:
-        """获取指定 host 的独立锁（懒创建，带 LRU 淘汰）。"""
+        """Get the per-host lock (lazily created, with LRU eviction)."""
         with self._host_locks_lock:
             lock = self._host_locks.get(host)
             if lock is None:
@@ -94,7 +97,7 @@ class SSLBumpManager:
     # ---------- 根证书 ----------
 
     def _ensure_root_cert(self):
-        """生成或加载根证书与密钥。"""
+        """Generate or load the root certificate and key."""
         if os.path.exists(self.root_cert_path) and os.path.exists(self.root_key_path):
             self._load_root()
             # 兼容性：老版本生成的根证书没有 SKI，重新生成（一次性迁移）
@@ -172,12 +175,13 @@ class SSLBumpManager:
     # ---------- 动态证书签发 ----------
 
     def get_cert(self, host: str) -> tuple[str, str]:
-        """获取指定域名的证书（有缓存），返回 (cert_path, key_path)。
+        """Get the certificate for the specified domain (cached), returns (cert_path, key_path).
 
-        性能优化：每域名独立锁 — 同 host 互斥避免重复签发，
-        不同 host 的 keygen 完全并行（原全局锁会串行化所有域名，每个 keygen 50-150ms）。
+        Performance: per-host lock — same host is mutually exclusive to avoid duplicate issuance,
+        different hosts' keygen runs fully in parallel (the original global lock serialized all
+        domains, with each keygen taking 50-150ms).
 
-        安全：校验 host 合法性，防止路径遍历写入 cert_dir 之外。
+        Security: validates host legitimacy to prevent path traversal writes outside cert_dir.
         """
         # 去掉端口
         host = _strip_port(host)
@@ -211,12 +215,13 @@ class SSLBumpManager:
             return cert_path, key_path
 
     def _sign_host_cert(self, host: str, cert_path: str, key_path: str):
-        """用根证书为 host 签发叶证书。
+        """Issue a leaf certificate for host signed by the root certificate.
 
-        性能优化：子证书用 ECDSA P-256（keygen ~1-5ms），
-        而非 RSA 2048（keygen ~50-150ms）。
-        根证书保持 RSA（已安装），签发子证书时用 RSA 根密钥签名（跨算法签名合法）。
-        浏览器加载 30 个新域名时，keygen 总耗时从 3 秒降到 150ms。
+        Performance: leaf certificates use ECDSA P-256 (keygen ~1-5ms),
+        rather than RSA 2048 (keygen ~50-150ms).
+        The root certificate remains RSA (already installed); when issuing leaf
+        certificates the RSA root key is used for signing (cross-algorithm signing is valid).
+        When the browser loads 30 new domains, total keygen time drops from 3s to 150ms.
         """
         key = ec.generate_private_key(ec.SECP256R1())
         subject = x509.Name([
@@ -280,13 +285,16 @@ class SSLBumpManager:
         os.chmod(cert_path, 0o644)
 
     def _purge_leaf_certs(self):
-        """清空所有缓存的叶证书文件（根证书重新生成时调用）。
+        """Clear all cached leaf certificate files (called when the root cert is regenerated).
 
-        旧叶证书由旧根的私钥签发，与新根的公钥不匹配。如果不清空，get_cert
-        会继续返回旧叶证书，客户端收到后无法用信任库中的新根验证签名，
-        发出 certificate_unknown alert（46），导致所有 host TLS 握手失败。
+        Old leaf certificates were signed by the old root's private key and do not
+        match the new root's public key. If not cleared, get_cert will keep returning
+        old leaf certificates; the client, upon receiving them, cannot verify the
+        signature with the new root in the trust store, sending a certificate_unknown
+        alert (46) and causing TLS handshake failures for all hosts.
 
-        本方法在 _ensure_root_cert 重新生成根证书前调用（启动时，无并发）。
+        This method is called in _ensure_root_cert before regenerating the root
+        certificate (at startup, no concurrency).
         """
         try:
             for name in os.listdir(self.cert_dir):
@@ -305,14 +313,20 @@ class SSLBumpManager:
         # 清空内存中的叶证书缓存（启动时为空，防御性调用）
         self._cert_cache.clear()
 
+    def get_leaf_cert_count(self) -> int:
+        """Get the count of cached leaf certificates (in-memory cache size)."""
+        return len(self._cert_cache)
+
     def _needs_resign(self, cert_path: str) -> bool:
-        """检查磁盘上的叶证书是否需要重新签发。
+        """Check whether the leaf certificate on disk needs to be re-issued.
 
-        需要重新签发的情况：
-        1. 叶证书签名无法用当前根公钥验证（根证书已重新生成，旧叶证书 stale）
-        2. 证书文件不包含完整链（旧格式只含 leaf，缺少 root 证书链）
+        Cases requiring re-issuance:
+        1. The leaf certificate signature cannot be verified with the current root
+           public key (the root cert has been regenerated, old leaf cert is stale).
+        2. The certificate file does not contain the full chain (old format only
+           contains the leaf, missing the root certificate chain).
 
-        返回 True 表示需要重新签发，False 表示可继续使用缓存。
+        Returns True if re-issuance is required, False to continue using the cache.
         """
         try:
             with open(cert_path, "rb") as f:
@@ -344,7 +358,7 @@ class SSLBumpManager:
     # ---------- 证书库（跨平台） ----------
 
     def is_root_cert_installed(self) -> bool:
-        """检查根证书是否已安装到系统信任库（按指纹精确匹配）。"""
+        """Check whether the root certificate is installed in the system trust store (exact match by thumbprint)."""
         if IS_WINDOWS:
             return self._verify_root_cert_in_store_by_thumbprint()
         if IS_MACOS:
@@ -359,7 +373,7 @@ class SSLBumpManager:
         return False
 
     def _verify_root_cert_in_store_by_thumbprint(self) -> bool:
-        """用 SHA1 指纹精确验证根证书是否在 Local Machine 或 Current User Root store 中。"""
+        """Verify the root certificate is in the Local Machine or Current User Root store by SHA1 thumbprint."""
         if not IS_WINDOWS:
             return False
         thumbprint = self.root_thumbprint().lower()
@@ -382,11 +396,11 @@ class SSLBumpManager:
         return False
 
     def root_thumbprint(self) -> str:
-        """计算根证书 SHA1 指纹（大写十六进制，无分隔）。"""
+        """Compute the SHA1 thumbprint of the root certificate (uppercase hex, no separator)."""
         return self._root_cert.fingerprint(hashes.SHA1()).hex().upper()
 
     def install_root_cert(self) -> dict:
-        """安装根证书到系统信任库。"""
+        """Install the root certificate into the system trust store."""
         if IS_WINDOWS:
             # 把 PEM 转 DER 临时文件（certutil 对 DER 兼容性更好）
             der_path = self.root_cert_path + ".der"
@@ -404,12 +418,12 @@ class SSLBumpManager:
             error = result.get("error", "")
             if exit_code != 0:
                 return {"installed": False, "exit_code": exit_code,
-                        "error": error or f"certutil 退出码 {exit_code}"}
+                        "error": error or f"certutil exit code {exit_code}"}
             # 关键：主动复核（按指纹），避免 certutil exit 0 但实际未安装
             time.sleep(0.5)
             if not self._verify_root_cert_in_store_by_thumbprint():
                 return {"installed": False, "exit_code": 0,
-                        "error": "certutil 返回成功但未在信任库中找到对应指纹的证书"}
+                        "error": "certutil returned success but no certificate with the matching thumbprint was found in the trust store"}
             return {"installed": True, "exit_code": 0}
         if IS_MACOS:
             try:
@@ -425,18 +439,44 @@ class SSLBumpManager:
                         "stderr": r.stderr[-400:] if r.stderr else ""}
             except Exception as e:  # noqa: BLE001
                 return {"installed": False, "exit_code": -1,
-                        "error": f"macOS 证书安装失败: {e}"}
+                        "error": f"macOS certificate installation failed: {e}"}
         return {
             "installed": False,
             "exit_code": -1,
-            "hint": ("Linux 上需手动安装根证书。Debian/Ubuntu: "
+            "hint": ("On Linux the root certificate must be installed manually. Debian/Ubuntu: "
                      f"sudo cp '{self.root_cert_path}' /usr/local/share/ca-certificates/telnix_root.crt && "
-                     "sudo update-ca-certificates。"
-                     "RHEL/CentOS: sudo trust anchor '{self.root_cert_path}'"),
+                     f"sudo update-ca-certificates. "
+                     f"RHEL/CentOS: sudo trust anchor '{self.root_cert_path}'"),
         }
 
+    def regenerate_root_cert(self) -> None:
+        """Regenerate the root certificate and key (dangerous operation)."""
+        # 清空所有旧叶证书缓存
+        self._purge_leaf_certs()
+        # 清除内存中的根证书
+        self._root_key = None
+        self._root_cert = None
+        # 删除旧的根证书文件
+        try:
+            if os.path.exists(self.root_cert_path):
+                os.remove(self.root_cert_path)
+            if os.path.exists(self.root_key_path):
+                os.remove(self.root_key_path)
+        except OSError:
+            pass
+        # 删除 DER 格式的副本
+        for ext in ("", ".der"):
+            path = self.root_cert_path + ext
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        # 重新生成根证书
+        self._ensure_root_cert()
+
     def remove_root_cert(self) -> dict:
-        """从系统信任库移除根证书。"""
+        """Remove the root certificate from the system trust store."""
         if IS_WINDOWS:
             result = _run_elevated("certutil.exe",
                                    f'-delstore Root {self.root_thumbprint()}')
@@ -453,11 +493,11 @@ class SSLBumpManager:
                         "exit_code": r.returncode}
             except Exception as e:  # noqa: BLE001
                 return {"removed": False, "exit_code": -1,
-                        "error": f"macOS 证书移除失败: {e}"}
+                        "error": f"macOS certificate removal failed: {e}"}
         return {
             "removed": False,
             "exit_code": -1,
-            "hint": "Linux 上需手动移除根证书（删除 /usr/local/share/ca-certificates/telnix_root.crt 后运行 update-ca-certificates）",
+            "hint": "On Linux the root certificate must be removed manually (delete /usr/local/share/ca-certificates/telnix_root.crt then run update-ca-certificates)",
         }
 
 
@@ -493,15 +533,15 @@ if IS_WINDOWS:
 
 
 def _run_elevated(exe: str, args: str) -> dict:
-    """以管理员权限运行 exe 并等待完成，返回 dict。
+    """Run exe with administrator privileges and wait for completion; returns a dict.
 
-    返回:
-      - exit_code: 进程退出码（-1 启动失败，-2 超时，-3 等待失败）
-      - error: 错误描述（成功时为空）
-    仅 Windows 调用。
+    Returns:
+      - exit_code: process exit code (-1 launch failed, -2 timeout, -3 wait failed)
+      - error: error description (empty on success)
+    Windows-only.
     """
     if not IS_WINDOWS:
-        return {"exit_code": -1, "error": "非 Windows 平台"}
+        return {"exit_code": -1, "error": "non-Windows platform"}
     sei = _SHELLEXECUTEINFO()
     sei.cbSize = ctypes.sizeof(_SHELLEXECUTEINFO)
     sei.fMask = SEE_MASK_NOCLOSEPROCESS
@@ -513,8 +553,8 @@ def _run_elevated(exe: str, args: str) -> dict:
     if not ok:
         err_code = ctypes.windll.kernel32.GetLastError()
         if err_code == 1223:
-            return {"exit_code": -1, "error": "用户取消了 UAC 提权"}
-        return {"exit_code": -1, "error": f"ShellExecuteExW 失败（GetLastError={err_code}）"}
+            return {"exit_code": -1, "error": "user cancelled UAC elevation"}
+        return {"exit_code": -1, "error": f"ShellExecuteExW failed (GetLastError={err_code})"}
     if not sei.hProcess:
         return {"exit_code": 0, "error": ""}
     wait_result = ctypes.windll.kernel32.WaitForSingleObject(
@@ -523,10 +563,10 @@ def _run_elevated(exe: str, args: str) -> dict:
     if wait_result == 0x102:  # WAIT_TIMEOUT
         ctypes.windll.kernel32.TerminateProcess(sei.hProcess, 1)
         ctypes.windll.kernel32.CloseHandle(sei.hProcess)
-        return {"exit_code": -2, "error": f"UAC 等待超时（{_WAIT_UAC_TIMEOUT_MS}ms）"}
+        return {"exit_code": -2, "error": f"UAC wait timeout ({_WAIT_UAC_TIMEOUT_MS}ms)"}
     elif wait_result == 0xFFFFFFFF:  # WAIT_FAILED
         ctypes.windll.kernel32.CloseHandle(sei.hProcess)
-        return {"exit_code": -3, "error": "WaitForSingleObject 失败"}
+        return {"exit_code": -3, "error": "WaitForSingleObject failed"}
     else:
         ctypes.windll.kernel32.GetExitCodeProcess(
             sei.hProcess, ctypes.byref(exit_code))

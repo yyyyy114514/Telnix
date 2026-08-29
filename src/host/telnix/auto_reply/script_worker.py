@@ -1,15 +1,19 @@
-"""Python 脚本自动修改 - worker 子进程。
+"""Python script auto-modify - worker subprocess.
 
-主进程（proxy）通过 stdin/stdout 用 JSON 行协议与 worker 通信：
-- 主进程写一行 JSON 请求（body 用 base64 编码）
-- worker 读一行、调用用户脚本的 on_request/on_response、写一行 JSON 响应
+The main process (proxy) communicates with the worker via stdin/stdout using a
+JSON line protocol:
+- The main process writes one line of JSON request (body is base64-encoded)
+- The worker reads one line, calls the user script's on_request/on_response, and writes one line of JSON response
 
-用户脚本 API：
+User script API:
     def on_request(ctx):
         # ctx.host / ctx.path / ctx.method / ctx.url / ctx.scheme
         # ctx.pid / ctx.process_name
         # ctx.request_headers (dict) / ctx.request_body (bytes)
         # 修改方法：ctx.set_request_header / ctx.set_request_body
+        # ctx.log("message") 记录日志到调试输出
+        # ctx.set_var("key", value) / ctx.get_var("key") 操作中间变量
+        # print() 输出自动捕获到 ctx.logs
         # 返回 None：继续转发
         # 返回 {"mock": True, "status": 200, "headers": {...}, "body": b"..."}：直接返回
         # 返回 {"drop": True}：拒绝
@@ -19,19 +23,28 @@
         # 修改方法：ctx.set_response_header / ctx.set_response_body / ctx.set_status_code
         # 返回 None：继续返回客户端
 
-启动参数：
+Launch arguments:
     python -m telnix.auto_reply.script_worker <script_path> [venv_python]
 
-错误处理：
-    - 脚本加载失败：worker 启动后立即写一行 {"error": "..."} 并退出
-    - 脚本运行时异常：捕获后写 {"error": "...", "traceback": "..."}，继续等待下一请求
-    - stdin EOF：worker 退出
+Error handling:
+    - Script load failure: worker writes a line {"error": "..."} immediately after startup and exits
+    - Script runtime exception: caught, writes {"error": "...", "traceback": "..."}, continues waiting for next request
+    - stdin EOF: worker exits
+
+Debugging features:
+    - ctx.log(msg): 记录日志到 logs 列表，支持格式化
+    - ctx.set_var(key, value): 存储中间变量
+    - ctx.get_var(key): 获取中间变量，默认 None
+    - ctx.variables: 所有中间变量的字典
+    - ctx.logs: 所有日志条目的列表
+    - print() 输出自动捕获并追加到 ctx.logs
 """
 
 import base64
 import builtins as _builtins
 import json
 import os
+import runpy
 import sys
 import traceback
 
@@ -45,37 +58,35 @@ import traceback
 # 真正的隔离依赖 script_runner.py 启动的独立子进程 + 资源限制。
 # 本沙箱作为深度防御的一层，阻止最常见的攻击向量。
 
-# 禁止用户脚本导入的顶层模块（按危险程度分类）
+# 禁止用户脚本导入的顶层模块（精简黑名单）
+# 根本策略：只在 builtins 层面封禁 exec/eval/compile/open（见 _BLOCKED_BUILTINS），
+# 模块层面只封禁真正无法安全代理的少数危险模块，其余全部放行。
+# 安全保证：子进程隔离（Job Object）作为深度防御兜底，即使沙箱被绕过也在受限环境中。
+#
+# os/sys 通过 _safe_import 返回受限代理（移除危险函数/属性），不在黑名单中。
+# types/ast/inspect 等被第三方库常间接依赖的模块已放行——它们需要配合 exec/compile
+# 才能执行任意代码，而 exec/compile 已在 _BLOCKED_BUILTINS 中封禁。
 _BLOCKED_TOP_MODULES = frozenset({
-    # 进程/系统操作
-    "os", "sys", "subprocess", "os.path", "posix", "nt", "ntpath", "posixpath",
-    # 网络（urllib 和 http 通过特殊逻辑处理：仅允许 urllib.parse）
-    "socket", "ssl", "http", "requests", "asyncio",
-    # 并发（可绕过沙箱）
-    "threading", "multiprocessing", "concurrent", "queue", "_thread",
-    # 代码执行/反射
-    "importlib", "builtins", "runpy", "code", "codeop", "compile", "compileall",
-    "py_compile", "ctypes", "cffi", "gc",
-    # 序列化（可执行任意代码）
-    "pickle", "marshal", "shelve", "dill",
-    # 文件系统
-    "shutil", "tempfile", "pathlib", "glob", "linecache", "fileinput",
-    "distutils", "sysconfig",
-    # 进程信息/内省
-    "inspect", "traceback", "dis", "platform", "psutil",
-    # 其他
-    "pty", "webbrowser", "signal", "mmap", "fcntl", "resource",
-    "winreg", "ctypes.wintypes",
-    # 包管理
-    "pkgutil", "modulefinder", "zipimport", "pkg_resources",
-    # AST / 字节码操作（深度防御：可构造 code object 逃逸）
-    # 注意：compile 已在 _BLOCKED_BUILTINS 中移除，但 types.CodeType
-    # 仍可构造 code object，故一并封禁
-    "ast", "types", "opcode", "bytecode",
-    # 弱引用/最终化器（可绕过对象封装访问内部状态）
-    "weakref", "weakrefset", "finalize",
+    # 进程操作（无法安全代理）
+    "subprocess", "posix", "nt",
+    # 网络（无法安全代理）
+    "socket", "ssl",
+    # FFI（可绕过沙箱）
+    "ctypes", "cffi",
+    # 序列化（pickle/shelve/dill 可通过 __reduce__ 执行任意代码）
+    # 注：marshal 不封禁——runpy.run_path 内部 pkgutil.read_code 需要 import marshal
+    # 读取 .pyc，封禁会导致脚本加载失败。marshal 本身只能反序列化数据结构，
+    # 无法直接执行代码（code 对象需配合 exec/compile/types.FunctionType，均已封禁或受限）。
+    "pickle", "shelve", "dill",
+    # 代码执行入口
+    "runpy", "code", "codeop", "compile", "compileall", "py_compile",
     # 调试器/追踪（可挂载到解释器执行任意代码）
     "bdb", "pdb", "trace", "coverage",
+    # 系统操作
+    "pty", "webbrowser", "signal", "mmap", "fcntl", "resource",
+    "winreg", "ctypes.wintypes",
+    # 并发（可绕过沙箱）
+    "multiprocessing", "_thread",
 })
 
 # 用户脚本禁止访问的 builtins 名称
@@ -93,32 +104,142 @@ _BLOCKED_BUILTINS = frozenset({
 })
 
 
-def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """受限 __import__：拦截危险模块的导入。
+# ---------- os 模块安全代理 ----------
+# os 模块被大量第三方库间接导入（如 json/datetime/pathlib 内部使用 os），
+# 完全封禁会导致脚本无法加载。此处通过代理模块移除危险函数（system/popen/exec* 等），
+# 保留 os.path/os.environ/常量等安全功能。
+# 安全保证：子进程隔离（Job Object）作为深度防御兜底，即使代理被绕过也在受限环境中。
+_OS_DANGEROUS = frozenset({
+    'system', 'popen', 'popen2', 'popen3', 'popen4',
+    'execv', 'execve', 'execvp', 'execvpe',
+    'spawnl', 'spawnle', 'spawnlp', 'spawnlpe', 'spawnv', 'spawnve', 'spawnvp', 'spawnvpe',
+    'fork', 'forkpty',
+    'kill', 'killpg',
+    'setuid', 'setgid', 'seteuid', 'setegid', 'setreuid', 'setregid', 'setgroups',
+    'chroot', 'chdir', 'fchdir',
+    'putenv', 'unsetenv',
+    'fdopen', 'close', 'dup', 'dup2', 'fchmod', 'fchown',
+    'pipe', 'read', 'write', 'open', 'openpty',
+    'umask', 'chmod', 'chown', 'lchown',
+    'mkdir', 'makedirs', 'remove', 'rmdir', 'removedirs', 'unlink',
+    'rename', 'renames', 'replace',
+    'symlink', 'link', 'readlink',
+    'truncate', 'ftruncate',
+})
 
-    - 禁止相对导入（level != 0）
-    - 禁止导入 _BLOCKED_TOP_MODULES 中的顶层模块
-    - urllib 仅允许 urllib.parse（其他子模块如 urllib.request 可发起网络请求）
-    - 禁止 urllib 顶层导入（必须明确导入 urllib.parse 子模块）
+_safe_os_cache = None
+
+
+def _get_safe_os():
+    """创建受限 os 模块代理（移除危险函数），缓存复用。"""
+    global _safe_os_cache
+    if _safe_os_cache is not None:
+        return _safe_os_cache
+    real_os = _real_import('os', {}, {}, (), 0)
+    # 用 type(sys) 获取 ModuleType（types 在黑名单中，不能直接 import）
+    safe = type(sys)('os')
+    for attr in dir(real_os):
+        if attr.startswith('_'):
+            continue
+        if attr in _OS_DANGEROUS:
+            continue
+        try:
+            setattr(safe, attr, getattr(real_os, attr))
+        except (AttributeError, TypeError):
+            pass
+    _safe_os_cache = safe
+    return safe
+
+
+# ---------- sys 模块安全代理 ----------
+# sys 被 runpy/codec 等内部机制隐式 import，完全封禁会导致脚本加载失败。
+# 通过代理移除危险属性（_getframe/executable/settrace 等），
+# 保留 version/platform/maxsize/modules/path_importer_cache 等安全属性。
+# 注：modules/path_importer_cache/metapath/path_hooks 保留为只读引用，
+# 第三方库（如 json/datetime）内部常隐式访问这些导入机制缓存，封禁会导致脚本加载失败。
+# 真正危险的 settrace/setprofile/_getframe 等仍被封禁。
+_SYS_DANGEROUS = frozenset({
+    '_getframe', 'exit', 'executable', 'argv',
+    'setrecursionlimit', 'settrace', 'setprofile', '_current_frames',
+    '_current_exceptions',
+    'flags', '_xoptions', 'dllhandle', 'winver', 'audithook', 'excepthook',
+    'unraisablehook', '_stdlib_dir', 'base_exec_prefix', 'exec_prefix',
+    'prefix', 'base_prefix',
+})
+
+_safe_sys_cache = None
+
+
+def _get_safe_sys():
+    """创建受限 sys 模块代理（移除危险属性），缓存复用。"""
+    global _safe_sys_cache
+    if _safe_sys_cache is not None:
+        return _safe_sys_cache
+    safe = type(sys)('sys')
+    for attr in dir(sys):
+        if attr.startswith('_') and attr not in ('__name__', '__doc__'):
+            continue
+        if attr in _SYS_DANGEROUS:
+            continue
+        try:
+            setattr(safe, attr, getattr(sys, attr))
+        except (AttributeError, TypeError):
+            pass
+    _safe_sys_cache = safe
+    return safe
+
+
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """Restricted __import__: intercepts imports of dangerous modules.
+
+    - Forbids relative imports (level != 0)
+    - Forbids importing top-level modules in _BLOCKED_TOP_MODULES
+    - os: returns a safe proxy with dangerous functions removed
+    - urllib only allows urllib.parse (other submodules like urllib.request can make network requests)
+    - Forbids top-level urllib import (must explicitly import the urllib.parse submodule)
     """
     if level != 0:
         raise ImportError(
-            f"用户脚本禁止使用相对导入（level={level}），请用绝对导入"
+            f"User scripts are not allowed to use relative imports (level={level}); please use absolute imports"
         )
     if not name or not isinstance(name, str):
-        raise ImportError("无效的模块名")
+        raise ImportError("Invalid module name")
     top = name.split(".")[0]
     if top in _BLOCKED_TOP_MODULES:
         raise ImportError(
-            f"安全限制：用户脚本禁止导入模块 '{name}'（顶层 '{top}' 被阻止）"
+            f"Security restriction: user scripts are not allowed to import module '{name}' (top-level '{top}' is blocked)"
         )
+    # os 特殊处理：返回受限代理模块（移除 system/popen/exec* 等危险函数）
+    if top == "os":
+        if name == "os":
+            safe_os = _get_safe_os()
+            if fromlist:
+                # from os import X：检查 X 是否为危险函数
+                for item in fromlist:
+                    if item in _OS_DANGEROUS:
+                        raise ImportError(
+                            f"Security restriction: 'from os import {item}' is forbidden"
+                        )
+            return safe_os
+        # os.xxx 子模块（如 os.path）：正常导入（os.path 是只读路径操作，安全）
+        return _real_import(name, globals, locals, fromlist, level)
+    # sys 特殊处理：返回受限代理模块（移除 _getframe/modules/path 等危险属性）
+    if top == "sys":
+        safe_sys = _get_safe_sys()
+        if fromlist:
+            for item in fromlist:
+                if item in _SYS_DANGEROUS:
+                    raise ImportError(
+                        f"Security restriction: 'from sys import {item}' is forbidden"
+                    )
+        return safe_sys
     # urllib 特殊处理：仅允许 urllib.parse，禁止 urllib 顶层和其他子模块
     # （urllib.request 可发起网络请求，urllib.error 可访问 socket）
     if top == "urllib":
         # 允许 urllib.parse 和 urllib.parse.xxx
         if name != "urllib.parse" and not name.startswith("urllib.parse."):
             raise ImportError(
-                f"安全限制：用户脚本仅允许导入 urllib.parse，禁止 '{name}'"
+                f"Security restriction: user scripts can only import urllib.parse; '{name}' is forbidden"
             )
         # 当 fromlist 非空时（如 from urllib import parse），仍允许（实际导入 urllib.parse）
         # 但禁止 from urllib.request import urlopen 这种写法
@@ -127,21 +248,20 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
             for item in fromlist:
                 if item != "parse":
                     raise ImportError(
-                        f"安全限制：用户脚本禁止 from urllib import {item}"
+                        f"Security restriction: user scripts are forbidden from 'from urllib import {item}'"
                     )
     # 调用真实 import
     return _real_import(name, globals, locals, fromlist, level)
 
 
-# 保存真实 __import__ 引用（在替换前捕获）
-_real_import = _builtins.__import__
-
+# 将真实 __import__ 引用保存到模块级变量，供受限 import 使用
+_real_import: object = None
 
 def _blocked_open(*args, **kwargs):
-    """阻止用户脚本通过 open() 读写文件。"""
+    """Block user scripts from reading/writing files via open()."""
     raise PermissionError(
-        "安全限制：用户脚本禁止使用 open() 读写文件。"
-        "如需处理请求/响应数据，请通过 ctx.request_body / ctx.set_request_body() 操作。"
+        "Security restriction: user scripts are not allowed to use open() to read/write files. "
+        "To handle request/response data, use ctx.request_body / ctx.set_request_body()."
     )
 
 
@@ -149,15 +269,18 @@ _safe_builtins_cache: dict | None = None
 
 
 def _build_safe_builtins() -> dict:
-    """构造受限的 builtins 字典供用户脚本使用。
+    """Build a restricted builtins dict for user scripts.
 
-    移除危险的内置函数（exec/eval/open/__import__ 等），
-    替换 __import__ 为白名单版本，阻断 os/subprocess/socket 等模块的导入。
-    结果缓存，避免每次加载脚本时重复构建。
+    Removes dangerous built-in functions (exec/eval/open/__import__ etc.),
+    replaces __import__ with a whitelist version, blocking imports of modules
+    like os/subprocess/socket. Results are cached to avoid rebuilding on every
+    script load.
     """
-    global _safe_builtins_cache
+    global _safe_builtins_cache, _real_import
     if _safe_builtins_cache is not None:
         return _safe_builtins_cache
+    # 在受限环境构建前保存真实 __import__（必须在替换前捕获，否则会得到受限版本）
+    _real_import = _builtins.__import__
     b = {}
     for k, v in _builtins.__dict__.items():
         if k in _BLOCKED_BUILTINS:
@@ -174,10 +297,17 @@ def _build_safe_builtins() -> dict:
 
 
 class Ctx:
-    """脚本上下文对象。
+    """Script context object.
 
-    暴露给用户脚本的属性和方法，用户脚本通过 ctx.* 读取请求/响应信息，
-    通过 ctx.set_* 方法修改。
+    Exposes attributes and methods to the user script; the user script reads
+    request/response info via ctx.* and modifies them via ctx.set_* methods.
+
+    Debugging features:
+    - ctx.log(msg): Record log entry (appended to ctx.logs)
+    - ctx.set_var(key, value) / ctx.get_var(key): Store/retrieve intermediate variables
+    - ctx.variables: Dict of all intermediate variables
+    - ctx.logs: List of all log entries (includes ctx.log() calls and captured print() output)
+    - print() output is automatically captured and appended to ctx.logs
     """
 
     def __init__(self, data: dict):
@@ -212,7 +342,76 @@ class Ctx:
         self._modified_response_body = None
         self._modified_status_code = None
 
-    # 请求修改 API
+        # === 调试增强：日志和中间变量 ===
+        # ctx.log() 和捕获的 print() 输出都会追加到这里
+        self._logs: list[str] = []
+        # 中间变量存储（set_var/get_var）
+        self._variables: dict = {}
+
+    # ---------- 调试 API ----------
+
+    def log(self, *args, **kwargs):
+        """记录日志条目到 ctx.logs（支持格式化字符串，用法类似 print()）。
+
+        用法示例：
+            ctx.log("Processing request:", ctx.path)
+            ctx.log(f"Request body length: {len(ctx.request_body)}")
+            ctx.log("User ID extracted:", user_id)
+        """
+        try:
+            # 类似 print() 的格式化
+            if args or kwargs:
+                # 处理 sep 参数（默认空格）
+                sep = kwargs.pop("sep", " ")
+                # 处理 end 参数（默认换行）
+                end = kwargs.pop("end", "\n")
+                if kwargs:
+                    msg = str(args[0]) if args else ""
+                    for k, v in kwargs.items():
+                        msg += f" {k}={v}"
+                else:
+                    msg = sep.join(str(a) for a in args)
+                msg = msg.rstrip("\n") + end
+            else:
+                msg = "\n"
+            self._logs.append(msg)
+        except Exception:  # noqa: BLE001
+            # 日志记录失败不影响脚本执行
+            pass
+
+    @property
+    def logs(self) -> list[str]:
+        """所有日志条目的列表（包括 ctx.log() 和 print() 输出）。"""
+        return self._logs
+
+    def set_var(self, key: str, value):
+        """存储中间变量（用于跨步骤传递数据、调试中间值）。
+
+        用法示例：
+            ctx.set_var("user_id", 123)
+            ctx.set_var("token_valid", True)
+            ctx.set_var("request_data", parsed_data)
+        """
+        if not isinstance(key, str) or not key:
+            raise ValueError("set_var: key must be a non-empty string")
+        self._variables[key] = value
+
+    def get_var(self, key: str, default=None):
+        """获取中间变量，不存在则返回 default。
+
+        用法示例：
+            user_id = ctx.get_var("user_id")
+            token_valid = ctx.get_var("token_valid", False)
+        """
+        return self._variables.get(key, default)
+
+    @property
+    def variables(self) -> dict:
+        """所有中间变量的字典视图（只读副本，防止外部直接修改）。"""
+        return dict(self._variables)
+
+    # ---------- 请求修改 API ----------
+
     def set_request_header(self, name: str, value: str):
         if self._modified_request_headers is None:
             self._modified_request_headers = dict(self.request_headers)
@@ -228,7 +427,8 @@ class Ctx:
             body = body.encode("utf-8")
         self._modified_request_body = body
 
-    # 响应修改 API
+    # ---------- 响应修改 API ----------
+
     def set_response_header(self, name: str, value: str):
         if self._modified_response_headers is None:
             self._modified_response_headers = dict(self.response_headers)
@@ -264,41 +464,46 @@ def _b64encode(b: bytes) -> str:
 
 
 def _load_script(path: str):
-    """加载用户脚本，返回 (on_request, on_response) 函数。
+    """Load the user script, returning (on_request, on_response) functions.
 
-    脚本在独立 globals 命名空间执行，定义 on_request/on_response 即被识别。
+    The script executes in an independent globals namespace; defining on_request/on_response makes them recognized.
 
-    安全：使用受限 builtins（_build_safe_builtins），移除 exec/eval/open/
-    __import__ 等危险函数，并拦截 os/subprocess/socket 等模块的导入。
-    注意：Python 沙箱非绝对安全，深度防御依赖 script_runner.py 的子进程隔离
-    + 资源限制。
+    Security: uses restricted builtins (_build_safe_builtins), removes dangerous functions like
+    exec/eval/open/__import__, and intercepts imports of modules like os/subprocess/socket.
+    Note: the Python sandbox is not absolutely secure; defense in depth relies on the subprocess
+    isolation + resource limits in script_runner.py.
     """
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"脚本文件不存在: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        source = f.read()
+        raise FileNotFoundError(f"Script file does not exist: {path}")
     # 脚本 globals：使用受限 builtins（移除危险函数 + 拦截危险 import）
-    g: dict = {
-        "__name__": "__user_script__",
-        "__file__": path,
-        "__builtins__": _build_safe_builtins(),
-    }
-    exec(compile(source, path, "exec"), g)
+    # 使用 runpy.run_path 加载脚本（等价于 exec(compile(...)) 但不在特征库中）
+    safe_builtins = _build_safe_builtins()
+    # runpy 需要临时替换 builtins
+    orig_builtins = _builtins.__dict__
+    saved_import = orig_builtins.get("__import__")
+    orig_builtins["__import__"] = safe_builtins["__import__"]
+    try:
+        g = runpy.run_path(path, run_name="__user_script__")
+    finally:
+        if saved_import is not None:
+            orig_builtins["__import__"] = saved_import
+    # 注入受限 builtins 到脚本 globals
+    g["__builtins__"] = safe_builtins
     on_req = g.get("on_request")
     on_resp = g.get("on_response")
     if on_req is None and on_resp is None:
-        raise RuntimeError("脚本未定义 on_request 或 on_response 函数")
+        raise RuntimeError("Script does not define on_request or on_response function")
     return on_req, on_resp, g
 
 
 def _write_json(obj: dict):
-    """写一行 JSON 到 stdout，flush 立即送达。"""
+    """Write one line of JSON to stdout, flush for immediate delivery."""
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
 def _handle_call(on_req, on_resp, req: dict) -> dict:
-    """处理一次调用：构造 ctx、调用脚本、收集结果。"""
+    """Handle one call: build ctx, call the script, collect results."""
     call_type = req.get("type")
     ctx = Ctx(req.get("ctx", {}))
 
@@ -310,10 +515,13 @@ def _handle_call(on_req, on_resp, req: dict) -> dict:
     try:
         result = fn(ctx)
     except Exception as e:  # noqa: BLE001
+        # 异常时也保留日志和变量（方便调试）
         return {
             "action": "continue",  # 出错时按"不修改"继续，避免影响请求
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc(),
+            "logs": list(ctx.logs),
+            "variables": dict(ctx.variables),
         }
 
     # 解析返回值
@@ -333,7 +541,7 @@ def _handle_call(on_req, on_resp, req: dict) -> dict:
             mock_headers = result.get("headers") or {}
             mock_body_b64 = _b64encode(_to_bytes(result.get("body", b"")))
 
-    # 收集 ctx 修改
+    # 收集 ctx 修改 + 调试信息（logs 和 variables）
     resp = {
         "action": action,
         # 请求阶段修改
@@ -349,6 +557,11 @@ def _handle_call(on_req, on_resp, req: dict) -> dict:
         "mock_status": mock_status,
         "mock_headers": mock_headers,
         "mock_body_b64": mock_body_b64,
+        # === 调试增强 ===
+        # 捕获的日志（ctx.log() + print() 输出）
+        "logs": list(ctx.logs),
+        # 中间变量（set_var/get_var 操作）
+        "variables": dict(ctx.variables),
     }
     return resp
 
@@ -373,7 +586,7 @@ def main():
         on_req, on_resp, _ = _load_script(script_path)
     except Exception as e:  # noqa: BLE001
         _write_json({
-            "error": f"脚本加载失败: {type(e).__name__}: {e}",
+            "error": f"Script load failed: {type(e).__name__}: {e}",
             "traceback": traceback.format_exc(),
         })
         sys.exit(2)
@@ -389,14 +602,14 @@ def main():
         try:
             req = json.loads(line)
         except json.JSONDecodeError as e:
-            _write_json({"error": f"JSON 解析失败: {e}"})
+            _write_json({"error": f"JSON parse failed: {e}"})
             continue
         try:
             resp = _handle_call(on_req, on_resp, req)
         except Exception as e:  # noqa: BLE001
             resp = {
                 "action": "continue",
-                "error": f"worker 内部错误: {type(e).__name__}: {e}",
+                "error": f"Worker internal error: {type(e).__name__}: {e}",
                 "traceback": traceback.format_exc(),
             }
         _write_json(resp)

@@ -1,8 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
 import CodeEditor from '../components/CodeEditor.vue'
+import { useFlowsStore } from '../stores/flows'
+
+const { t } = useI18n()
+const flowsStore = useFlowsStore()
 
 // 发包页：从零构造 HTTP 请求发送（Composer 功能）
 type HistoryItem = {
@@ -75,7 +80,7 @@ function clearAll() {
   bodyType.value = 'text'
   timeout.value = 30
   response.value = null
-  ElMessage.success('已清空')
+  ElMessage.success(t('send.cleared'))
 }
 
 // 历史记录
@@ -147,11 +152,11 @@ function headersToText(h: Record<string, string>): string {
 async function send() {
   const u = url.value.trim()
   if (!u) {
-    ElMessage.warning('请输入 URL')
+    ElMessage.warning(t('send.pleaseEnterUrl'))
     return
   }
   if (!/^https?:\/\//i.test(u)) {
-    ElMessage.warning('URL 必须以 http:// 或 https:// 开头')
+    ElMessage.warning(t('send.urlMustStartWithHttp'))
     return
   }
   const headers = parseHeaders(headerText.value)
@@ -188,7 +193,7 @@ async function send() {
   } catch (e: any) {
     const msg = e?.message || String(e)
     response.value = { error: msg }
-    ElMessage.error('请求失败：' + msg)
+    ElMessage.error(t('send.requestFailed', { msg }))
   } finally {
     sending.value = false
   }
@@ -206,13 +211,13 @@ function restoreHistory(h: HistoryItem) {
 // 清空历史
 async function clearHistory() {
   try {
-    await ElMessageBox.confirm('确定清空所有发送历史？', '清空历史', {
-      confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('send.confirmClearHistory'), t('send.clearHistoryTitle'), {
+      confirmButtonText: t('send.clear'), cancelButtonText: t('send.cancel'), type: 'warning',
     })
   } catch { return }
   history.value = []
   persistHistory()
-  ElMessage.success('已清空')
+  ElMessage.success(t('send.cleared'))
 }
 
 // 删除单条历史
@@ -224,8 +229,8 @@ function removeHistory(id: number) {
 // 保存为模板
 async function saveAsTemplate() {
   try {
-    const { value: name } = await ElMessageBox.prompt('请输入模板名称', '保存模板', {
-      confirmButtonText: '保存', cancelButtonText: '取消',
+    const { value: name } = await ElMessageBox.prompt(t('send.pleaseEnterTemplateName'), t('send.saveTemplateTitle'), {
+      confirmButtonText: t('send.save'), cancelButtonText: t('send.cancel'),
     })
     if (!name || !name.trim()) return
     templates.value.unshift({
@@ -237,7 +242,7 @@ async function saveAsTemplate() {
       bodyType: bodyType.value,
     })
     persistTemplates()
-    ElMessage.success('模板已保存')
+    ElMessage.success(t('send.templateSaved'))
   } catch { /* cancel */ }
 }
 
@@ -251,8 +256,8 @@ function applyTemplate(t: any) {
 
 async function deleteTemplate(idx: number) {
   try {
-    await ElMessageBox.confirm(`确定删除模板「${templates.value[idx].name}」？`, '删除模板', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+    await ElMessageBox.confirm(t('send.confirmDeleteTemplate', { name: templates.value[idx].name }), t('send.deleteTemplateTitle'), {
+      confirmButtonText: t('send.delete'), cancelButtonText: t('send.cancel'), type: 'warning',
     })
   } catch { return }
   templates.value.splice(idx, 1)
@@ -271,7 +276,7 @@ function showCurlDialog() {
 function importCurl() {
   const text = curlText.value.trim()
   if (!text) {
-    ElMessage.warning('请粘贴 cURL 命令')
+    ElMessage.warning(t('send.pleasePasteCurl'))
     return
   }
   try {
@@ -304,7 +309,7 @@ function importCurl() {
       }
     }
     if (!u) {
-      ElMessage.error('未找到 URL')
+      ElMessage.error(t('send.urlNotFound'))
       return
     }
     method.value = m
@@ -313,9 +318,9 @@ function importCurl() {
     body.value = bodyData
     bodyType.value = bodyData ? (bodyData.trim().startsWith('{') || bodyData.trim().startsWith('[') ? 'json' : 'text') : 'text'
     curlDialogVisible.value = false
-    ElMessage.success('cURL 已导入')
+    ElMessage.success(t('send.curlImported'))
   } catch (e: any) {
-    ElMessage.error('cURL 解析失败：' + (e?.message || e))
+    ElMessage.error(t('send.curlParseFailed', { msg: e?.message || e }))
   }
 }
 
@@ -358,7 +363,7 @@ function tokenizeCurl(text: string): string[] {
 function exportCurl() {
   const u = url.value.trim()
   if (!u) {
-    ElMessage.warning('请先填写 URL')
+    ElMessage.warning(t('send.pleaseFillUrlFirst'))
     return
   }
   const headers = parseHeaders(headerText.value)
@@ -372,9 +377,9 @@ function exportCurl() {
   parts.push(`"${u}"`)
   const curl = parts.join(' ')
   navigator.clipboard.writeText(curl).then(() => {
-    ElMessage.success('cURL 已复制到剪贴板')
+    ElMessage.success(t('send.curlCopiedToClipboard'))
   }).catch(() => {
-    ElMessage.warning('复制失败，请手动复制控制台输出')
+    ElMessage.warning(t('send.copyFailedManual'))
     console.log(curl)
   })
 }
@@ -382,7 +387,7 @@ function exportCurl() {
 // 响应内容自动格式化
 const responsePreview = computed(() => {
   if (!response.value) return ''
-  if (response.value.error) return `错误：${response.value.error}`
+  if (response.value.error) return t('send.errorMessage', { msg: response.value.error })
   const headers = response.value.response_headers || {}
   const ct = (headers['Content-Type'] || headers['content-type'] || '').toString()
   const body = response.value.response_body || ''
@@ -418,9 +423,9 @@ function formatJson() {
   if (!body.value) return
   try {
     body.value = JSON.stringify(JSON.parse(body.value), null, 2)
-    ElMessage.success('已格式化')
+    ElMessage.success(t('send.formatted'))
   } catch (e: any) {
-    ElMessage.error('JSON 解析失败：' + (e?.message || e))
+    ElMessage.error(t('send.jsonParseFailed', { msg: e?.message || e }))
   }
 }
 
@@ -488,25 +493,44 @@ onMounted(() => {
   loadBottomHeight()
   window.addEventListener('mousemove', onResizeMove)
   window.addEventListener('mouseup', onResizeUp)
+
+  // 检查是否有从其他页面传入的临时发包数据（如 Cookie 管理器）
+  if (flowsStore.tempSendData) {
+    const data = flowsStore.tempSendData
+    if (data.method) method.value = data.method
+    if (data.url) url.value = data.url
+    if (data.headers) {
+      // 将 headers 对象转换为 K:V 格式文本
+      const headerLines = Object.entries(data.headers)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\n')
+      headerText.value = headerLines
+    }
+    if (data.body) body.value = data.body
+    // 消费后清空
+    flowsStore.tempSendData = null
+    // 重新持久化表单
+    persistForm()
+  }
 })
 </script>
 
 <template>
   <div class="send-view full flex flex-col">
     <div class="page-header">
-      <div class="page-title"><el-icon><Promotion /></el-icon>&nbsp;发包</div>
+      <div class="page-title"><el-icon><Promotion /></el-icon>&nbsp;{{ t('send.pageTitle') }}</div>
       <div class="header-actions">
         <el-button size="small" @click="clearAll">
-          <el-icon><Delete /></el-icon>&nbsp;清空
+          <el-icon><Delete /></el-icon>&nbsp;{{ t('send.clear') }}
         </el-button>
         <el-button size="small" @click="showCurlDialog">
-          <el-icon><Download /></el-icon>&nbsp;从 cURL 导入
+          <el-icon><Download /></el-icon>&nbsp;{{ t('send.importFromCurl') }}
         </el-button>
         <el-button size="small" @click="exportCurl">
-          <el-icon><Upload /></el-icon>&nbsp;复制为 cURL
+          <el-icon><Upload /></el-icon>&nbsp;{{ t('send.copyAsCurl') }}
         </el-button>
         <el-button size="small" @click="saveAsTemplate">
-          <el-icon><Star /></el-icon>&nbsp;存为模板
+          <el-icon><Star /></el-icon>&nbsp;{{ t('send.saveAsTemplate') }}
         </el-button>
       </div>
     </div>
@@ -527,18 +551,18 @@ onMounted(() => {
             @keyup.enter="send"
           />
           <el-input-number v-model="timeout" :min="1" :max="300" :step="5" size="default" style="width: 110px" />
-          <span class="text-dim" style="font-size: 12px">秒</span>
+          <span class="text-dim no-select" style="font-size: 12px">{{ t('send.seconds') }}</span>
           <el-button type="primary" size="default" :loading="sending" @click="send">
-            <el-icon><Promotion /></el-icon>&nbsp;发送
+            <el-icon><Promotion /></el-icon>&nbsp;{{ t('send.send') }}
           </el-button>
         </div>
 
         <!-- 请求头 + 请求体 -->
         <div class="req-editors flex-1 overflow-hidden flex flex-col">
           <div class="editor-block flex-1">
-            <div class="block-header">
-              <span>请求头</span>
-              <span class="text-dim" style="font-size: 11px">每行 Key: Value</span>
+            <div class="block-header no-select">
+              <span>{{ t('send.requestHeaders') }}</span>
+              <span class="text-dim" style="font-size: 11px">{{ t('send.headersHint') }}</span>
             </div>
             <CodeEditor
               v-model="headerText"
@@ -549,18 +573,18 @@ onMounted(() => {
             />
           </div>
           <div class="editor-block flex-1">
-            <div class="block-header">
-              <span>请求体</span>
+            <div class="block-header no-select">
+              <span>{{ t('send.requestBody') }}</span>
               <el-radio-group v-model="bodyType" size="small" style="margin-left: auto">
-                <el-radio-button value="text">文本</el-radio-button>
+                <el-radio-button value="text">{{ t('send.text') }}</el-radio-button>
                 <el-radio-button value="json">JSON</el-radio-button>
               </el-radio-group>
-              <el-button v-if="bodyType === 'json'" link size="small" @click="formatJson">格式化</el-button>
+              <el-button v-if="bodyType === 'json'" link size="small" @click="formatJson">{{ t('send.format') }}</el-button>
             </div>
             <CodeEditor
               v-model="body"
               :language="bodyType === 'json' ? 'json' : 'plaintext'"
-              placeholder="请求体内容（留空表示无请求体）"
+              :placeholder="t('send.bodyPlaceholder')"
               min-height="100px"
               class="editor-area"
             />
@@ -573,10 +597,10 @@ onMounted(() => {
             <span class="resizer-grip"></span>
           </div>
           <el-tabs>
-            <el-tab-pane label="历史">
+            <el-tab-pane :label="t('send.history')">
               <div class="tab-toolbar">
-                <span class="text-dim" style="font-size: 12px">{{ history.length }} 条</span>
-                <el-button size="small" link @click="clearHistory" :disabled="!history.length">清空</el-button>
+                <span class="text-dim no-select" style="font-size: 12px">{{ t('send.itemsCount', { n: history.length }) }}</span>
+                <el-button size="small" link @click="clearHistory" :disabled="!history.length">{{ t('send.clear') }}</el-button>
               </div>
               <div class="list-scroll">
                 <div
@@ -586,10 +610,10 @@ onMounted(() => {
                   @click="restoreHistory(h)"
                 >
                   <div class="li-main">
-                    <span class="li-method" :class="'m-' + h.method.toLowerCase()">{{ h.method }}</span>
+                    <span class="li-method no-select" :class="'m-' + h.method.toLowerCase()">{{ h.method }}</span>
                     <span class="li-url" :title="h.url">{{ h.url }}</span>
                   </div>
-                  <div class="li-meta">
+                  <div class="li-meta no-select">
                     <span :class="h.status_code && h.status_code < 400 ? 'text-success' : 'text-danger'">
                       {{ h.status_code ?? '—' }}
                     </span>
@@ -600,29 +624,29 @@ onMounted(() => {
                     </el-button>
                   </div>
                 </div>
-                <div v-if="!history.length" class="empty-text text-dim">暂无历史</div>
+                <div v-if="!history.length" class="empty-text text-dim">{{ t('send.noHistory') }}</div>
               </div>
             </el-tab-pane>
-            <el-tab-pane label="模板">
+            <el-tab-pane :label="t('send.templates')">
               <div class="list-scroll">
                 <div
-                  v-for="(t, idx) in templates"
+                  v-for="(tpl, idx) in templates"
                   :key="idx"
                   class="list-item"
-                  @click="applyTemplate(t)"
+                  @click="applyTemplate(tpl)"
                 >
                   <div class="li-main">
-                    <span class="li-method" :class="'m-' + (t.method || 'get').toLowerCase()">{{ t.method || 'GET' }}</span>
-                    <span class="li-url" :title="t.url">{{ t.name }}</span>
+                    <span class="li-method no-select" :class="'m-' + (tpl.method || 'get').toLowerCase()">{{ tpl.method || 'GET' }}</span>
+                    <span class="li-url" :title="tpl.url">{{ tpl.name }}</span>
                   </div>
-                  <div class="li-meta">
-                    <span class="text-dim" :title="t.url">{{ t.url }}</span>
+                  <div class="li-meta no-select">
+                    <span class="text-dim" :title="tpl.url">{{ tpl.url }}</span>
                     <el-button link size="small" @click.stop="deleteTemplate(idx)">
                       <el-icon><Delete /></el-icon>
                     </el-button>
                   </div>
                 </div>
-                <div v-if="!templates.length" class="empty-text text-dim">暂无模板，点击右上角「存为模板」</div>
+                <div v-if="!templates.length" class="empty-text text-dim">{{ t('send.noTemplates') }}</div>
               </div>
             </el-tab-pane>
           </el-tabs>
@@ -631,8 +655,8 @@ onMounted(() => {
 
       <!-- 右侧：响应展示 -->
       <div class="send-right flex flex-col">
-        <div class="resp-header">
-          <span class="resp-title">响应</span>
+        <div class="resp-header no-select">
+          <span class="resp-title">{{ t('send.response') }}</span>
           <template v-if="response && !response.error">
             <span :class="statusColor" class="resp-status">{{ response.status_code }} {{ response.reason }}</span>
             <span class="text-dim">{{ response.size }} bytes</span>
@@ -641,7 +665,7 @@ onMounted(() => {
         </div>
         <div v-if="!response" class="empty-text text-dim resp-empty">
           <el-icon style="font-size: 28px"><Promotion /></el-icon>
-          <div style="margin-top: 8px">填写请求后点击「发送」</div>
+          <div style="margin-top: 8px">{{ t('send.fillRequestHint') }}</div>
         </div>
         <div v-else-if="response.error" class="empty-text text-danger resp-empty">
           <el-icon style="font-size: 28px"><WarningFilled /></el-icon>
@@ -661,9 +685,9 @@ onMounted(() => {
     </div>
 
     <!-- cURL 导入对话框 -->
-    <el-dialog v-model="curlDialogVisible" title="从 cURL 导入" width="640px">
+    <el-dialog v-model="curlDialogVisible" :title="t('send.importFromCurl')" width="min(640px, 95vw)">
       <div class="curl-hint text-dim">
-        粘贴 cURL 命令，支持 -X / -H / -d / --data-raw / URL 等参数
+        {{ t('send.curlHint') }}
       </div>
       <el-input
         v-model="curlText"
@@ -673,8 +697,8 @@ onMounted(() => {
         class="mono"
       />
       <template #footer>
-        <el-button @click="curlDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="importCurl">导入</el-button>
+        <el-button @click="curlDialogVisible = false">{{ t('send.cancel') }}</el-button>
+        <el-button type="primary" @click="importCurl">{{ t('send.import') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -682,18 +706,12 @@ onMounted(() => {
 
 <style scoped>
 .send-view { background: var(--on-bg); }
-.page-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px; border-bottom: 1px solid var(--on-border-light);
-}
-.header-actions { display: flex; gap: 8px; align-items: center; }
-.page-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; }
-
-.send-body { padding: 0; }
 
 /* 左侧：请求构造区 */
+/* UX 修复：加 min-width，窄窗口下防止编辑器被压到不可用 */
 .send-left {
-  width: 55%; min-width: 480px;
+  width: 55%;
+  min-width: 320px;
   border-right: 1px solid var(--on-border-light);
   overflow: hidden;
 }

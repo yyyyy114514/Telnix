@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount, shallowRef, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { loader } from '@guolao/vue-monaco-editor'
 import type * as Monaco from 'monaco-editor'
 import { setupMonaco } from '../monaco-setup'
 
 // 确保 CDN loader 已配置 + Python 语言已注册（幂等）
 setupMonaco()
+const { t } = useI18n()
 
 /**
  * BigMonacoEditor：放大版 Monaco 编辑器（全屏对话框）
@@ -19,6 +21,8 @@ const props = defineProps<{
   language?: string // 默认 'python'
   /** 是否显示测试面板插槽 */
   showTestPanel?: boolean
+  /** 是否显示收起测试面板按钮（用于大窗口模式） */
+  showCollapseButton?: boolean
 }>()
 const emit = defineEmits<{
   'update:modelValue': [boolean]
@@ -55,8 +59,9 @@ function defineCustomTheme(monaco: typeof Monaco) {
     inherit: true,
     rules: [],
     colors: {
-      'editor.background': '#00000000',
-      'editorGutter.background': '#00000000',
+      'editor.background': '#ffffff',
+      'editorGutter.background': '#ffffff',
+      'editor.foreground': '#1f2328',
       'editorLineNumber.foreground': '#6e7681',
       'editorLineNumber.activeForeground': '#0d9488',
       'editorCursor.foreground': '#0d9488',
@@ -171,7 +176,7 @@ function formatDoc() {
 <template>
   <el-dialog
     v-model="visible"
-    :title="title || '代码编辑'"
+    :title="title || t('bigMonacoEditor.defaultTitle')"
     :fullscreen="true"
     :close-on-click-modal="false"
     class="big-monaco-dialog"
@@ -179,20 +184,20 @@ function formatDoc() {
   >
     <template #header>
       <div class="bm-header">
-        <span class="bm-title">{{ title || '代码编辑' }}</span>
+        <span class="bm-title">{{ title || t('bigMonacoEditor.defaultTitle') }}</span>
         <div class="bm-actions">
           <span class="bm-lang text-dim">{{ language || 'python' }}</span>
-          <el-button size="small" @click="formatDoc">格式化</el-button>
+          <el-button size="small" @click="formatDoc">{{ t('bigMonacoEditor.format') }}</el-button>
           <el-button
-            v-if="$slots['test-panel']"
+            v-if="$slots['test-panel'] && showCollapseButton"
             size="small"
             :type="showTestPanel ? 'success' : 'primary'"
             plain
             @click="$emit('update:showTestPanel', !showTestPanel)"
           >
-            {{ showTestPanel ? '收起测试' : '展开测试' }}
+            {{ showTestPanel ? t('bigMonacoEditor.collapseTest') : t('bigMonacoEditor.expandTest') }}
           </el-button>
-          <span class="bm-hint text-dim">Esc 关闭</span>
+          <span class="bm-hint text-dim">{{ t('bigMonacoEditor.escClose') }}</span>
         </div>
       </div>
     </template>
@@ -232,54 +237,121 @@ function formatDoc() {
 .bm-hint {
   font-size: 11px;
 }
+
+/* bm-body flex 布局，填满 dialog body */
+.bm-body {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  overflow: hidden;
+  padding: 10px;
+  margin: 10px;
+  box-sizing: border-box;
+  min-height: 0;
+  background: var(--on-bg, #1e1e2e);
+}
+/* 编辑器默认占满全部宽度 */
 .bm-editor-host {
-  height: 100%;
+  flex: 1;
   width: 100%;
-  min-height: 0;  /* flex 子项允许收缩 */
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   border: 1px solid var(--on-border-light, #333);
   border-radius: 4px;
   overflow: hidden;
+  background: var(--on-bg, #1e1e2e);
 }
-
-/* 全屏 dialog body 去掉 padding，让 bm-body 撑满 */
-.big-monaco-dialog :deep(.el-dialog__body) {
-  padding: 0;
-}
-/* 带 test-panel 时左右分栏：70% 编辑器 + 30% 测试面板 */
-.bm-body {
-  display: block;
-  height: calc(100vh - 55px);  /* 减去 header 高度 */
-  overflow: hidden;  /* 整体页面不滚动 */
-  padding: 10px;
-  box-sizing: border-box;
-}
-.bm-body.with-test {
-  display: flex;
-  gap: 10px;
-  align-items: stretch;  /* 两侧等高，撑满 bm-body 高度 */
-}
+/* 带 test-panel 时：编辑器 68%，测试面板 32% */
 .bm-body.with-test .bm-editor-host {
   flex: 0 0 68%;
-  min-width: 0;
 }
 .bm-test-panel {
   flex: 1;
   min-width: 0;
-  border: 1px solid var(--on-border, #333);
+  height: 100%;
+  border: 1px solid var(--on-border-light, #333);
   border-radius: 6px;
-  background: var(--on-bg-elevated, var(--on-bg, #fff));
+  background: var(--on-bg, #1e1e2e);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 0;  /* flex 子项允许收缩，让内部可滚动 */
+  min-height: 0;
 }
 .bm-test-panel :deep(.test-panel-header) {
   flex: 0 0 auto;
+  min-height: 40px;
+  padding: 8px 12px;
+  background: var(--on-bg-elevated, #252536);
+  border-bottom: 1px solid var(--on-border-light, #333);
 }
 /* 全屏模式下：测试面板内容超出时只滚动 body 内部，编辑器固定不滚动 */
 .bm-test-panel :deep(.test-panel-body) {
   flex: 1;
   overflow-y: auto !important;
   min-height: 0;
+  height: 100%;
+}
+.bm-test-panel :deep(.test-panel-content) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+</style>
+
+<!-- 非 scoped：el-dialog 及其内部元素由 Element Plus 渲染，scoped 属性可能不在这些元素上 -->
+<style>
+/* 全屏 dialog 使用 flex 列布局 */
+.big-monaco-dialog.el-dialog.is-fullscreen {
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  border-radius: 0 !important;
+  background: var(--on-bg, #1e1e2e) !important;
+}
+/* body 填满剩余空间 */
+.big-monaco-dialog.el-dialog.is-fullscreen .el-dialog__body {
+  padding: 0 !important;
+  flex: 1 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 0 !important;
+  height: 100% !important;
+}
+/* header 固定高度 */
+.big-monaco-dialog.el-dialog.is-fullscreen .el-dialog__header {
+  flex: 0 0 auto !important;
+  padding: 10px 16px !important;
+  margin: 0 !important;
+  border-bottom: 1px solid var(--on-border-light, #333) !important;
+}
+/* content 占满剩余空间 */
+.big-monaco-dialog.el-dialog.is-fullscreen .el-dialog__content {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  padding: 0 !important;
+}
+/* header 内的按钮样式 */
+.big-monaco-dialog.el-dialog.is-fullscreen .el-button {
+  background: var(--el-fill-color-light, #f5f7fa) !important;
+  border-color: var(--el-border-color, #dcdfe6) !important;
+  color: var(--el-text-color-primary, #303133) !important;
+}
+.big-monaco-dialog.el-dialog.is-fullscreen .el-button:hover {
+  background: var(--el-fill-color, #e4e7ed) !important;
+  border-color: var(--el-border-color, #dcdfe6) !important;
+  color: var(--el-text-color-primary, #303133) !important;
 }
 </style>

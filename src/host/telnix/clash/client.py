@@ -1,7 +1,7 @@
-"""Mihomo external-controller API 客户端。
+"""Mihomo external-controller API client.
 
-所有方法返回 (data, error) 元组，error 非 None 时 data 为 None。
-纯同步 HTTP 调用（用 urllib，不引入额外依赖），由调用方在线程池中执行。
+All methods return a (data, error) tuple; when error is not None, data is None.
+Pure synchronous HTTP calls (using httpx), executed by the caller in a thread pool.
 """
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ import json
 import socket
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
+
+import httpx
 
 # ---------- 上游代理地址缓存（异步探测架构） ----------
 # 性能优化：后台线程定期探测 Mihomo 状态，get_upstream_proxy() 只读内存缓存，
@@ -36,10 +36,11 @@ _upstream_probe_event = threading.Event()  # 触发立即探测
 
 
 def _normalize_bool(v: Any) -> bool:
-    """规范化布尔值：兼容 bool/int/str 类型。
+    """Normalize a boolean value: tolerates bool/int/str types.
 
-    settings.json 可能存 bool（来自 clash/enable|disable）或 "1"/"0" 字符串
-    （来自 settings PUT 接口）。字符串 "0" 在 Python 中是 truthy，必须显式判断。
+    settings.json may store a bool (from clash/enable|disable) or a "1"/"0"
+    string (from the settings PUT interface). The string "0" is truthy in
+    Python, so it must be checked explicitly.
     """
     if isinstance(v, bool):
         return v
@@ -51,9 +52,10 @@ def _normalize_bool(v: Any) -> bool:
 
 
 def invalidate_upstream_proxy_cache() -> None:
-    """失效上游代理缓存。在 enable/disable/config 后调用。
+    """Invalidate the upstream proxy cache. Called after enable/disable/config.
 
-    立即触发后台探测线程重新探测，避免 30 秒延迟。
+    Immediately triggers the background probe thread to re-probe, avoiding the
+    30-second delay.
     """
     with _UPSTREAM_CACHE_LOCK:
         _upstream_cache["value"] = None
@@ -64,11 +66,11 @@ def invalidate_upstream_proxy_cache() -> None:
 
 
 def _upstream_probe_once() -> tuple[tuple[str, int] | None, float]:
-    """探测一次 Mihomo 状态，返回 (value, next_delay)。
+    """Probe Mihomo status once, returning (value, next_delay).
 
-    - 启用且可达 → ((host, port), TTL)
-    - 启用但不可达 → (None, backoff)
-    - 未启用 → (None, backoff)
+    - Enabled and reachable -> ((host, port), TTL)
+    - Enabled but unreachable -> (None, backoff)
+    - Not enabled -> (None, backoff)
     """
     from .. import settings_store
     integrated = _normalize_bool(settings_store.get_setting("clash_integrated", False))
@@ -118,7 +120,7 @@ def _upstream_probe_loop():
 
 
 def _ensure_probe_thread():
-    """懒启动后台探测线程（首次调用 get_upstream_proxy 时创建）。"""
+    """Lazily start the background probe thread (created on first get_upstream_proxy call)."""
     global _upstream_probe_thread
     if _upstream_probe_thread is not None and _upstream_probe_thread.is_alive():
         return
@@ -145,9 +147,9 @@ def _sync_probe_first_call() -> tuple[tuple[str, int] | None, float]:
 
 
 class ClashClient:
-    """Mihomo RESTful API 客户端。
+    """Mihomo RESTful API client.
 
-    文档：https://wiki.metacubex.one/api/
+    Docs: https://wiki.metacubex.one/api/
     """
 
     def __init__(self, api_url: str = "http://127.0.0.1:9090", secret: str = ""):
@@ -157,9 +159,12 @@ class ClashClient:
             api_url = "http://" + api_url
         self.api_url = api_url.rstrip("/")
         self.secret = secret
-        # 显式禁用代理：避免 urllib 读取 http_proxy 环境变量，
+        # 显式禁用代理：避免 httpx 读取 http_proxy 环境变量，
         # 导致 API 调用走 Telnix 自身代理形成循环
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._http_client = httpx.Client(
+            timeout=httpx.Timeout(10.0),
+            proxy=None,  # 显式禁用代理
+        )
 
     # ---------- 底层 ----------
 
@@ -171,7 +176,12 @@ class ClashClient:
 
     def _request(self, method: str, path: str, body: Any = None,
                  timeout: float = 3.0, params: dict | None = None) -> tuple[Any, str | None]:
-        """发 HTTP 请求。返回 (data, error)。超时默认 3 秒（避免状态接口卡 20 秒）。"""
+        """Send an HTTP request. Returns (data, error). Default timeout 3 seconds (avoids status interface hanging for 20s).
+
+        Note: the timeout parameter is passed to httpx per-request, overriding the
+        client-level 10s default. This ensures /version and /configs fail fast (3s)
+        instead of hanging for 10 seconds when Mihomo is slow or unresponsive.
+        """
         url = f"{self.api_url}{path}"
         if params:
             qs = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v is not None)
@@ -182,27 +192,32 @@ class ClashClient:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with self._opener.open(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-                if not raw:
-                    return None, None  # 204 No Content
+            # 关键：把 timeout 传给 httpx，否则用 client 级 10s 默认值
+            resp = self._http_client.request(
+                method, url, content=data, headers=headers, timeout=timeout,
+            )
+            # 非 2xx 视为错误（如 401 secret 错误、404 路径不存在、500 服务器错误）
+            # httpx 默认不抛 HTTPStatusError，需手动检查状态码
+            if resp.status_code >= 400:
                 try:
-                    return json.loads(raw), None
-                except json.JSONDecodeError:
-                    return raw, None
-        except urllib.error.HTTPError as e:
+                    err_body = resp.json()
+                    msg = err_body.get("message") or str(err_body)
+                except Exception:  # noqa: BLE001
+                    msg = resp.text or f"HTTP {resp.status_code}"
+                return None, f"HTTP {resp.status_code}: {msg}"
+            if resp.status_code == 204 or not resp.text:
+                return None, None  # 204 No Content
             try:
-                err_body = json.loads(e.read().decode("utf-8", errors="replace"))
-                msg = err_body.get("message") or str(err_body)
-            except Exception:  # noqa: BLE001
-                msg = f"HTTP {e.code}: {e.reason}"
-            return None, msg
-        except urllib.error.URLError as e:
-            return None, f"无法连接 Mihomo ({self.api_url}): {e.reason}"
+                return resp.json(), None
+            except Exception:
+                return resp.text, None
+        except httpx.ConnectError as e:
+            return None, f"Cannot connect to Mihomo ({self.api_url}): {e}"
+        except httpx.ReadTimeout:
+            return None, f"Request timeout ({timeout}s): {self.api_url}{path}"
         except Exception as e:  # noqa: BLE001
-            return None, f"请求异常: {e}"
+            return None, f"Request error: {e}"
 
     # ---------- 状态 ----------
 
@@ -210,126 +225,125 @@ class ClashClient:
         return self._request("GET", "/version")
 
     def configs(self) -> tuple[dict, str | None]:
-        """获取当前运行配置。"""
+        """Get current running configuration."""
         return self._request("GET", "/configs")
 
     def patch_configs(self, patch: dict) -> tuple[None, str | None]:
-        """更新基本配置（PATCH）。"""
+        """Update basic configuration (PATCH)."""
         return self._request("PATCH", "/configs", patch)
 
     def reload_config(self, force: bool = False) -> tuple[None, str | None]:
-        """重新加载配置文件。"""
+        """Reload the configuration file."""
         return self._request("PUT", "/configs", {"path": "", "payload": ""},
                              params={"force": "true" if force else "false"})
 
     # ---------- 代理 / 节点 ----------
 
     def proxies(self) -> tuple[dict, str | None]:
-        """获取所有代理和策略组。"""
+        """Get all proxies and policy groups."""
         return self._request("GET", "/proxies")
 
     def proxy(self, name: str) -> tuple[dict, str | None]:
-        """获取单个代理/策略组详情。"""
+        """Get details of a single proxy/policy group."""
         return self._request("GET", f"/proxies/{urllib.parse.quote(name)}")
 
     def select_proxy(self, group: str, name: str) -> tuple[None, str | None]:
-        """切换策略组选中的节点。"""
+        """Switch the selected node of a policy group."""
         return self._request("PUT", f"/proxies/{urllib.parse.quote(group)}", {"name": name})
 
     def proxy_delay(self, name: str, url: str = "https://www.gstatic.com/generate_204",
                     timeout: int = 5000) -> tuple[dict, str | None]:
-        """测试节点延迟。timeout 为 Mihomo 侧测试超时（ms），socket 超时设为 timeout/1000 + 2 秒。"""
+        """Test node latency. timeout is the Mihomo-side test timeout (ms); socket timeout is set to timeout/1000 + 2 seconds."""
         sock_to = timeout / 1000.0 + 2.0
         return self._request("GET", f"/proxies/{urllib.parse.quote(name)}/delay",
                              params={"url": url, "timeout": str(timeout)}, timeout=sock_to)
 
     def group_delay(self, group: str, url: str = "https://www.gstatic.com/generate_204",
                     timeout: int = 5000) -> tuple[dict, str | None]:
-        """测试策略组内所有节点延迟。socket 超时放宽到 15 秒（多节点测试耗时较长）。"""
+        """Test latency of all nodes in a policy group. Socket timeout is relaxed to 15 seconds (multi-node testing takes longer)."""
         return self._request("GET", f"/group/{urllib.parse.quote(group)}/delay",
                              params={"url": url, "timeout": str(timeout)}, timeout=15.0)
 
     def clear_fixed(self, name: str) -> tuple[None, str | None]:
-        """清除 URLTest/Fallback 的 fixed 选择。"""
+        """Clear the fixed selection of a URLTest/Fallback group."""
         return self._request("DELETE", f"/proxies/{urllib.parse.quote(name)}")
 
     # ---------- 代理集合（订阅） ----------
 
     def providers(self) -> tuple[dict, str | None]:
-        """获取所有代理集合（订阅源）。"""
+        """Get all proxy providers (subscription sources)."""
         return self._request("GET", "/providers/proxies")
 
     def provider(self, name: str) -> tuple[dict, str | None]:
-        """获取单个订阅源详情。"""
+        """Get details of a single subscription source."""
         return self._request("GET", f"/providers/proxies/{urllib.parse.quote(name)}")
 
     def update_provider(self, name: str) -> tuple[None, str | None]:
-        """更新（拉取）订阅。"""
+        """Update (fetch) the subscription."""
         return self._request("PUT", f"/providers/proxies/{urllib.parse.quote(name)}")
 
     def provider_healthcheck(self, name: str) -> tuple[None, str | None]:
-        """触发订阅源健康检查。"""
+        """Trigger a health check for the subscription source."""
         return self._request("GET", f"/providers/proxies/{urllib.parse.quote(name)}/healthcheck")
 
     # ---------- 规则 ----------
 
     def rules(self) -> tuple[dict, str | None]:
-        """获取规则列表。"""
+        """Get the rule list."""
         return self._request("GET", "/rules")
 
     def rule_providers(self) -> tuple[dict, str | None]:
-        """获取规则集合。"""
+        """Get rule providers."""
         return self._request("GET", "/providers/rules")
 
     def update_rule_provider(self, name: str) -> tuple[None, str | None]:
-        """更新规则集合。"""
+        """Update a rule provider."""
         return self._request("PUT", f"/providers/rules/{urllib.parse.quote(name)}")
 
     # ---------- 连接 ----------
 
     def connections(self) -> tuple[dict, str | None]:
-        """获取当前活跃连接。"""
+        """Get active connections."""
         return self._request("GET", "/connections")
 
     def close_all_connections(self) -> tuple[None, str | None]:
-        """关闭所有连接。"""
+        """Close all connections."""
         return self._request("DELETE", "/connections")
 
     def close_connection(self, conn_id: str) -> tuple[None, str | None]:
-        """关闭指定连接。"""
+        """Close a specific connection."""
         return self._request("DELETE", f"/connections/{urllib.parse.quote(conn_id)}")
 
     # ---------- DNS ----------
 
     def dns_query(self, name: str, qtype: str = "A") -> tuple[dict, str | None]:
-        """DNS 查询。"""
+        """DNS query."""
         return self._request("GET", "/dns/query", params={"name": name, "type": qtype})
 
     def flush_dns_cache(self) -> tuple[None, str | None]:
-        """清除 DNS 缓存。"""
+        """Flush the DNS cache."""
         return self._request("POST", "/cache/dns/flush")
 
     def flush_fakeip(self) -> tuple[None, str | None]:
-        """清除 FakeIP 缓存。"""
+        """Flush the FakeIP cache."""
         return self._request("POST", "/cache/fakeip/flush")
 
     # ---------- 工具 ----------
 
     def is_reachable(self) -> bool:
-        """快速检测 Mihomo 是否在线。1 秒超时（本地端口足够，避免防火墙拦截等满 2 秒）。"""
-        try:
-            parsed = urllib.parse.urlparse(self.api_url)
-            host = parsed.hostname or "127.0.0.1"
-            port = parsed.port or 9090
-            with socket.create_connection((host, port), timeout=1.0):
-                return True
-        except (OSError, ValueError):
-            return False
+        """Check whether the Clash/Mihomo RESTful API is actually responding (not just a port open).
+
+        This avoids false positives when some other service is listening on the API port.
+        Uses the lightweight /version endpoint (1.5s timeout sufficient for local API).
+        """
+        data, err = self._request("GET", "/version", timeout=1.5)
+        return err is None and data is not None
 
     def mixed_port(self) -> int | None:
-        """获取 Mihomo 的 mixed-port（用于上游代理转发）。
+        """Get Mihomo's mixed-port (used for upstream proxy forwarding).
 
-        优先从 /configs 读 mixed-port，回退到 socks-port/http-port，都无则 None。
+        Prefers mixed-port from /configs, falls back to socks-port/http-port,
+        returns None if none are present.
         """
         cfg, err = self.configs()
         if err or not isinstance(cfg, dict):
@@ -342,28 +356,34 @@ class ClashClient:
 
 
 def get_client_from_settings() -> ClashClient:
-    """从 settings_store 读取配置，构造 ClashClient。"""
+    """Read configuration from settings_store and construct a ClashClient."""
     from .. import settings_store
     api_url = settings_store.get_setting("clash_api_url", "http://127.0.0.1:9090")
-    secret = settings_store.get_setting("clash_secret", "")
+    # 安全修复：clash_secret 加密存储，读取时解密
+    from .. import secure_storage
+    raw_secret = settings_store.get_setting("clash_secret", "")
+    secret = secure_storage.decrypt(raw_secret) if secure_storage.is_encrypted(raw_secret) else raw_secret
     return ClashClient(api_url, secret)
 
 
 def get_upstream_proxy() -> tuple[str, int] | None:
-    """获取上游代理地址（Mihomo mixed-port）。永远不阻塞，只读内存缓存。
+    """Get the upstream proxy address (Mihomo mixed-port). Never blocks; only reads the in-memory cache.
 
-    返回 (host, port) 让流量走代理；返回 None 则流量直连。
-    - clash_integrated=False → 永远 None（流量直连，即使 Clash 页可见）
-    - clash_integrated=True 且 Mihomo 可达 → 返回 (host, port)
-    - clash_integrated=True 但 Mihomo 不可达 → 返回 None（流量自动直连，不修改 clash_integrated）
+    Returns (host, port) to route traffic through the proxy; returns None for direct connection.
+    - clash_integrated=False -> always None (direct traffic, even if the Clash page is visible)
+    - clash_integrated=True and Mihomo reachable -> returns (host, port)
+    - clash_integrated=True but Mihomo unreachable -> returns None (traffic falls back to direct,
+      clash_integrated is not modified)
 
-    注意：clash_integrated 与 clash_enabled 分离：
-    - clash_enabled 只控制侧边栏 Clash 入口可见性
-    - clash_integrated 控制流量是否走 Mihomo 代理
+    Note: clash_integrated is separate from clash_enabled:
+    - clash_enabled only controls the visibility of the Clash entry in the sidebar
+    - clash_integrated controls whether traffic goes through the Mihomo proxy
 
-    性能优化：完全非阻塞，首次调用直接返回 None（直连）并触发后台探测，
-    后台线程探测成功后填充缓存，后续请求即可走代理。
-    避免原实现首次同步探测最长 4 秒阻塞首包的问题。
+    Performance optimization: fully non-blocking. The first call returns None directly (direct
+    connection) and triggers a background probe; once the background thread probes successfully
+    it fills the cache, and subsequent requests can go through the proxy.
+    This avoids the original implementation's first synchronous probe that could block the first
+    packet for up to 4 seconds.
     """
     # 启动后台探测线程（懒启动，首次调用时创建）
     _ensure_probe_thread()
@@ -373,6 +393,6 @@ def get_upstream_proxy() -> tuple[str, int] | None:
 
 
 def shutdown_probe_thread():
-    """关闭后台探测线程（程序退出时调用）。"""
+    """Shut down the background probe thread (called on program exit)."""
     _upstream_probe_stop.set()
     _upstream_probe_event.set()

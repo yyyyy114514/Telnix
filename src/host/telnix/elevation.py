@@ -1,14 +1,14 @@
-"""跨平台提权模块。
+"""Cross-platform elevation module.
 
-平台支持：
-- Windows: ShellExecuteW('runas') 触发 UAC 提权
-- macOS: osascript 弹出系统授权对话框（需要用户输入密码）
-- Linux: pkexec（PolicyKit GUI 弹窗）或 sudo（CLI）
+Platform support:
+- Windows: ShellExecuteW('runas') triggers UAC elevation
+- macOS: osascript pops up the system authorization dialog (requires the user to enter a password)
+- Linux: pkexec (PolicyKit GUI popup) or sudo (CLI)
 
-设计要点：
-- 提权后重新启动 Telnix 进程（保留启动参数）
-- 旧进程退出，新进程以高权限运行
-- 优雅降级：工具不可用时返回错误信息
+Design notes:
+- After elevation, restarts the Telnix process (preserving launch arguments)
+- The old process exits, the new process runs with elevated privileges
+- Graceful degradation: returns an error message when the tool is unavailable
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ IS_UNIX = IS_LINUX or IS_MACOS
 
 
 def is_admin() -> bool:
-    """检查当前进程是否具有管理员/root 权限。
+    """Check whether the current process has administrator/root privileges.
 
     Windows: ctypes.windll.shell32.IsUserAnAdmin()
     Unix: os.geteuid() == 0 (root)
@@ -42,7 +42,7 @@ def is_admin() -> bool:
 
 
 def _build_restart_argv() -> list[str]:
-    """构建重启命令的参数列表（保留启动参数）。"""
+    """Build the argument list for the restart command (preserving launch arguments)."""
     if getattr(sys, 'frozen', False):
         # PyInstaller 打包：直接运行 exe
         return [sys.executable]
@@ -54,15 +54,15 @@ def _build_restart_argv() -> list[str]:
 
 
 def _get_restart_cwd() -> str:
-    """获取重启进程的工作目录。"""
+    """Get the working directory for the restarted process."""
     # telnix 包的父目录（即 src/host/），让 `python -m telnix` 能找到包
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def elevate_windows() -> tuple[bool, str]:
-    """Windows: 用 ShellExecuteW('runas') 触发 UAC 提权。
+    """Windows: use ShellExecuteW('runas') to trigger UAC elevation.
 
-    返回 (success, message)。
+    Returns (success, message).
     """
     try:
         import ctypes
@@ -73,30 +73,33 @@ def elevate_windows() -> tuple[bool, str]:
         else:
             # python -m telnix [flags...]
             argv_extra = [a for a in sys.argv[1:] if a.startswith('-')]
-            params = '-m telnix'
-            if argv_extra:
-                params += ' ' + ' '.join(argv_extra)
+            # Windows 下 ShellExecuteW 的 lpParameters 按命令行规则解析
+            # （空格分隔，双引号包裹含空格/特殊字符的参数，内部双引号用 \" 转义）。
+            # 使用 subprocess.list2cmdline() 按 Windows 规则转义每个参数，
+            # 与 macOS/Linux 版本的 shlex.quote() 等效，防止参数注入
+            params = subprocess.list2cmdline(['-m', 'telnix'] + argv_extra)
         cwd = _get_restart_cwd()
         ret = ctypes.windll.shell32.ShellExecuteW(
             None, 'runas', exe, params, cwd, 1  # SW_SHOWNORMAL
         )
         if ret <= 32:
-            return False, f'UAC 提权失败，返回码 {ret}（用户可能取消了 UAC）'
-        return True, '已批准 UAC 提权'
+            return False, f'UAC elevation failed, return code {ret} (user may have canceled UAC)'
+        return True, 'UAC elevation approved'
     except Exception as e:  # noqa: BLE001
-        return False, f'UAC 提权失败: {e}'
+        return False, f'UAC elevation failed: {e}'
 
 
 def elevate_macos() -> tuple[bool, str]:
-    """macOS: 用 osascript 弹出系统授权对话框。
+    """macOS: use osascript to pop up the system authorization dialog.
 
-    通过 AppleScript 执行 `do shell script ... with administrator privileges`，
-    系统会弹出密码输入框，用户输入密码后命令以 root 身份执行。
+    Executes `do shell script ... with administrator privileges` via AppleScript;
+    the system pops up a password input box, and after the user enters the password,
+    the command runs as root.
 
-    返回 (success, message)。
+    Returns (success, message).
 
-    安全：用 shlex.quote() 对每个参数做 shell 转义，避免命令注入。
-    cwd 中的反斜杠和双引号也做 AppleScript 字符串转义。
+    Security: uses shlex.quote() to shell-escape each argument, avoiding command injection.
+    Backslashes and double quotes in cwd are also escaped for AppleScript strings.
     """
     import shlex
     argv = _build_restart_argv()
@@ -119,24 +122,24 @@ def elevate_macos() -> tuple[bool, str]:
         if result.returncode != 0:
             err_msg = result.stderr.strip()
             if 'User canceled' in err_msg or 'user canceled' in err_msg.lower():
-                return False, '用户取消了授权'
-            return False, f'osascript 授权失败: {err_msg}'
-        return True, '已批准 macOS 授权'
+                return False, 'User canceled authorization'
+            return False, f'osascript authorization failed: {err_msg}'
+        return True, 'macOS authorization approved'
     except subprocess.TimeoutExpired:
-        return False, 'osascript 授权超时（60 秒未响应）'
+        return False, 'osascript authorization timed out (no response within 60 seconds)'
     except FileNotFoundError:
-        return False, 'osascript 不可用（仅 macOS 自带）'
+        return False, 'osascript unavailable (macOS only, built-in)'
     except Exception as e:  # noqa: BLE001
-        return False, f'macOS 授权失败: {e}'
+        return False, f'macOS authorization failed: {e}'
 
 
 def elevate_linux_pkexec() -> tuple[bool, str]:
-    """Linux: 用 pkexec（PolicyKit）弹出 GUI 授权对话框。
+    """Linux: use pkexec (PolicyKit) to pop up a GUI authorization dialog.
 
-    pkexec 是 PolicyKit 的命令行工具，桌面环境通常会弹出密码框。
-    返回 (success, message)。
+    pkexec is the command-line tool for PolicyKit; desktop environments usually pop up a password box.
+    Returns (success, message).
 
-    安全：用 shlex.quote() 对每个参数做 shell 转义，避免命令注入。
+    Security: uses shlex.quote() to shell-escape each argument, avoiding command injection.
     """
     import shlex
     argv = _build_restart_argv()
@@ -151,22 +154,22 @@ def elevate_linux_pkexec() -> tuple[bool, str]:
             capture_output=True, timeout=60,
         )
         if result.returncode != 0:
-            return False, f'pkexec 授权失败（返回码 {result.returncode}）'
-        return True, '已批准 pkexec 授权'
+            return False, f'pkexec authorization failed (return code {result.returncode})'
+        return True, 'pkexec authorization approved'
     except subprocess.TimeoutExpired:
-        return False, 'pkexec 授权超时（60 秒未响应）'
+        return False, 'pkexec authorization timed out (no response within 60 seconds)'
     except FileNotFoundError:
-        return False, 'pkexec 不可用（请安装 policykit-1）'
+        return False, 'pkexec unavailable (please install policykit-1)'
     except Exception as e:  # noqa: BLE001
-        return False, f'pkexec 授权失败: {e}'
+        return False, f'pkexec authorization failed: {e}'
 
 
 def elevate_linux_sudo() -> tuple[bool, str]:
-    """Linux: 用 sudo 命令提权（CLI 模式，需要用户在终端输入密码）。
+    """Linux: use the sudo command to elevate (CLI mode, requires the user to enter a password in the terminal).
 
-    返回 (success, message)。
+    Returns (success, message).
 
-    安全：用 shlex.quote() 对每个参数做 shell 转义，避免命令注入。
+    Security: uses shlex.quote() to shell-escape each argument, avoiding command injection.
     """
     import shlex
     argv = _build_restart_argv()
@@ -181,24 +184,24 @@ def elevate_linux_sudo() -> tuple[bool, str]:
             stdin=sys.stdin,  # 继承终端 stdin 让用户输入密码
         )
         if result.returncode != 0:
-            return False, f'sudo 提权失败（返回码 {result.returncode}）'
-        return True, '已通过 sudo 提权'
+            return False, f'sudo elevation failed (return code {result.returncode})'
+        return True, 'Elevated via sudo'
     except FileNotFoundError:
-        return False, 'sudo 不可用'
+        return False, 'sudo unavailable'
     except Exception as e:  # noqa: BLE001
-        return False, f'sudo 提权失败: {e}'
+        return False, f'sudo elevation failed: {e}'
 
 
 def elevate() -> tuple[bool, str]:
-    """跨平台提权：重启 Telnix 进程为管理员/root 权限。
+    """Cross-platform elevation: restart the Telnix process with administrator/root privileges.
 
-    平台支持：
-    - Windows: ShellExecuteW('runas') 触发 UAC
+    Platform support:
+    - Windows: ShellExecuteW('runas') triggers UAC
     - macOS: osascript with administrator privileges
-    - Linux: pkexec（GUI）或 sudo（CLI）
+    - Linux: pkexec (GUI) or sudo (CLI)
 
-    返回 (success, message)。
-    成功后调用方应退出当前进程（新进程已独立运行）。
+    Returns (success, message).
+    On success, the caller should exit the current process (the new process is already running independently).
     """
     if IS_WINDOWS:
         return elevate_windows()
@@ -207,16 +210,16 @@ def elevate() -> tuple[bool, str]:
     elif IS_LINUX:
         # 优先用 pkexec（GUI 弹窗更友好），失败时回退到 sudo
         ok, msg = elevate_linux_pkexec()
-        if not ok and 'pkexec 不可用' in msg:
+        if not ok and 'pkexec unavailable' in msg:
             # pkexec 不存在，回退到 sudo
             return elevate_linux_sudo()
         return ok, msg
     else:
-        return False, f'当前平台 {sys.platform} 不支持提权'
+        return False, f'Elevation not supported on platform {sys.platform}'
 
 
 def get_elevation_info() -> dict:
-    """返回提权后端信息（用于前端显示）。"""
+    """Return elevation backend info (for frontend display)."""
     admin = is_admin()
     if IS_WINDOWS:
         return {
@@ -224,7 +227,7 @@ def get_elevation_info() -> dict:
             "backend": "uac",
             "is_admin": admin,
             "supported": True,
-            "hint": "就绪" if not admin else "已是管理员",
+            "hint": "Ready" if not admin else "Already an administrator",
         }
     elif IS_MACOS:
         return {
@@ -232,7 +235,7 @@ def get_elevation_info() -> dict:
             "backend": "osascript",
             "is_admin": admin,
             "supported": True,
-            "hint": "就绪" if not admin else "已是 root",
+            "hint": "Ready" if not admin else "Already root",
         }
     elif IS_LINUX:
         # 检测 pkexec 是否可用
@@ -245,9 +248,9 @@ def get_elevation_info() -> dict:
             "is_admin": admin,
             "supported": pkexec_available or sudo_available,
             "hint": (
-                "就绪" if not admin and (pkexec_available or sudo_available)
-                else "已是 root" if admin
-                else "未找到 pkexec/sudo，请手动用 sudo 启动"
+                "Ready" if not admin and (pkexec_available or sudo_available)
+                else "Already root" if admin
+                else "pkexec/sudo not found, please start manually with sudo"
             ),
         }
     return {
@@ -255,5 +258,5 @@ def get_elevation_info() -> dict:
         "backend": "none",
         "is_admin": admin,
         "supported": False,
-        "hint": "不支持的平台",
+        "hint": "Unsupported platform",
     }

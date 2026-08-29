@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import TextSearch from './TextSearch.vue'
 import CodeEditor from './CodeEditor.vue'
 
@@ -7,6 +8,7 @@ import CodeEditor from './CodeEditor.vue'
 // 二进制内容（图片/PDF/视频等）后端以 "base64:xxx" 形式存储
 // JSON/XML/CSS/JS/text 使用 TextSearch 组件：代码高亮 + 搜索 + 右键解密
 // 断点时（editable=true）对文本类内容用 CodeEditor 直接编辑
+const { t } = useI18n()
 const props = defineProps<{
   body: string
   contentType: string
@@ -44,7 +46,11 @@ const textBody = computed(() => (isBase64.value ? '' : props.body || ''))
 // 性能优化：props.body 本身就是 base64:xxx，直接拼接，跳过 atob+btoa 重复编解码
 const dataUrl = computed(() => {
   if (!isBase64.value) return ''
-  const b64 = props.body.slice(7)
+  let b64 = props.body.slice(7)
+  // 防御性处理：移除可能存在的尾部非 base64 字符（如旧的截断标记文本）
+  // base64 字符集：A-Z a-z 0-9 + / = ，遇到非 base64 字符截断
+  const match = b64.match(/^[A-Za-z0-9+/=]+/)
+  if (match) b64 = match[0]
   return `data:${parsed.value.main};base64,${b64}`
 })
 
@@ -139,11 +145,11 @@ const bodySize = computed(() => {
 <template>
   <div class="preview-view full overflow-auto">
     <!-- 空 -->
-    <div v-if="kind === 'empty'" class="empty-text text-dim">（无响应体）</div>
+    <div v-if="kind === 'empty'" class="empty-text text-dim">{{ t('previewView.noBody') }}</div>
 
     <!-- 图片 -->
     <div v-else-if="kind === 'image'" class="preview-center">
-      <img :src="dataUrl" class="preview-img" :alt="`图片 ${parsed.subtype}`" />
+      <img :src="dataUrl" class="preview-img" :alt="t('previewView.imageAlt', { subtype: parsed.subtype })" />
       <div class="preview-meta text-dim">
         {{ parsed.subtype.toUpperCase() }} · {{ fmtSize(bodySize) }}
       </div>
@@ -213,9 +219,9 @@ const bodySize = computed(() => {
     <!-- 其他二进制 -->
     <div v-else class="preview-center">
       <el-icon :size="40"><Document /></el-icon>
-      <div class="text-dim" style="margin-top: 10px">无法预览此内容类型</div>
-      <div class="preview-meta text-dim">{{ parsed.main || '未知类型' }} · {{ fmtSize(bodySize) }}</div>
-      <div class="text-dim" style="margin-top: 6px; font-size: 11px">请切换到 Hex 标签查看原始字节</div>
+      <div class="text-dim" style="margin-top: 10px">{{ t('previewView.cannotPreview') }}</div>
+      <div class="preview-meta text-dim">{{ parsed.main || t('previewView.unknownType') }} · {{ fmtSize(bodySize) }}</div>
+      <div class="text-dim" style="margin-top: 6px; font-size: 11px">{{ t('previewView.switchToHex') }}</div>
     </div>
   </div>
 </template>

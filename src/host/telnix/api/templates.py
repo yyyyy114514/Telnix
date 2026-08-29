@@ -1,15 +1,15 @@
-"""§3.15 规则模板库：内置常见规则模板，可一键应用到指定 match 表达式。
+"""§3.15 Rule template library: built-in common rule templates, can be applied to specified match expression with one click.
 
-模板列表：
-- mock-404: 返回 404 响应
-- mock-500: 返回 500 响应
-- strip-auth: 删除请求 Authorization 头
-- unlock-vip: 改响应体 is_vip=true
-- bypass-pay: 改响应体 price=0
-- slow-response: 延迟 5 秒响应
+Template list:
+- mock-404: return 404 response
+- mock-500: return 500 response
+- strip-auth: remove request Authorization header
+- unlock-vip: modify response body is_vip=true
+- bypass-pay: modify response body price=0
+- slow-response: delay 5 seconds response
 
-GET /templates              返回模板列表
-POST /templates/{name}/apply  应用模板到指定 match 表达式，创建规则
+GET /templates              Return template list
+POST /templates/{name}/apply  Apply template to specified match expression, create rule
 """
 
 import uuid
@@ -19,6 +19,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from .. import db
+from ..logger import _capture_log
 from ..auto_reply.rules import invalidate_cache
 from . import err, ok
 
@@ -31,7 +32,7 @@ router = APIRouter()
 TEMPLATES: dict[str, dict] = {
     "mock-404": {
         "name": "mock-404",
-        "description": "返回 404 Not Found 响应（不转发到服务器）",
+        "description": "Return 404 Not Found response (does not forward to server)",
         "action": "mock",
         "mock_status": 404,
         "mock_headers": {"Content-Type": "application/json"},
@@ -40,7 +41,7 @@ TEMPLATES: dict[str, dict] = {
     },
     "mock-500": {
         "name": "mock-500",
-        "description": "返回 500 Internal Server Error 响应（不转发到服务器）",
+        "description": "Return 500 Internal Server Error response (does not forward to server)",
         "action": "mock",
         "mock_status": 500,
         "mock_headers": {"Content-Type": "application/json"},
@@ -49,7 +50,7 @@ TEMPLATES: dict[str, dict] = {
     },
     "strip-auth": {
         "name": "strip-auth",
-        "description": "删除请求 Authorization 头（modify_request）",
+        "description": "Remove request Authorization header (modify_request)",
         "action": "modify_request",
         "modify_rules": [
             {"target": "request_header", "op": "remove", "key": "Authorization", "value": ""}
@@ -57,7 +58,7 @@ TEMPLATES: dict[str, dict] = {
     },
     "unlock-vip": {
         "name": "unlock-vip",
-        "description": "改响应体 is_vip=true（modify_response，全局字段替换）",
+        "description": "Modify response body is_vip=true (modify_response, global field replacement)",
         "action": "modify_response",
         "modify_rules": [
             {"target": "response_body", "op": "replace", "key": "is_vip", "value": True}
@@ -65,7 +66,7 @@ TEMPLATES: dict[str, dict] = {
     },
     "bypass-pay": {
         "name": "bypass-pay",
-        "description": "改响应体 price=0（modify_response，全局字段替换）",
+        "description": "Modify response body price=0 (modify_response, global field replacement)",
         "action": "modify_response",
         "modify_rules": [
             {"target": "response_body", "op": "replace", "key": "price", "value": 0}
@@ -73,7 +74,7 @@ TEMPLATES: dict[str, dict] = {
     },
     "slow-response": {
         "name": "slow-response",
-        "description": "延迟 5 秒响应（modify_response，target=delay）",
+        "description": "Delay 5 seconds response (modify_response, target=delay)",
         "action": "modify_response",
         "modify_rules": [
             {"target": "delay", "op": "sleep", "value": 5000}
@@ -83,7 +84,7 @@ TEMPLATES: dict[str, dict] = {
 
 
 class ApplyTemplateBody(BaseModel):
-    """应用模板到指定 match 表达式。"""
+    """Apply template to specified match expression."""
     pattern: str  # URL 匹配 pattern（wildcard 通配符）
     match_mode: str = "wildcard"  # wildcard | exact | regex
     note: str = ""  # 规则备注
@@ -96,7 +97,7 @@ class ApplyTemplateBody(BaseModel):
 
 
 def _template_spec(name: str) -> dict:
-    """返回模板的 action_spec（不含 name/description，便于前端展示）。"""
+    """Return the template's action_spec (excluding name/description, for frontend display)."""
     t = TEMPLATES[name]
     return {
         "action": t["action"],
@@ -109,7 +110,7 @@ def _template_spec(name: str) -> dict:
 
 @router.get("/templates")
 async def list_templates():
-    """返回所有模板列表（name/description/action_spec）。"""
+    """Return all template list (name/description/action_spec)."""
     items = []
     for name in TEMPLATES:
         t = TEMPLATES[name]
@@ -123,9 +124,9 @@ async def list_templates():
 
 @router.post("/templates/{name}/apply")
 async def apply_template(name: str, body: ApplyTemplateBody):
-    """应用模板到指定 match 表达式，创建规则。"""
+    """Apply template to specified match expression, create rule."""
     if name not in TEMPLATES:
-        return err(f"模板不存在: {name}")
+        return err(f"Template not found: {name}")
     t = TEMPLATES[name]
     import json
     now = datetime.now().isoformat()
@@ -139,7 +140,7 @@ async def apply_template(name: str, body: ApplyTemplateBody):
         "mock_headers": json.dumps(t.get("mock_headers", {})),
         "mock_body": t.get("mock_body", ""),
         "modify_rules": json.dumps(t.get("modify_rules", [])),
-        "note": body.note or f"模板: {name}",
+        "note": body.note or f"Template: {name}",
         # §4.1 过滤字段
         "method_filter": body.method_filter or "",
         "status_filter": body.status_filter or "",

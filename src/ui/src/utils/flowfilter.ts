@@ -68,16 +68,16 @@ export function parseFlowFilter(input: string): ParsedFilter {
       // ~d host 形式
       const sp = tok.indexOf(' ')
       if (sp === -1) {
-        return { raw: input, conditions, error: `语法错误：'${tok}' 缺少值，应为 ~X value` }
+        return { raw: input, conditions, error: `Syntax error: '${tok}' missing value, expected ~X value` }
       }
       const key = tok.slice(1, sp)
       const value = tok.slice(sp + 1).trim()
       if (!value) {
-        return { raw: input, conditions, error: `语法错误：'~${key}' 值为空` }
+        return { raw: input, conditions, error: `Syntax error: '~${key}' value is empty` }
       }
       const type = FIELD_ALIASES[key.toLowerCase()]
       if (!type) {
-        return { raw: input, conditions, error: `未知字段：~${key}` }
+        return { raw: input, conditions, error: `Unknown field: ~${key}` }
       }
       conditions.push(buildCondition(type, value))
     } else if (tok.startsWith('"') && tok.endsWith('"') && tok.length >= 2) {

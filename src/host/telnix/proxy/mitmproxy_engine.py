@@ -1,19 +1,23 @@
-"""mitmproxy 引擎集成：作为可选的高性能代理引擎。
+"""mitmproxy engine integration: an optional high-performance proxy engine.
 
-mitmproxy 是成熟的 HTTPS 代理库，自带 SSL 拦截、HTTP/2 支持、上游代理等能力。
-本模块将其封装为 MitmproxyEngine，继承内置 ProxyServer 以兼容 API 层依赖的接口
-（capturing / session_id / breakpoint / ssl_bump 等属性），覆写 start()/stop()
-在独立线程中运行 mitmproxy 的 asyncio 事件循环。
+mitmproxy is a mature HTTPS proxy library with built-in SSL interception,
+HTTP/2 support, upstream proxy and other capabilities. This module wraps it as
+MitmproxyEngine, inheriting the built-in ProxyServer to stay compatible with the
+interface the API layer depends on (capturing / session_id / breakpoint /
+ssl_bump etc.), and overrides start()/stop() to run mitmproxy's asyncio event
+loop in a dedicated thread.
 
-mitmproxy 未安装时模块仍可正常导入（MITMPROXY_AVAILABLE=False），调用 start()
-时抛出 RuntimeError 让上层回退到内置引擎。
+When mitmproxy is not installed, the module can still be imported normally
+(MITMPROXY_AVAILABLE=False); calling start() raises RuntimeError so the upper
+layer falls back to the built-in engine.
 
-功能：
-- 流量记录到 DB（request/response hook）
-- SSL 拦截（mitmproxy 自动处理，复用 Telnix 根证书）
-- 上游代理（Clash 集成：从 clash/client.py 获取上游代理地址）
-- 断点（复用 BreakpointManager，通过专用线程池 + 显式超时避免线程池耗尽）
-- 自动修改规则（mock / modify_request / modify_response，复用 server.py 的修改逻辑）
+Features:
+- Traffic recording to DB (request/response hook)
+- SSL interception (handled automatically by mitmproxy, reusing Telnix root cert)
+- Upstream proxy (Clash integration: gets upstream proxy address from clash/client.py)
+- Breakpoints (reuses BreakpointManager, with a dedicated thread pool + explicit
+  timeout to avoid thread pool exhaustion)
+- Auto-modify rules (mock / modify_request / modify_response, reusing server.py logic)
 """
 
 from __future__ import annotations
@@ -63,8 +67,8 @@ except Exception as _mitm_err:  # noqa: BLE001
     MITMPROXY_AVAILABLE = False
     MitmProxyServer = None  # type: ignore[assignment,misc]
     _mitm_err_type = type(_mitm_err).__name__
-    print(f"[Telnix] mitmproxy 引擎不可用（{_mitm_err_type}: {_mitm_err}）。"
-          f"将回退到内置引擎。如需启用可执行 pip install --upgrade mitmproxy pyOpenSSL cryptography。")
+    print(f"[Telnix] mitmproxy engine unavailable ({_mitm_err_type}: {_mitm_err}). "
+          f"Falling back to built-in engine. To enable, run pip install --upgrade mitmproxy pyOpenSSL cryptography.")
 
 from .server import (
     ProxyServer,
@@ -95,7 +99,7 @@ _IP_REGION_MAX = 500
 
 
 def _cached_ip_region_lookup(ip: str) -> str:
-    """带 TTL 的 IP 属地查询缓存（LRU + 10min 过期）。"""
+    """IP region lookup cache with TTL (LRU + 10min expiry)."""
     now = time.monotonic()
     cached = _IP_REGION_CACHE.get(ip)
     if cached is not None:
@@ -117,7 +121,7 @@ def _cached_ip_region_lookup(ip: str) -> str:
 # ---------- 工具函数 ----------
 
 def _mitm_headers_to_dict(hdrs) -> dict:
-    """mitmproxy multidict headers → 普通 dict（同名头保留首个值）。"""
+    """Convert mitmproxy multidict headers to a plain dict (first value kept for duplicate names)."""
     d = {}
     try:
         for k, v in hdrs.items(multi=True):
@@ -132,14 +136,14 @@ def _mitm_headers_to_dict(hdrs) -> dict:
 
 
 def _write_dict_to_mitm_headers(hdrs, d: dict):
-    """dict → mitmproxy headers（清空后填充）。"""
+    """Convert dict to mitmproxy headers (clears then populates)."""
     hdrs.clear()
     for k, v in d.items():
         hdrs.add(k, str(v))
 
 
 def _write_headers_to_mitm_headers(hdrs, h: Headers):
-    """Headers 对象 → mitmproxy headers（清空后填充）。"""
+    """Convert Headers object to mitmproxy headers (clears then populates)."""
     hdrs.clear()
     for k, v in h._items:  # noqa: SLF001
         hdrs.add(k, v)
@@ -148,21 +152,22 @@ def _write_headers_to_mitm_headers(hdrs, h: Headers):
 # ---------- 流量记录 addon ----------
 
 class RecordingAddon:
-    """mitmproxy addon：记录流量到 DB + 应用自动回复规则 + 断点支持。
+    """mitmproxy addon: records traffic to DB + applies auto-reply rules + breakpoint support.
 
-    所有 hook 为 async 协程，断点等待通过 asyncio.to_thread 非阻塞执行，
-    避免 mitmproxy 事件循环被阻塞导致其他连接无法处理。
+    All hooks are async coroutines; breakpoint waiting runs non-blocking via
+    asyncio.to_thread to avoid blocking the mitmproxy event loop and starving
+    other connections.
     """
 
     def __init__(self, engine: "MitmproxyEngine"):
         self.engine = engine
 
     def _should_record(self) -> bool:
-        """是否应记录流量（抓包中且有会话）。"""
+        """Whether traffic should be recorded (capturing and has a session)."""
         return self.engine.capturing and self.engine.session_id is not None
 
     def _is_ignored(self, flow) -> bool:
-        """检查是否命中忽略规则（host 通配符 + PID/进程名）。"""
+        """Check whether ignore rules are hit (host wildcard + PID/process name)."""
         try:
             host = flow.request.host
             # 尝试获取客户端 PID/进程名（mitmproxy flow.client_conn.peername）
@@ -172,11 +177,11 @@ class RecordingAddon:
             return False
 
     def _get_client_pid(self, flow) -> tuple[int | None, str | None]:
-        """从 mitmproxy flow 获取客户端 PID 和进程名。
+        """Get client PID and process name from a mitmproxy flow.
 
-        mitmproxy 的 flow.client_conn.peername 是 (ip, port)，
-        通过 process_lookup 反查 PID（与自研引擎一致）。
-        结果缓存到 flow.metadata 避免重复 TCP 表扫描。
+        mitmproxy's flow.client_conn.peername is (ip, port); reverse-lookup the
+        PID via process_lookup (consistent with the built-in engine). Results are
+        cached in flow.metadata to avoid repeated TCP table scans.
         """
         if flow.metadata.get("telnix_pid_cached"):
             return (flow.metadata.get("telnix_pid"),
@@ -197,12 +202,12 @@ class RecordingAddon:
         return None, None
 
     def _get_server_conn_info(self, flow) -> tuple[str, str, str]:
-        """从 mitmproxy flow 获取服务器连接信息。
+        """Get server connection info from a mitmproxy flow.
 
-        返回 (remote_ip, http_version, cert_info_json)。
-        - remote_ip: 服务器 IP（用于 IP 属地查询）
-        - http_version: HTTP 版本（h2 / http/1.1 等）
-        - cert_info_json: 证书信息 JSON（空字符串表示无）
+        Returns (remote_ip, http_version, cert_info_json).
+        - remote_ip: server IP (used for IP region lookup)
+        - http_version: HTTP version (h2 / http/1.1 etc.)
+        - cert_info_json: certificate info JSON (empty string means none)
         """
         remote_ip = ""
         http_version = ""
@@ -227,7 +232,7 @@ class RecordingAddon:
     # ---------- 请求 hook ----------
 
     async def request(self, flow):
-        """请求阶段：匹配规则 + mock/modify_request + 请求断点。"""
+        """Request phase: match rules + mock/modify_request + request breakpoint."""
         if not self._should_record():
             return
         if self._is_ignored(flow):
@@ -268,7 +273,7 @@ class RecordingAddon:
     # ---------- 响应 hook ----------
 
     async def response(self, flow):
-        """响应阶段：匹配 modify_response 规则 + 响应断点 + 记录到 DB。"""
+        """Response phase: match modify_response rules + response breakpoint + record to DB."""
         if not self._should_record():
             return
         if self._is_ignored(flow):
@@ -328,7 +333,7 @@ class RecordingAddon:
     # ---------- 错误 hook ----------
 
     async def error(self, flow):
-        """请求失败时记录（无响应的流量）。"""
+        """Record on request failure (flows with no response)."""
         if not self._should_record():
             return
         if self._is_ignored(flow):
@@ -345,9 +350,9 @@ class RecordingAddon:
     # ---------- 规则匹配 ----------
 
     def _match_rule(self, url, method=None, status_code=None, flow=None):
-        """匹配自动回复规则，复用 auto_reply.rules 的逻辑。
+        """Match auto-reply rules, reusing the logic from auto_reply.rules.
 
-        传入 flow 以获取 pid/process_name，让带 PID 过滤的规则能生效。
+        Passes in flow to get pid/process_name so rules with PID filter can take effect.
         """
         try:
             from ..auto_reply.rules import find_matching_rule
@@ -364,7 +369,7 @@ class RecordingAddon:
     # ---------- mock ----------
 
     async def _handle_mock(self, flow, rule):
-        """mock 规则：直接返回伪造响应，不转发到服务器。"""
+        """mock rule: directly returns a forged response without forwarding to the server."""
         status = int(rule.get("mock_status") or 200)
         headers = _parse_json(rule.get("mock_headers"))
         body = _to_bytes(rule.get("mock_body") or "")
@@ -376,7 +381,7 @@ class RecordingAddon:
                 headers=headers,
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"mock 响应创建失败: {e}", "")
+            logger.warning("mitmproxy", f"Mock response creation failed: {e}", "")
         # 记录完整 flow（请求 + mock 响应）：用 asyncio.to_thread 避免同步属地查询阻塞事件循环
         if self._should_record():
             flow_dict = await asyncio.to_thread(
@@ -390,7 +395,7 @@ class RecordingAddon:
     # ---------- 修改请求 ----------
 
     def _apply_modify_request(self, flow, rule):
-        """应用 modify_request 规则（复用 server.py 的修改逻辑）。"""
+        """Apply modify_request rule (reuses the modification logic from server.py)."""
         try:
             h = Headers()
             for k, v in flow.request.headers.items():
@@ -400,12 +405,12 @@ class RecordingAddon:
             _write_headers_to_mitm_headers(flow.request.headers, h)
             flow.request.content = body
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"modify_request 应用失败: {e}", "")
+            logger.warning("mitmproxy", f"modify_request apply failed: {e}", "")
 
     # ---------- 修改响应 ----------
 
     def _apply_modify_response(self, flow, rule):
-        """应用 modify_response 规则（复用 server.py 的修改逻辑）。"""
+        """Apply modify_response rule (reuses server.py modification logic)."""
         try:
             h = Headers()
             for k, v in flow.response.headers.items():
@@ -417,15 +422,17 @@ class RecordingAddon:
             _write_headers_to_mitm_headers(flow.response.headers, h)
             flow.response.content = body
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"modify_response 应用失败: {e}", "")
+            logger.warning("mitmproxy", f"modify_response apply failed: {e}", "")
 
     # ---------- mock_request ----------
 
     def _handle_mock_request(self, flow, rule):
-        """mock_request 规则：用预设的 method/url/headers/body 转发到目标服务器，返回真实响应。
+        """mock_request rule: forward a preset method/url/headers/body to the target server and return the real response.
 
-        与自研引擎语义一致：请求内容被写死，但真实发往服务器并取回真实响应。
-        直接改写 flow.request，让 mitmproxy 自然转发（响应 hook 负责记录）。
+        Semantically consistent with the built-in engine: the request content is
+        fixed but actually sent to the server and the real response is retrieved.
+        Directly rewrites flow.request so mitmproxy forwards it naturally (the
+        response hook handles recording).
         """
         try:
             m_method = (rule.get("mock_method") or "GET").upper()
@@ -448,20 +455,20 @@ class RecordingAddon:
             _write_dict_to_mitm_headers(flow.request.headers, hdrs)
             flow.request.content = m_body
             flow.metadata["telnix_mock_request"] = True
-            logger.info("mitmproxy", "mock_request: 用预设请求转发",
+            logger.info("mitmproxy", "mock_request: forward with preset request",
                         f"method={m_method}, url={m_url}, host={m_host}, body_len={len(m_body)}")
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"mock_request 应用失败: {e}", "")
+            logger.warning("mitmproxy", f"mock_request apply failed: {e}", "")
 
     # ---------- script（请求阶段） ----------
 
     def _handle_script_request(self, flow, rule):
-        """script 规则：调用用户脚本 on_request，应用结果到请求，或 mock/drop。"""
+        """script rule: call the user script's on_request, apply the result to the request, or mock/drop."""
         script = rule.get("modify_rules") or ""
         if isinstance(script, list):
             script = ""
         if not script.strip():
-            logger.warning("mitmproxy", f"script 规则内容为空: {rule.get('id')}", "")
+            logger.warning("mitmproxy", f"Script rule content is empty: {rule.get('id')}", "")
             return
         try:
             pid, process_name = self._get_client_pid(flow)
@@ -478,15 +485,15 @@ class RecordingAddon:
             )
             resp = call_script_request(rule["id"], script, ctx)
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"script on_request 异常: {rule.get('id')}", str(e))
+            logger.warning("mitmproxy", f"script on_request exception: {rule.get('id')}", str(e))
             return
         if resp is None:
-            logger.warning("mitmproxy", f"script on_request 调用失败: {rule.get('id')}",
-                           "脚本不可用，请求按原样转发")
+            logger.warning("mitmproxy", f"script on_request call failed: {rule.get('id')}",
+                           "Script unavailable, request forwarded as-is")
             return
         action = resp.get("action", "continue")
         if action == "drop":
-            logger.info("mitmproxy", f"script drop 请求: {flow.request.url}", "")
+            logger.info("mitmproxy", f"script drop request: {flow.request.url}", "")
             flow.kill()
             return
         if action == "mock":
@@ -503,17 +510,17 @@ class RecordingAddon:
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"script 应用请求修改失败: {rule.get('id')}", str(e))
+            logger.warning("mitmproxy", f"script apply request modification failed: {rule.get('id')}", str(e))
 
     # ---------- script（响应阶段） ----------
 
     async def _handle_script_response(self, flow, rule) -> bool:
-        """script 规则：调用用户脚本 on_response。返回 True 表示已 drop（响应 hook 应中止记录）。"""
+        """script rule: call the user script's on_response. Returns True if dropped (response hook should abort recording)."""
         script = rule.get("modify_rules") or ""
         if isinstance(script, list):
             script = ""
         if not script.strip():
-            logger.warning("mitmproxy", f"script 规则内容为空: {rule.get('id')}", "")
+            logger.warning("mitmproxy", f"Script rule content is empty: {rule.get('id')}", "")
             return False
         try:
             pid, process_name = self._get_client_pid(flow)
@@ -533,15 +540,15 @@ class RecordingAddon:
             )
             resp = call_script_response(rule["id"], script, ctx)
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"script on_response 异常: {rule.get('id')}", str(e))
+            logger.warning("mitmproxy", f"script on_response exception: {rule.get('id')}", str(e))
             return False
         if resp is None:
-            logger.warning("mitmproxy", f"script on_response 调用失败: {rule.get('id')}",
-                           "脚本不可用，响应按原样返回")
+            logger.warning("mitmproxy", f"script on_response call failed: {rule.get('id')}",
+                           "Script unavailable, response returned as-is")
             return False
         action = resp.get("action", "continue")
         if action == "drop":
-            logger.info("mitmproxy", f"script drop 响应: {flow.request.url}", "")
+            logger.info("mitmproxy", f"script drop response: {flow.request.url}", "")
             flow.kill()
             return True
         if action == "mock":
@@ -563,11 +570,11 @@ class RecordingAddon:
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"script 应用响应修改失败: {rule.get('id')}", str(e))
+            logger.warning("mitmproxy", f"script apply response modification failed: {rule.get('id')}", str(e))
         return False
 
     def _set_mock_response(self, flow, resp: dict, rule_id):
-        """用脚本返回的 mock 响应覆盖 flow.response 并记录完整 flow。"""
+        """Overwrite flow.response with the script-returned mock response and record the full flow."""
         try:
             from mitmproxy import http as mitm_http
             status = int(resp.get("mock_status") or 200)
@@ -587,17 +594,18 @@ class RecordingAddon:
                 if flow_dict is not None:
                     db.insert_flow_async(flow_dict)
                     flow.metadata["telnix_mock_recorded"] = True
-            logger.info("mitmproxy", f"script mock 响应: {flow.request.url} -> {status}", "")
+            logger.info("mitmproxy", f"script mock response: {flow.request.url} -> {status}", "")
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"script mock 响应失败: {rule_id}", str(e))
+            logger.warning("mitmproxy", f"script mock response failed: {rule_id}", str(e))
 
     # ---------- 请求断点 ----------
 
     async def _handle_request_breakpoint(self, flow):
-        """请求断点：同步插入 DB 获取 flow_id，非阻塞等待用户放行。
+        """Request breakpoint: synchronously insert into DB to get flow_id, then non-blocking wait for user release.
 
-        使用专用线程池（_BREAKPOINT_EXECUTOR）避免耗尽 mitmproxy 默认 executor，
-        并设置默认超时（300s）避免 agent 忘记 release 导致线程永久占用。
+        Uses a dedicated thread pool (_BREAKPOINT_EXECUTOR) to avoid exhausting
+        mitmproxy's default executor, and sets a default timeout (300s) to prevent
+        threads from being held forever when the agent forgets to release.
         """
         flow_id = await asyncio.to_thread(self._insert_flow_sync, flow)
         if flow_id is None:
@@ -627,7 +635,7 @@ class RecordingAddon:
     # ---------- 响应断点 ----------
 
     async def _handle_response_breakpoint(self, flow):
-        """响应断点：更新 DB 响应字段，非阻塞等待用户放行。"""
+        """Response breakpoint: update DB response fields, then non-blocking wait for user release."""
         flow_id = flow.metadata.get("telnix_flow_id")
         if flow_id is None:
             # 请求阶段未插入（可能请求断点未开），现在同步插入完整 flow
@@ -658,11 +666,11 @@ class RecordingAddon:
     # ---------- DB 记录 ----------
 
     def _record_full_flow(self, flow):
-        """记录完整 flow（请求 + 响应）到 DB。
+        """Record the full flow (request + response) to DB.
 
-        - 若请求阶段未记录过（无 telnix_flow_id），异步插入完整 flow
-        - 若请求阶段已记录过（请求断点放行后有 telnix_flow_id），
-          仅更新响应字段，避免响应字段丢失
+        - If not recorded in the request phase (no telnix_flow_id), async-insert the full flow
+        - If already recorded in the request phase (telnix_flow_id present after request
+          breakpoint release), only update the response fields to avoid losing them
         """
         # 请求断点放行后已有 flow_id，但响应字段尚未写入 → 更新响应
         flow_id = flow.metadata.get("telnix_flow_id")
@@ -681,7 +689,7 @@ class RecordingAddon:
         flow.metadata["telnix_recorded"] = True
 
     def _insert_flow_sync(self, flow, with_response=False) -> int | None:
-        """同步插入 flow 到 DB，返回 flow_id（断点场景用）。"""
+        """Synchronously insert a flow into the DB, returns flow_id (used in breakpoint scenarios)."""
         flow_dict = self._build_flow_dict(
             flow, include_response=with_response)
         if flow_dict is None:
@@ -689,11 +697,11 @@ class RecordingAddon:
         try:
             return db.insert_flow(flow_dict)
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"同步插入 flow 失败: {e}", "")
+            logger.warning("mitmproxy", f"Failed to sync insert flow: {e}", "")
             return None
 
     def _update_flow_response_sync(self, flow_id, flow):
-        """同步更新响应字段到 DB（断点放行前需要立即可见）。"""
+        """Synchronously update response fields to DB (must be visible immediately before breakpoint release)."""
         try:
             status = flow.response.status_code
             resp_headers = json.dumps(
@@ -704,17 +712,18 @@ class RecordingAddon:
             db.update_flow_response(
                 flow_id, status, resp_headers, resp_body, duration, size)
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"同步更新响应失败: {e}", "")
+            logger.warning("mitmproxy", f"Failed to sync update response: {e}", "")
 
     # ---------- flow dict 构建 ----------
 
     def _build_flow_dict(self, flow, mock_status=None, mock_headers=None,
                          mock_body=None, force_status=None,
                          include_response=True) -> dict | None:
-        """从 mitmproxy flow 构建 DB flow dict。
+        """Build a DB flow dict from a mitmproxy flow.
 
-        补齐字段：pid / process_name / remote_ip / ip_region / http_version /
-        cert_info / breakpoint_status，与自研引擎记录的字段对齐。
+        Fills in fields: pid / process_name / remote_ip / ip_region / http_version /
+        cert_info / breakpoint_status, aligned with the fields recorded by the
+        built-in engine.
         """
         try:
             req = flow.request
@@ -777,11 +786,11 @@ class RecordingAddon:
 
             return flow_dict
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"构建 flow dict 失败: {e}", "")
+            logger.warning("mitmproxy", f"Failed to build flow dict: {e}", "")
             return None
 
     def _calc_duration(self, flow) -> int:
-        """计算请求耗时（毫秒）。"""
+        """Calculate request duration (milliseconds)."""
         try:
             if flow.response and flow.request:
                 return int(
@@ -794,7 +803,7 @@ class RecordingAddon:
     # ---------- 用户修改应用 ----------
 
     def _apply_request_modifications(self, flow, modified: dict):
-        """将 DB 中用户修改后的请求应用到 mitmproxy flow。"""
+        """Apply the user-modified request from DB to the mitmproxy flow."""
         try:
             if modified.get("method"):
                 flow.request.method = modified["method"]
@@ -806,10 +815,10 @@ class RecordingAddon:
             if modified.get("request_body") is not None:
                 flow.request.content = _to_bytes(modified["request_body"])
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"应用请求修改失败: {e}", "")
+            logger.warning("mitmproxy", f"Failed to apply request modification: {e}", "")
 
     def _apply_response_modifications(self, flow, modified: dict):
-        """将 DB 中用户修改后的响应应用到 mitmproxy flow。"""
+        """Apply the user-modified response from DB to the mitmproxy flow."""
         if flow.response is None:
             return
         try:
@@ -821,23 +830,23 @@ class RecordingAddon:
             if modified.get("response_body") is not None:
                 flow.response.content = _to_bytes(modified["response_body"])
         except Exception as e:  # noqa: BLE001
-            logger.warning("mitmproxy", f"应用响应修改失败: {e}", "")
+            logger.warning("mitmproxy", f"Failed to apply response modification: {e}", "")
 
 
 # ---------- mitmproxy 引擎 ----------
 
 class MitmproxyEngine(ProxyServer):
-    """mitmproxy 代理引擎，兼容 ProxyServer 接口。
+    """mitmproxy proxy engine, compatible with the ProxyServer interface.
 
-    继承 ProxyServer 以复用 API 层依赖的属性和方法：
-    - capturing / session_id：抓包状态（capture API 设置）
-    - breakpoint：BreakpointManager（断点 API 操作）
-    - ssl_bump / cert_installed：证书状态（cert API 读取）
-    - host / port / _running：代理状态（status API 读取）
-    - is_ignored / refresh_ignored：忽略规则
-    - _h2_pool / _pinning_suspected 等：API 层访问的内部属性
+    Inherits ProxyServer to reuse properties and methods relied on by the API layer:
+    - capturing / session_id: capture status (set by capture API)
+    - breakpoint: BreakpointManager (operated by breakpoint API)
+    - ssl_bump / cert_installed: certificate status (read by cert API)
+    - host / port / _running: proxy status (read by status API)
+    - is_ignored / refresh_ignored: ignore rules
+    - _h2_pool / _pinning_suspected etc.: internal properties accessed by the API layer
 
-    覆写 start()/stop() 以在守护线程中运行 mitmproxy 事件循环。
+    Overrides start()/stop() to run the mitmproxy event loop in a daemon thread.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8888,
@@ -849,10 +858,10 @@ class MitmproxyEngine(ProxyServer):
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def _get_mitmproxy_mode(self) -> str:
-        """获取 mitmproxy mode。
+        """Get the mitmproxy mode.
 
-        - regular：直连目标服务器
-        - upstream:http://host:port：通过 Clash/Mihomo 上游代理转发
+        - regular: connect directly to the target server
+        - upstream:http://host:port: forward via Clash/Mihomo upstream proxy
         """
         try:
             from ..clash.client import get_upstream_proxy
@@ -865,15 +874,16 @@ class MitmproxyEngine(ProxyServer):
         return "regular"
 
     def start(self):
-        """启动 mitmproxy 引擎（在守护线程中运行 asyncio 事件循环）。
+        """Start the mitmproxy engine (runs the asyncio event loop in a daemon thread).
 
-        mitmproxy 有自己的事件循环，在独立线程中运行 master.run()（阻塞），
-        stop() 时调用 master.shutdown() 通知事件循环退出。
+        mitmproxy has its own event loop; master.run() (blocking) runs in a
+        dedicated thread. stop() calls master.shutdown() to notify the event loop
+        to exit.
         """
         if not MITMPROXY_AVAILABLE:
             raise RuntimeError(
-                "mitmproxy 未安装，无法启动 mitmproxy 引擎。"
-                "请执行 pip install mitmproxy 安装。")
+                "mitmproxy is not installed; cannot start the mitmproxy engine. "
+                "Please run pip install mitmproxy to install it.")
 
         # 构建 mitmproxy 选项
         mode = self._get_mitmproxy_mode()
@@ -897,7 +907,7 @@ class MitmproxyEngine(ProxyServer):
             self._opts = options.Options(**kwargs)
         except Exception as e:  # noqa: BLE001
             # 部分选项在不同 mitmproxy 版本可能不支持，逐个尝试
-            logger.warning("mitmproxy", f"选项构建失败，尝试精简选项: {e}", "")
+            logger.warning("mitmproxy", f"Option build failed, trying simplified options: {e}", "")
             self._opts = options.Options(
                 listen_host=self.host,
                 listen_port=self.port,
@@ -927,7 +937,7 @@ class MitmproxyEngine(ProxyServer):
                 if getattr(self._master, "server", None) is None:
                     self._master.server = MitmProxyServer(self._opts)
             except Exception as e:  # noqa: BLE001
-                logger.warning("mitmproxy", f"ProxyServer 设置跳过: {e}", "")
+                logger.warning("mitmproxy", f"ProxyServer setup skipped: {e}", "")
 
         # 添加流量记录 addon
         self._master.addons.add(RecordingAddon(self))
@@ -942,7 +952,7 @@ class MitmproxyEngine(ProxyServer):
             try:
                 self._loop.run_until_complete(self._master.run())
             except Exception as e:  # noqa: BLE001
-                logger.error("mitmproxy", f"事件循环异常退出: {e}", "")
+                logger.error("mitmproxy", f"Event loop exited with exception: {e}", "")
             finally:
                 self._running = False
 
@@ -950,14 +960,15 @@ class MitmproxyEngine(ProxyServer):
             target=_run, daemon=True, name="mitmproxy-engine")
         self._thread.start()
         logger.info("mitmproxy",
-                    f"mitmproxy 引擎已启动: {self.host}:{self.port}, mode={mode}",
-                    f"ca_cert={kwargs.get('ca_cert', '(mitmproxy 默认)')}")
+                    f"mitmproxy engine started: {self.host}:{self.port}, mode={mode}",
+                    f"ca_cert={kwargs.get('ca_cert', '(mitmproxy default)')}")
 
     def stop(self):
-        """停止 mitmproxy 引擎：通知事件循环退出 + 等待线程结束。
+        """Stop the mitmproxy engine: notify the event loop to exit + wait for the thread to finish.
 
-        使用 call_soon_threadsafe 确保 shutdown 在事件循环线程内执行，
-        避免跨线程操作事件循环导致 RuntimeError / 资源泄漏。
+        Uses call_soon_threadsafe to ensure shutdown runs inside the event loop
+        thread, avoiding RuntimeError / resource leaks from cross-thread event
+        loop operations.
         """
         self._running = False
         master = self._master
@@ -970,17 +981,17 @@ class MitmproxyEngine(ProxyServer):
                 # 避免跨线程直接调用 master.shutdown() 的竞态
                 loop.call_soon_threadsafe(master.shutdown)
             except Exception as e:  # noqa: BLE001
-                logger.warning("mitmproxy", f"shutdown 调度失败: {e}", "")
+                logger.warning("mitmproxy", f"shutdown schedule failed: {e}", "")
                 # 回退：直接调用（虽然不安全，但比什么都不做好）
                 try:
                     master.shutdown()
                 except Exception as e2:  # noqa: BLE001
-                    logger.warning("mitmproxy", f"shutdown 直接调用失败: {e2}", "")
+                    logger.warning("mitmproxy", f"shutdown direct call failed: {e2}", "")
 
         if thread is not None:
             thread.join(timeout=5)
             if thread.is_alive():
-                logger.warning("mitmproxy", "引擎线程 5s 后仍未退出", "")
+                logger.warning("mitmproxy", "Engine thread still running after 5s", "")
             self._thread = None
 
         # 关闭事件循环（确保线程已退出后再 close，避免 RuntimeError: Cannot close a running event loop）
@@ -995,7 +1006,7 @@ class MitmproxyEngine(ProxyServer):
                     pass
                 loop.close()
             except Exception as e:  # noqa: BLE001
-                logger.debug("mitmproxy", f"loop.close 异常: {e}", "")
+                logger.debug("mitmproxy", f"loop.close exception: {e}", "")
             self._loop = None
 
         self._master = None

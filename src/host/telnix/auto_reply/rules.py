@@ -1,22 +1,23 @@
-"""自动回复规则管理 + 通配符匹配。
+"""Auto-reply rule management + wildcard matching.
 
-规则存于 SQLite（auto_reply_rules 表）。匹配模式：
-- wildcard：* -> .*，? -> .，转义其它正则元字符
-- exact：完全相等
-- regex：直接当正则
+Rules are stored in SQLite (auto_reply_rules table). Match modes:
+- wildcard: * -> .*, ? -> ., escape other regex metacharacters
+- exact: exact equality
+- regex: used directly as regex
 
-匹配目标为完整 URL。提供内存缓存（带 TTL），规则变更时刷新。
+The match target is the full URL. Provides an in-memory cache (with TTL) that is
+refreshed when rules change.
 
-性能优化（v10）：
-- _cache 改为三元组 (rules, compiled_regexes, filters)，预编译正则 + 预拆分 filter
-- 修复空 list falsy bug（无规则时每次查 DB）
-- TTL 从 2 秒提到 10 秒，靠 invalidate_cache 主动失效
-- 排序在加载时一次完成，不再每请求 sorted()
+Performance optimization (v10):
+- _cache changed to a triplet (rules, compiled_regexes, filters), pre-compiled regex + pre-split filters
+- Fixed empty list falsy bug (querying DB every time when no rules)
+- TTL raised from 2s to 10s, relies on invalidate_cache for active invalidation
+- Sorting done once at load time, no longer sorted() per request
 
-性能优化（v11，未抓包场景）：
-- 模块级 _has_rules 标志位：无锁读，避免高并发下每请求都进 _cache_lock
-- host_matches_any_rule 结果 LRU 缓存：未抓包时每次 CONNECT 都查，缓存避免重复遍历
-- has_active_rules_fast()：用 _has_rules 快速判断，无规则时跳过 find_matching_rule
+Performance optimization (v11, no-capture scenario):
+- Module-level _has_rules flag: lock-free read, avoids entering _cache_lock per request under high concurrency
+- host_matches_any_rule result LRU cache: queried on every CONNECT when not capturing, cache avoids repeated traversal
+- has_active_rules_fast(): uses _has_rules for quick check, skips find_matching_rule when no rules
 """
 
 import re
@@ -25,14 +26,31 @@ import time
 
 from .. import db
 
+
+def _get_redos_threshold(key: str, default: int) -> int:
+    """Read ReDoS protection threshold from settings_store (allows runtime configuration).
+
+    Design fix: moved from hardcoded constants to settings_store.
+    """
+    try:
+        from .. import settings_store
+        v = settings_store.get_setting(key, default)
+        if isinstance(v, (int, float)) and v > 0:
+            return int(v)
+    except Exception:  # noqa: BLE001
+        pass
+    return default
+
+
 # 防止 ReDoS（灾难性回溯）：对规则 pattern 施加预算上限。
 # - 通配符/正则模式长度上限（过长的 pattern 本身即异常）
 # - wildcard 模式通配符数量上限（过多 .* 在长输入上会指数级回溯）
 # - regex 模式量化符/分支数量上限（嵌套量词如 (a+)+ 易触发回溯爆炸）
 # 超出预算的模式直接视为"编译失败"（返回 None），匹配时安全跳过该规则。
-_MAX_PATTERN_LEN = 256
-_MAX_WILDCARDS = 16
-_MAX_REGEX_QUANTIFIERS = 12
+# 设计修复：从 settings_store 读取，支持用户调整阈值
+_MAX_PATTERN_LEN = _get_redos_threshold("max_pattern_len", 256)
+_MAX_WILDCARDS = _get_redos_threshold("max_wildcards", 16)
+_MAX_REGEX_QUANTIFIERS = _get_redos_threshold("max_regex_quantifiers", 12)
 
 _cache_lock = threading.Lock()
 # 性能优化：_cache 改为存 (rules, compiled_regexes, filters) 三元组
@@ -55,7 +73,7 @@ _HOST_CACHE_MAX = 1024  # 上限，避免无界增长
 
 
 def invalidate_cache():
-    """规则变更后调用，清空缓存。"""
+    """Call after rules change to clear the cache."""
     global _cache_ts, _cache, _has_rules
     with _cache_lock:
         _cache_ts = 0.0
@@ -67,12 +85,12 @@ def invalidate_cache():
 
 
 def _load_rules() -> tuple[list[dict], list[re.Pattern | None], list[dict]]:
-    """加载启用规则，预编译正则 + 预拆分 filter + 预排序。
+    """Load enabled rules, pre-compile regexes + pre-split filters + pre-sort.
 
-    返回 (rules, compiled_regexes, filters)：
-    - rules: 启用的规则列表（按 pattern 长度降序，一次排序）
-    - compiled_regexes: 每条规则预编译的正则（与 rules 一一对应，None=编译失败）
-    - filters: 每条规则预拆分的 filter dict {method_parts, status_parts, ...}
+    Returns (rules, compiled_regexes, filters):
+    - rules: list of enabled rules (sorted by pattern length descending, once)
+    - compiled_regexes: pre-compiled regex for each rule (one-to-one with rules, None=compile failed)
+    - filters: pre-split filter dict for each rule {method_parts, status_parts, ...}
     """
     global _cache, _cache_ts, _has_rules
     now = time.time()
@@ -96,9 +114,9 @@ def _load_rules() -> tuple[list[dict], list[re.Pattern | None], list[dict]]:
 
 
 def _precompile_filters(rule: dict) -> dict:
-    """预拆分 filter 字段，避免每请求都 split + strip。
+    """Pre-split filter fields to avoid split + strip per request.
 
-    返回 {method_set, status_set, pid_set, process_set}，每个是 set 或 None（None=不过滤）。
+    Returns {method_set, status_set, pid_set, process_set}, each a set or None (None=no filter).
     """
     def _to_set(s: str, lower: bool = False) -> set[str] | None:
         if not s:
@@ -117,7 +135,7 @@ def _precompile_filters(rule: dict) -> dict:
 
 
 def _wildcard_to_regex(pattern: str) -> re.Pattern:
-    """通配符转正则：* -> .*，? -> .，其它转义。"""
+    """Wildcard to regex: * -> .*, ? -> ., others escaped."""
     out = []
     for ch in pattern:
         if ch == "*":
@@ -130,11 +148,13 @@ def _wildcard_to_regex(pattern: str) -> re.Pattern:
 
 
 def _has_nested_quantifier(pattern: str) -> bool:
-    """检测嵌套量词结构（如 ``(a+)+``、``(a*)*``、``(a{2,}){3,}``）。
+    """Detect nested quantifier structures (e.g. ``(a+)+``, ``(a*)*``, ``(a{2,}){3,}``).
 
-    做法：用栈跟踪括号分组，记录每个分组内部是否出现量词；当遇到
-    闭括号且其后紧跟量词（* + ? {）时，若该分组内部含量词则判定为
-    嵌套量词，存在灾难性回溯风险。转义字符与字符类内的括号会被跳过。
+    Approach: use a stack to track bracket groups, recording whether a quantifier
+    appears inside each group; when a closing bracket is encountered and followed
+    by a quantifier (* + ? {), if the group contains a quantifier internally it is
+    considered a nested quantifier with catastrophic backtracking risk. Escaped
+    characters and brackets inside character classes are skipped.
     """
     stack: list[bool] = []  # 每层分组"内部是否出现量词"
     in_class = False  # 是否在 [...] 字符类内
@@ -214,18 +234,18 @@ def match_url(pattern: str, url: str, mode: str = "wildcard") -> bool:
 def find_matching_rule(url: str, method: str | None = None,
                        status_code: int | None = None, pid: int | None = None,
                        process_name: str | None = None) -> dict | None:
-    """返回匹配 url 的启用规则，无则 None。
+    """Return the enabled rule matching the url, or None if no match.
 
-    优先级：更具体的 pattern 优先（pattern 字符串越长越具体）。
-    这样 *logii.steamstart.top/api/usage/verify* 会优先于 *steamstart.top* 匹配。
+    Priority: more specific patterns first (longer pattern string = more specific).
+    So *logii.steamstart.top/api/usage/verify* takes priority over *steamstart.top*.
 
-    额外过滤字段（§4.1）：
-    - method_filter: 逗号分隔的 HTTP 方法，空=不过滤，非空=method 必须在其中
-    - status_filter: 逗号分隔的状态码，空=不过滤，非空=status_code 必须在其中
-    - pid_filter: 逗号分隔的 PID，空=不过滤，非空=pid 必须在其中
-    - process_filter: 逗号分隔的进程名，空=不过滤，非空=process_name 必须在其中
+    Additional filter fields (§4.1):
+    - method_filter: comma-separated HTTP methods, empty=no filter, non-empty=method must be in it
+    - status_filter: comma-separated status codes, empty=no filter, non-empty=status_code must be in it
+    - pid_filter: comma-separated PIDs, empty=no filter, non-empty=pid must be in it
+    - process_filter: comma-separated process names, empty=no filter, non-empty=process_name must be in it
 
-    性能优化：正则已预编译，filter 已预拆分为 set，匹配只需 O(1) 查找。
+    Performance optimization: regexes are pre-compiled, filters pre-split into sets, matching is O(1) lookup.
     """
     if not url:
         return None
@@ -250,11 +270,11 @@ def find_matching_rule(url: str, method: str | None = None,
 
 def _match_filter_set(filter_set: set[str] | None, value, *,
                       lower: bool = False) -> bool:
-    """检查 value 是否匹配预拆分的 filter set。
+    """Check whether value matches the pre-split filter set.
 
-    - filter_set 为 None：不过滤，返回 True
-    - value 为 None：但 filter_set 非空，返回 False（无法匹配）
-    - 否则：value（转 str，按需 lower）是否在 filter_set 中
+    - filter_set is None: no filter, returns True
+    - value is None: but filter_set is non-empty, returns False (cannot match)
+    - Otherwise: whether value (converted to str, lowercased if needed) is in filter_set
     """
     if filter_set is None:
         return True
@@ -270,11 +290,11 @@ def _match_filter_set(filter_set: set[str] | None, value, *,
 def _match_filter(filter_str: str, value, *,
                   case_sensitive: bool = True,
                   value_transform=None) -> bool:
-    """检查 value 是否匹配 filter_str（逗号分隔）。
+    """Check whether value matches filter_str (comma-separated).
 
-    - filter_str 为空：不过滤，返回 True
-    - value 为 None：但 filter_str 非空，返回 False（无法匹配）
-    - 否则：value（经 transform 后）是否在 filter_str 拆分后的集合中
+    - filter_str is empty: no filter, returns True
+    - value is None: but filter_str is non-empty, returns False (cannot match)
+    - Otherwise: whether value (after transform) is in the set split from filter_str
     """
     if not filter_str:
         return True
@@ -296,20 +316,20 @@ def _match_filter(filter_str: str, value, *,
 
 
 def has_active_rules() -> bool:
-    """是否有启用的自动回复规则（用于决定是否做 SSL bump）。"""
+    """Whether there are enabled auto-reply rules (used to decide whether to do SSL bump)."""
     rules, _, _ = _load_rules()
     return bool(rules)
 
 
 def has_active_rules_fast() -> bool:
-    """快速检查是否有启用的规则（无锁读模块级标志位）。
+    """Quickly check whether there are enabled rules (lock-free read of module-level flag).
 
-    性能优化（v11）：避免高并发下每请求都进 _cache_lock。
-    - 首次调用（_has_rules=False）会触发 _load_rules 加载并更新标志位
-    - 后续调用直接读 _has_rules，无锁
-    - 规则变更时 invalidate_cache 会置 False，下次调用重新加载
+    Performance optimization (v11): avoids entering _cache_lock per request under high concurrency.
+    - First call (_has_rules=False) triggers _load_rules to load and update the flag
+    - Subsequent calls directly read _has_rules, lock-free
+    - On rule change, invalidate_cache sets it to False; next call reloads
 
-    用于未抓包时的早期短路：无规则时跳过 _match_auto_reply 等开销。
+    Used for early short-circuit when not capturing: skips _match_auto_reply overhead when no rules.
     """
     if _has_rules:
         return True
@@ -320,16 +340,17 @@ def has_active_rules_fast() -> bool:
 
 
 def host_matches_any_rule(host: str) -> bool:
-    """检查 host 是否匹配某条启用规则的 pattern（用于精细化 SSL bump 决策）。
+    """Check whether host matches any enabled rule's pattern (for fine-grained SSL bump decisions).
 
-    bump 决策优化：只有 host 匹配某条规则 pattern 时才做 SSL bump，
-    避免对所有 HTTPS 流量都 bump 导致钉扎站点（edge/bing/bilibili 等）断连。
+    Bump decision optimization: only do SSL bump when host matches a rule pattern,
+    avoiding bumping all HTTPS traffic which breaks pinned sites (edge/bing/bilibili etc.).
 
-    匹配方式：把 host 当成 URL 的一部分（`https://{host}/`）跑 find_matching_rule。
-    pattern 通配符如 `*httpbin.org*` 会匹配 `https://httpbin.org/`。
+    Matching: treats host as part of a URL (`https://{host}/`) and runs find_matching_rule.
+    Pattern wildcards like `*httpbin.org*` will match `https://httpbin.org/`.
 
-    性能优化（v11）：结果缓存。未抓包时每次 HTTPS CONNECT 都会查此函数，
-    同一 host 反复连接（keep-alive 断开后重连）时缓存避免重复遍历。
+    Performance optimization (v11): result caching. When not capturing, this function is
+    queried on every HTTPS CONNECT; caching avoids repeated traversal for the same host
+    reconnecting after keep-alive breaks.
     """
     if not host:
         return False

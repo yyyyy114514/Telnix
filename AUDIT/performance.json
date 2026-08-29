@@ -1,0 +1,145 @@
+{
+  "findings": [
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1608,
+      "severity": "high",
+      "side": "backend",
+      "description": "get_all_tags_summary() 加载所有流量的 tags 字段到内存中聚合，无分页无限制。",
+      "impact": "长会话下（10万+流量）可能导致内存峰值过高，甚至 OOM。",
+      "suggestion": "添加 LIMIT 1000 或在 SQL 层聚合：SELECT tags, COUNT(*) FROM flows WHERE tags != '' GROUP BY tags"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1836,
+      "severity": "high",
+      "side": "backend",
+      "description": "get_flows_stats() 的 content_type 分组逻辑遍历全部行并逐行 JSON.parse(response_headers)。",
+      "impact": "大流量场景下每请求耗时数百毫秒到数秒，内存峰值高。",
+      "suggestion": "在 flows 表增加 request_content_type/response_content_type 列，入库时提取并存储，使 SQL GROUP BY 可直接使用。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1988,
+      "severity": "high",
+      "side": "backend",
+      "description": "get_flows_heatmap() 加载全部 flows 的 timestamp 和 dim 列到 Python 再分桶聚合。无 LIMIT，无时间范围过滤。",
+      "impact": "10万流量热力图请求会加载 10万行 × 2列 到内存，CPU 耗时数百毫秒。",
+      "suggestion": "添加时间范围过滤 + LIMIT，或在 SQL 层做时间桶聚合。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1454,
+      "severity": "medium",
+      "side": "backend",
+      "description": "search_flows() 每次调用都 re.compile(body_regex) 和 re.compile(header_regex)。",
+      "impact": "重复搜索相同正则时浪费 CPU，编译耗时 0.1-1ms/次。",
+      "suggestion": "添加模块级 LRU 缓存：_rx_cache = {}，key = regex_string，max_size=100，超限 FIFO 淘汰。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 2347,
+      "severity": "medium",
+      "side": "backend",
+      "description": "_overview_cache 是一次性缓存但从未失效/清理。get_overview 首次调用后永久持有。",
+      "impact": "Dashboard 统计数据可能与真实流量不同步。",
+      "suggestion": "在 delete_all_flows/clear_sessions 时调用 _overview_cache = None 使其失效。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 672,
+      "severity": "medium",
+      "side": "backend",
+      "description": "_ssl_ctx_cache 用 OrderedDict 实现 LRU，但上限 _SSL_CTX_CACHE_MAX=500 过大。每个 SSLContext 约 1MB。",
+      "impact": "HTTPS 域名过多时内存占用显著（500个 × 1MB = 500MB）。",
+      "suggestion": "将上限降至 100-200，或按证书文件大小动态估算。"
+    },
+    {
+      "file": "src/host/telnix/proxy/server.py",
+      "line": 1454,
+      "severity": "medium",
+      "side": "backend",
+      "description": "SNI fallback 时连续两次调用 _parse_sni_from_tls（_try_raw_tunnel 和后续 _record_flow），每次都完整解析 TLS ClientHello。",
+      "impact": "一次 TCP 握手被解析两次，增加约 0.1-0.5ms 延迟。",
+      "suggestion": "解析一次后将结果缓存到 SocketReader 或传入 _record_flow。"
+    },
+    {
+      "file": "src/host/telnix/auto_reply/rules.py",
+      "line": 53,
+      "severity": "low",
+      "side": "backend",
+      "description": "_host_match_cache 使用简单 FIFO 淘汰，不是真正的 LRU。",
+      "impact": "高频 host 的缓存命中率降低，增加不必要的规则遍历。",
+      "suggestion": "改用 collections.OrderedDict 实现 LRU，或使用 functools.lru_cache。"
+    },
+    {
+      "file": "src/ui/src/components/FlowList.vue",
+      "line": 528,
+      "severity": "medium",
+      "side": "frontend",
+      "description": "extractContentType() 的 LRU 缓存手动实现，用 Map.keys().next() 遍历找第一个 key 删除（O(n)）。",
+      "impact": "每添加一个新条目时，若缓存满，需要遍历整个 Map 找到第一个 key。5000条时约 2500次遍历。",
+      "suggestion": "使用 ordered-keys Map 或记录第一个 key 的引用直接删除。"
+    },
+    {
+      "file": "src/ui/src/components/FlowList.vue",
+      "line": 605,
+      "severity": "low",
+      "side": "frontend",
+      "description": "deduped.sort((a, b) => b.id - a.id) 对已按 id DESC 排序的 batch 再次排序。",
+      "impact": "O(n log n) 排序开销，但 batch 通常较小（<100条），影响有限。",
+      "suggestion": "检查 batch 是否真的需要排序，若已知有序则跳过。"
+    },
+    {
+      "file": "src/ui/src/components/FlowList.vue",
+      "line": 1832,
+      "severity": "medium",
+      "side": "frontend",
+      "description": "v-memo 依赖 gridCols（computed），每次 computed 重算都生成新数组引用，导致 v-memo 永远认为依赖变了而重新渲染。",
+      "impact": "虚拟滚动的性能优化被完全破坏，每帧都重新渲染所有可见行。",
+      "suggestion": "将 gridCols.join(' ') 作为字符串传给 v-memo，而非整个数组。"
+    },
+    {
+      "file": "src/ui/src/components/FlowList.vue",
+      "line": 795,
+      "severity": "low",
+      "side": "frontend",
+      "description": "watch(() => store.flows) 触发 updateKnownsNow() 和 _ctCache 失效检查。高频 SSE 推送时（16ms），每次都执行这些操作。",
+      "impact": "虽然有 1500ms debounce，但每次 flows 变化都会取消并重新设置定时器。",
+      "suggestion": "将 updateKnownsNow 完全移到 popup 打开时调用，避免不必要的 timer 重设。"
+    },
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 402,
+      "severity": "medium",
+      "side": "frontend",
+      "description": "select() 中检查 request_headers == null 来判断是否需要补全数据，但 SSE 推送的 lite flow 本就不包含 request_headers。",
+      "impact": "选中任意一个 SSE 来的 flow 都会触发一次 HTTP 请求，后端重新查库返回完整数据。",
+      "suggestion": "SSE 推送时包含完整的 request_headers/response_headers，或使用 _is_lite 标记。"
+    },
+    {
+      "file": "src/ui/src/stores/flows.ts",
+      "line": 193,
+      "severity": "low",
+      "side": "frontend",
+      "description": "saveToCache debounce 2000ms 加上 requestIdleCallback 3000ms，最多延迟 5 秒才写入 localStorage。",
+      "impact": "浏览器崩溃时，最近 5 秒的流量无法从 localStorage 恢复。",
+      "suggestion": "将 debounce 降至 1000ms，requestIdleCallback timeout 降至 2000ms。"
+    },
+    {
+      "file": "src/host/telnix/db.py",
+      "line": 1884,
+      "severity": "medium",
+      "side": "backend",
+      "description": "get_network_topology() 的 SQL 无 LIMIT，GROUP BY 后直接 ORDER BY c DESC LIMIT max_nodes*3，然后在 Python 端截断到 max_nodes。",
+      "impact": "极端情况下（如抓包到1万个不同域名），GROUP BY 产生大量行，SQL 执行慢。",
+      "suggestion": "SQL 层加上 LIMIT max_nodes * 3，减少中间结果。"
+    }
+  ],
+  "summary": {
+    "total": 15,
+    "high": 3,
+    "medium": 8,
+    "low": 4
+  }
+}

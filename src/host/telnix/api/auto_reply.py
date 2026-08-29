@@ -1,4 +1,4 @@
-"""自动回复规则 CRUD API。"""
+"""Auto-reply rule CRUD API."""
 
 import base64
 import json as _json
@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from .. import db, logger
+from ..logger import _capture_log
 from ..auto_reply.rules import invalidate_cache
 from . import err, ok
 
@@ -60,26 +61,26 @@ class RuleUpdate(BaseModel):
 
 
 class BatchUpdate(BaseModel):
-    """批量更新规则。"""
+    """Batch update rules."""
     ids: list[str]
     enabled: bool | None = None
 
 
 class BatchDelete(BaseModel):
-    """批量删除规则。"""
+    """Batch delete rules."""
     ids: list[str]
 
 
 class BatchCreate(BaseModel):
-    """§2.2 批量创建规则。"""
+    """§2.2 Batch create rules."""
     rules: list[RuleCreate]
 
 
 def _store_modify_rules(action: str, modify_rules) -> str:
-    """序列化 modify_rules 字段为存储字符串。
+    """Serialize modify_rules field to storage string.
 
-    - script action：modify_rules 是 Python 脚本源码（str），原样返回
-    - 其他 action：modify_rules 是 list[dict]，json.dumps
+    - script action: modify_rules is Python script source code (str), return as-is
+    - Other actions: modify_rules is list[dict], json.dumps
     """
     import json
     if action == "script":
@@ -88,16 +89,17 @@ def _store_modify_rules(action: str, modify_rules) -> str:
 
 
 def _serialize(rule: dict) -> dict:
-    """把 mock_headers/modify_rules 反序列化为对象返回给前端。
+    """Deserialize mock_headers/modify_rules into objects to return to frontend.
 
-    script action 时 modify_rules 返回原始字符串（Python 脚本内容）。
+    For script action, modify_rules returns original string (Python script content).
     """
     import json
     out = dict(rule)
     out["enabled"] = bool(out.get("enabled"))
     try:
         out["mock_headers"] = json.loads(out.get("mock_headers") or "{}")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in auto_reply.py", extra={"exc": repr(e)})
         out["mock_headers"] = {}
     # script action：modify_rules 存的是 Python 脚本源码（字符串），原样返回
     if out.get("action") == "script":
@@ -105,7 +107,8 @@ def _serialize(rule: dict) -> dict:
     else:
         try:
             out["modify_rules"] = json.loads(out.get("modify_rules") or "[]")
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            _capture_log("error", "API exception in auto_reply.py", extra={"exc": repr(e)})
             out["modify_rules"] = []
     # §4.1 过滤字段默认空字符串
     out.setdefault("method_filter", "")
@@ -124,16 +127,16 @@ def _serialize(rule: dict) -> dict:
 
 @router.get("/auto-reply/rules")
 async def list_rules():
-    """规则列表。"""
+    """Rule list."""
     rules = db.get_rules()
     return ok([_serialize(r) for r in rules])
 
 
 @router.get("/auto-reply/rules/export")
 async def export_rules():
-    """导出所有规则为 JSON（兼容 EzReply 导入格式）。
+    """Export all rules as JSON (compatible with EzReply import format).
 
-    返回纯 JSON（非 {code,data,msg} 包装），便于直接保存为文件。
+    Returns pure JSON (not wrapped in {code,data,msg}), convenient for direct saving to file.
     """
     import json
     from datetime import datetime
@@ -155,15 +158,17 @@ async def export_rules():
 
 @router.post("/auto-reply/rules/import")
 async def import_rules(body: dict):
-    """导入规则（兼容 EzReply / telnix 导出格式）。
+    """Import rules (compatible with EzReply / telnix export format).
 
     body: {"rules": [...], "mode": "merge"|"replace"|"append"}
-    返回 {"imported": N}
+    Returns {"imported": N}
     """
     rules = body.get("rules", [])
     mode = body.get("mode", "merge")
+    if mode not in ("merge", "replace", "append"):
+        return err(f"Invalid mode: {mode} (must be merge/replace/append)")
     if not isinstance(rules, list):
-        return err("rules 必须是数组")
+        return err("rules must be an array")
     imported = 0
     now = datetime.now().isoformat()
     if mode == "replace":
@@ -187,7 +192,7 @@ async def import_rules(body: dict):
                 try:
                     _json.loads(mock_headers_raw)
                     mock_headers_stored = mock_headers_raw
-                except Exception:
+                except Exception as e:
                     mock_headers_stored = "{}"
             else:
                 mock_headers_stored = _json.dumps(mock_headers_raw, ensure_ascii=False)
@@ -219,7 +224,7 @@ async def import_rules(body: dict):
             imported += 1
         except Exception as e:
             # 单条失败不影响其他
-            logger.warning("auto_reply", f"导入规则失败: {e}", "")
+            logger.warning("auto_reply", f"Import rule failed: {e}", "")
             continue
     invalidate_cache()
     return ok({"imported": imported, "mode": mode})
@@ -227,7 +232,7 @@ async def import_rules(body: dict):
 
 @router.post("/auto-reply/rules")
 async def create_rule(body: RuleCreate):
-    """创建规则。"""
+    """Create rule."""
     import json
     now = datetime.now().isoformat()
     rule = {
@@ -263,9 +268,9 @@ async def create_rule(body: RuleCreate):
 
 @router.post("/auto-reply/rules/batch-create")
 async def batch_create_rules(body: BatchCreate):
-    """§2.2 批量创建规则。返回 {created, errors}。"""
+    """§2.2 Batch create rules. Returns {created, errors}."""
     if not body.rules:
-        return err("rules 不能为空")
+        return err("rules cannot be empty")
     created_ids: list[str] = []
     errors: list[dict] = []
     for i, rule_create in enumerate(body.rules):
@@ -309,10 +314,10 @@ async def batch_create_rules(body: BatchCreate):
 
 
 def _rule_signature(rule_create: RuleCreate) -> str:
-    """计算规则签名（pattern+match_mode+action+modify_rules 的 JSON 序列化）。
+    """Compute rule signature (JSON serialization of pattern+match_mode+action+modify_rules).
 
-    用于 --idempotent 比对：签名相同视为同一规则。
-    注意：modify_rules 顺序敏感（[{a:1},{b:2}] 与 [{b:2},{a:1}] 签名不同）。
+    Used for --idempotent comparison: same signature means same rule.
+    Note: modify_rules is order-sensitive ([{a:1},{b:2}] and [{b:2},{a:1}] have different signatures).
     """
     import json
     return json.dumps({
@@ -325,10 +330,10 @@ def _rule_signature(rule_create: RuleCreate) -> str:
 
 @router.post("/auto-reply/rules/idempotent")
 async def create_rule_idempotent(body: RuleCreate):
-    """§3.1 幂等创建规则：已存在相同签名（pattern+match_mode+action+modify_rules）的规则则返回现有 rule_id 不重复创建。
+    """§3.1 Idempotent create rule: if a rule with the same signature (pattern+match_mode+action+modify_rules) already exists, return existing rule_id without creating duplicate.
 
-    比 CLI 客户端遍历更高效（单次请求 + 服务端比对）。
-    返回 {created: bool, idempotent: bool, rule_id, rule?}。
+    More efficient than CLI client traversal (single request + server-side comparison).
+    Returns {created: bool, idempotent: bool, rule_id, rule?}.
     """
     import json
     new_sig = _rule_signature(body)
@@ -336,7 +341,8 @@ async def create_rule_idempotent(body: RuleCreate):
     for r in existing_rules:
         try:
             existing_modify = json.loads(r.get("modify_rules") or "[]")
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            _capture_log("error", "API exception in auto_reply.py", extra={"exc": repr(e)})
             existing_modify = []
         existing_sig = json.dumps({
             "pattern": r.get("pattern"),
@@ -350,7 +356,7 @@ async def create_rule_idempotent(body: RuleCreate):
                 "idempotent": True,
                 "rule_id": r.get("id"),
                 "rule": _serialize(r),
-                "hint": "已存在相同规则，未重复创建",
+                "hint": "Same rule already exists, not created again",
             })
     # 未命中，创建新规则
     now = datetime.now().isoformat()
@@ -389,11 +395,11 @@ async def create_rule_idempotent(body: RuleCreate):
 
 @router.put("/auto-reply/rules/{rule_id}")
 async def update_rule(rule_id: str, body: RuleUpdate):
-    """更新规则。"""
+    """Update rule."""
     import json
     rule = db.get_rule(rule_id)
     if not rule:
-        return err("规则不存在")
+        return err("Rule not found")
     updates = {}
     if body.enabled is not None:
         updates["enabled"] = 1 if body.enabled else 0
@@ -438,20 +444,25 @@ async def update_rule(rule_id: str, body: RuleUpdate):
             from ..auto_reply.script_runner import reload_runner, remove_runner
             updated = db.get_rule(rule_id) or {}
             if updated.get("action") == "script":
-                reload_runner(rule_id, updates["modify_rules"])
+                # 仅更新 action（未传 modify_rules）时从已落库的 updated 取最新脚本
+                new_script = updates.get("modify_rules") or updated.get("modify_rules", "")
+                reload_runner(rule_id, new_script)
             else:
                 # action 改成非 script，清理可能存在的 runner
                 remove_runner(rule_id)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+
+            _capture_log("error", "API exception", extra={"exc": repr(e)})
+
             pass
     return ok(_serialize(db.get_rule(rule_id)))
 
 
 @router.post("/auto-reply/rules/batch-update")
 async def batch_update_rules(body: BatchUpdate):
-    """批量更新规则（启用/禁用）。"""
+    """Batch update rules (enable/disable)."""
     if not body.ids:
-        return err("ids 不能为空")
+        return err("ids cannot be empty")
     now = datetime.now().isoformat()
     for rid in body.ids:
         updates = {"updated_at": now}
@@ -463,7 +474,10 @@ async def batch_update_rules(body: BatchUpdate):
             try:
                 from ..auto_reply.script_runner import remove_runner
                 remove_runner(rid)
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+
+                _capture_log("error", "API exception", extra={"exc": repr(e)})
+
                 pass
     invalidate_cache()
     return ok({"updated": len(body.ids)})
@@ -471,15 +485,18 @@ async def batch_update_rules(body: BatchUpdate):
 
 @router.post("/auto-reply/rules/batch-delete")
 async def batch_delete_rules(body: BatchDelete):
-    """批量删除规则。"""
+    """Batch delete rules."""
     if not body.ids:
-        return err("ids 不能为空")
+        return err("ids cannot be empty")
     for rid in body.ids:
         db.delete_rule(rid)
         try:
             from ..auto_reply.script_runner import remove_runner
             remove_runner(rid)
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+
+            _capture_log("error", "API exception", extra={"exc": repr(e)})
+
             pass
     invalidate_cache()
     return ok({"deleted": len(body.ids)})
@@ -487,36 +504,48 @@ async def batch_delete_rules(body: BatchDelete):
 
 @router.delete("/auto-reply/rules/{rule_id}")
 async def delete_rule(rule_id: str):
-    """删除规则。"""
+    """Delete rule."""
     db.delete_rule(rule_id)
     invalidate_cache()
     try:
         from ..auto_reply.script_runner import remove_runner
         remove_runner(rule_id)
-    except Exception:  # noqa: BLE001
+    except Exception as e:
+
+        _capture_log("error", "API exception", extra={"exc": repr(e)})
+
         pass
     return ok({"deleted": True})
 
 
 @router.get("/auto-reply/rules/{rule_id}/script-error")
 async def get_script_error(rule_id: str):
-    """查询脚本规则最近一次错误（语法错误 / 运行异常 / 超时）。
+    """Query script rule's error history (syntax error / runtime exception / timeout).
 
-    仅对 action=script 的规则有意义；其他规则返回 error=None。
+    Design fix: returns full error history from database instead of just last error.
+    Only meaningful for rules with action=script; other rules return empty list.
     """
-    try:
-        from ..auto_reply.script_runner import get_runner_error
-        err_msg = get_runner_error(rule_id)
-    except Exception as e:  # noqa: BLE001
-        err_msg = f"查询错误失败: {e}"
-    return ok({"error": err_msg})
+    errors = db.get_script_errors(rule_id, limit=100)
+    latest = db.get_latest_script_error(rule_id)
+    return ok({
+        "errors": errors,
+        "latest_error": latest.get("error_message") if latest else None,
+        "error_count": len(errors)
+    })
 
 
-# ---------- 脚本测试 ----------
+@router.delete("/auto-reply/rules/{rule_id}/script-error")
+async def delete_script_error_history(rule_id: str):
+    """Clear script error history for a rule."""
+    db.delete_script_errors(rule_id)
+    return ok({"deleted": True})
+
+
+# ---------- Script testing ----------
 
 
 class MockRequest(BaseModel):
-    """测试用模拟请求。"""
+    """Mock request for testing."""
     host: str = "api.example.com"
     path: str = "/v1/user"
     method: str = "GET"
@@ -527,21 +556,21 @@ class MockRequest(BaseModel):
 
 
 class MockResponse(BaseModel):
-    """测试用模拟响应（可选，用于测试 on_response 钩子）。"""
+    """Mock response for testing (optional, used to test on_response hook)."""
     status_code: int = 200
     headers: dict = {}
     body: str = ""
 
 
 class TestScriptReq(BaseModel):
-    """测试脚本请求体。"""
+    """Test script request body."""
     script: str
     mock_request: MockRequest = MockRequest()
     mock_response: MockResponse | None = None
 
 
 def _decode_body(b: bytes) -> str:
-    """尝试解码 body 为字符串（前端展示用）。"""
+    """Try to decode body as string (for frontend display)."""
     if not b:
         return ""
     try:
@@ -555,12 +584,13 @@ def _b64decode_safe(s: str) -> bytes:
         return b""
     try:
         return base64.b64decode(s)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _capture_log("error", "API exception in auto_reply.py", extra={"exc": repr(e)})
         return b""
 
 
 def _parse_request_phase(resp: dict | None, mock_req: MockRequest) -> dict:
-    """解析 on_request 阶段结果，构造前端可读结构。"""
+    """Parse on_request phase result, build frontend-readable structure."""
     orig_headers = {k: str(v) for k, v in (mock_req.headers or {}).items()}
     orig_body = (mock_req.body or "").encode("utf-8")
 
@@ -576,6 +606,9 @@ def _parse_request_phase(resp: dict | None, mock_req: MockRequest) -> dict:
             "mock_body": "",
             "error": None,
             "traceback": "",
+            # === 调试增强 ===
+            "logs": [],
+            "variables": {},
         }
 
     action = resp.get("action", "continue")
@@ -601,11 +634,16 @@ def _parse_request_phase(resp: dict | None, mock_req: MockRequest) -> dict:
         "mock_body": _decode_body(_b64decode_safe(resp.get("mock_body_b64") or "")),
         "error": resp.get("error"),
         "traceback": resp.get("traceback", ""),
+        # === 调试增强 ===
+        # 脚本中 ctx.log() 和 print() 的输出
+        "logs": resp.get("logs", []),
+        # 脚本中 set_var() 设置的中间变量
+        "variables": resp.get("variables", {}),
     }
 
 
 def _parse_response_phase(resp: dict | None, mock_resp: MockResponse) -> dict:
-    """解析 on_response 阶段结果。"""
+    """Parse on_response phase result."""
     orig_headers = {k: str(v) for k, v in (mock_resp.headers or {}).items()}
     orig_body = (mock_resp.body or "").encode("utf-8")
     orig_status = int(mock_resp.status_code or 200)
@@ -620,6 +658,9 @@ def _parse_response_phase(resp: dict | None, mock_resp: MockResponse) -> dict:
             "body": mock_resp.body or "",
             "error": None,
             "traceback": "",
+            # === 调试增强 ===
+            "logs": [],
+            "variables": {},
         }
 
     action = resp.get("action", "continue")
@@ -647,27 +688,32 @@ def _parse_response_phase(resp: dict | None, mock_resp: MockResponse) -> dict:
         "body": _decode_body(modified_body),
         "error": resp.get("error"),
         "traceback": resp.get("traceback", ""),
+        # === 调试增强 ===
+        # 脚本中 ctx.log() 和 print() 的输出
+        "logs": resp.get("logs", []),
+        # 脚本中 set_var() 设置的中间变量
+        "variables": resp.get("variables", {}),
     }
 
 
 @router.post("/auto-reply/test-script")
 async def test_script(body: dict):
-    """测试 Python 脚本执行（不发起真实请求）。
+    """Test Python script execution (no real request initiated).
 
-    请求体：
+    Request body:
         {
             "script": "def on_request(ctx): ...",
             "mock_request": {host, path, method, scheme, http_version, headers, body},
-            "mock_response": {status_code, headers, body}  # 可选
-            "mode": "request" | "response" | "both"  # 默认 "both"
+            "mock_response": {status_code, headers, body}  # optional
+            "mode": "request" | "response" | "both"  # default "both"
         }
 
-    mode 说明：
-        - "request"  : 只调用 on_request（忽略 mock_response）
-        - "response" : 只调用 on_response（需要 mock_response，跳过 on_request 修改）
-        - "both"     : on_request + on_response（默认）
+    mode description:
+        - "request"  : only call on_request (ignore mock_response)
+        - "response" : only call on_response (requires mock_response, skip on_request modifications)
+        - "both"     : on_request + on_response (default)
 
-    返回：
+    Returns:
         {
             "ok": true/false,
             "duration_ms": int,
@@ -677,24 +723,24 @@ async def test_script(body: dict):
             "response_phase": {...} | null
         }
 
-    安全：脚本在独立 worker 子进程运行（与生产环境一致），单次调用 5s 超时，
-    所有异常被捕获，不会让后端崩溃。
+    Security: script runs in isolated worker subprocess (consistent with production environment), single call 5s timeout,
+    all exceptions are caught, will not crash backend.
     """
     from ..auto_reply.script_runner import ScriptRunner, build_ctx, _b64encode
 
     script = body.get("script", "") or ""
     if not script.strip():
-        return err("脚本内容为空")
+        return err("Script content is empty")
 
     mode = (body.get("mode") or "both").lower()
     if mode not in ("request", "response", "both"):
-        return err(f"mode 必须为 request/response/both，收到: {mode}")
+        return err(f"mode must be request/response/both, got: {mode}")
 
     mr_raw = body.get("mock_request") or {}
     try:
         mock_req = MockRequest(**mr_raw)
     except Exception as e:  # noqa: BLE001
-        return err(f"mock_request 参数无效: {e}")
+        return err(f"Invalid mock_request parameter: {e}")
 
     mock_resp_raw = body.get("mock_response")
     mock_resp: MockResponse | None = None
@@ -702,11 +748,11 @@ async def test_script(body: dict):
         try:
             mock_resp = MockResponse(**mock_resp_raw)
         except Exception as e:  # noqa: BLE001
-            return err(f"mock_response 参数无效: {e}")
+            return err(f"Invalid mock_response parameter: {e}")
 
     # 模式校验：response/both 模式必须有 mock_response
     if mode in ("response", "both") and mock_resp is None:
-        return err(f"mode={mode} 需要提供 mock_response")
+        return err(f"mode={mode} requires mock_response")
 
     # 构造请求 ctx（与生产 build_ctx 完全一致）
     req_body_bytes = (mock_req.body or "").encode("utf-8")
@@ -755,7 +801,7 @@ async def test_script(body: dict):
             return ok({
                 "ok": False,
                 "duration_ms": duration_ms,
-                "error": last_error or "脚本执行失败（worker 未启动或调用超时）",
+                "error": last_error or "Script execution failed (worker not started or call timeout)",
                 "traceback": "",
                 "request_phase": None,
                 "response_phase": None,
@@ -797,5 +843,307 @@ async def test_script(body: dict):
     finally:
         try:
             runner.stop()
-        except Exception:  # noqa: BLE001
+        except Exception as e:
+
+            _capture_log("error", "API exception", extra={"exc": repr(e)})
+
             pass
+
+
+# ---------- 规则匹配预览（§3.2 P0 功能增强）----------
+
+class PreviewMatchReq(BaseModel):
+    """Preview match request body."""
+    pattern: str
+    match_mode: str = "wildcard"
+    method_filter: str = ""
+    status_filter: str = ""
+    pid_filter: str = ""
+    process_filter: str = ""
+    limit: int = 20  # 限制返回数量
+
+
+@router.post("/auto-reply/rules/preview-match")
+async def preview_match(body: PreviewMatchReq):
+    """Preview which flows would match this rule pattern.
+
+    Returns the count and sample URLs of matching flows from the database.
+    Performance: uses SQLite LIKE for quick preview (not regex evaluation).
+    """
+    if not body.pattern.strip():
+        return ok({"total": 0, "samples": []})
+
+    # 转义 SQL LIKE 特殊字符
+    escaped = body.pattern.replace("[", "[[]").replace("%", "[%]").replace("_", "[_]")
+    # 构造 LIKE 模式
+    like_pattern = f"%{escaped}%"
+
+    # 构建 WHERE 条件
+    conditions = ["url LIKE ?"]
+    params = [like_pattern]
+
+    if body.method_filter:
+        methods = [m.strip().upper() for m in body.method_filter.split(",") if m.strip()]
+        if methods:
+            placeholders = ",".join("?" * len(methods))
+            conditions.append(f"method IN ({placeholders})")
+            params.extend(methods)
+
+    if body.status_filter:
+        statuses = [s.strip() for s in body.status_filter.split(",") if s.strip()]
+        if statuses:
+            placeholders = ",".join("?" * len(statuses))
+            conditions.append(f"status_code IN ({placeholders})")
+            params.extend(statuses)
+
+    where_clause = " AND ".join(conditions)
+
+    with db.get_connection() as conn:
+        # 统计总数
+        total_row = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM flows WHERE {where_clause}",
+            params
+        ).fetchone()
+        total = total_row["cnt"] if total_row else 0
+
+        # 获取示例（限制数量）
+        samples = []
+        rows = conn.execute(
+            f"SELECT id, method, host, path, url FROM flows WHERE {where_clause} ORDER BY id DESC LIMIT ?",
+            params + [body.limit]
+        ).fetchall()
+        for row in rows:
+            samples.append({
+                "flow_id": row["id"],
+                "method": row["method"] or "",
+                "host": row["host"] or "",
+                "path": row["path"] or "",
+                "url": row["url"] or "",
+            })
+
+    return ok({
+        "total": total,
+        "samples": samples,
+        "pattern": body.pattern,
+        "match_mode": body.match_mode,
+    })
+
+
+# ---------- 规则分组管理（§3.2 P0 功能增强）----------
+
+class RuleGroupCreate(BaseModel):
+    name: str
+    enabled: bool = True
+
+
+class RuleGroupUpdate(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    sort_order: int | None = None
+
+
+@router.get("/auto-reply/groups")
+async def list_rule_groups():
+    """List all rule groups with rule counts."""
+    groups = db.get_rule_groups()
+    # 统计每个分组的规则数量
+    rules = db.get_rules()
+    group_counts = {}
+    for r in rules:
+        gid = r.get("group_id")
+        if gid:
+            group_counts[gid] = group_counts.get(gid, 0) + 1
+    for g in groups:
+        g["rule_count"] = group_counts.get(g["id"], 0)
+    return ok(groups)
+
+
+@router.post("/auto-reply/groups")
+async def create_rule_group(body: RuleGroupCreate):
+    """Create a new rule group."""
+    if not body.name.strip():
+        return err("Group name cannot be empty")
+    group_id = db.create_rule_group(body.name, body.enabled)
+    group = db.get_rule_group(group_id)
+    return ok(group)
+
+
+@router.put("/auto-reply/groups/{group_id}")
+async def update_rule_group(group_id: int, body: RuleGroupUpdate):
+    """Update a rule group."""
+    updates = {}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.enabled is not None:
+        updates["enabled"] = body.enabled
+    if body.sort_order is not None:
+        updates["sort_order"] = body.sort_order
+    if not updates:
+        return err("No fields to update")
+    if "name" in updates and not updates["name"]:
+        return err("Group name cannot be empty")
+    db.update_rule_group(group_id, updates)
+    group = db.get_rule_group(group_id)
+    if not group:
+        return err("Group not found")
+    return ok(group)
+
+
+@router.delete("/auto-reply/groups/{group_id}")
+async def delete_rule_group(group_id: int):
+    """Delete a rule group. Rules in the group will have group_id set to NULL."""
+    success = db.delete_rule_group(group_id)
+    if not success:
+        return err("Group not found")
+    invalidate_cache()
+    return ok({"deleted": True})
+
+
+@router.put("/auto-reply/rules/{rule_id}/group")
+async def update_rule_group_membership(rule_id: str, body: dict):
+    """Update a rule's group membership.
+
+    body: {"group_id": int | null}
+    """
+    group_id = body.get("group_id")
+    if group_id is not None:
+        # 验证分组存在
+        group = db.get_rule_group(group_id)
+        if not group:
+            return err("Group not found")
+    db.update_rule_group_id(rule_id, group_id)
+    invalidate_cache()
+    return ok({"updated": True})
+
+
+@router.put("/auto-reply/rules/{rule_id}/tags")
+async def update_rule_tags(rule_id: str, body: dict):
+    """Update a rule's tags.
+
+    body: {"tags": "tag1,tag2,tag3"}
+    """
+    tags = body.get("tags", "")
+    rule = db.get_rule(rule_id)
+    if not rule:
+        return err("Rule not found")
+    import json
+    db.update_rule(rule_id, {"tags": tags})
+    invalidate_cache()
+    return ok({"updated": True})
+
+
+# ---------- 规则命中统计（§3.2 P0 功能增强）----------
+
+@router.get("/auto-reply/stats/hits")
+async def get_rule_hit_stats():
+    """Get rule hit statistics: leaderboard and recent hits."""
+    rules = db.get_rules()
+    # 排行榜：按命中次数排序
+    leaderboard = []
+    for r in rules:
+        if r.get("hit_count", 0) > 0:
+            leaderboard.append({
+                "rule_id": r["id"],
+                "pattern": r.get("pattern", ""),
+                "action": r.get("action", ""),
+                "note": r.get("note", ""),
+                "hit_count": r.get("hit_count", 0),
+                "last_hit_at": r.get("last_hit_at", ""),
+            })
+    leaderboard.sort(key=lambda x: x["hit_count"], reverse=True)
+
+    # 最近命中
+    recent_hits = db.get_recent_rule_hits(limit=10)
+
+    # 总命中次数
+    total_hits = sum(r.get("hit_count", 0) for r in rules)
+
+    return ok({
+        "total_hits": total_hits,
+        "leaderboard": leaderboard[:20],  # 最多 20 条
+        "recent_hits": recent_hits,
+    })
+
+
+@router.post("/auto-reply/stats/hits/clear")
+async def clear_rule_hit_stats():
+    """Clear all rule hit statistics."""
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE auto_reply_rules SET hit_count = 0, last_hit_at = '', last_hit_flow_id = NULL"
+        )
+    # 清除实时追踪数据
+    from ..auto_reply.hit_tracker import clear_stats as clear_realtime_stats
+    clear_realtime_stats()
+    return ok({"cleared": True})
+
+
+# ---------- 实时命中追踪（热力图 + 时间线 + 排行榜）----------
+
+import asyncio
+import json
+from fastapi.responses import StreamingResponse
+
+
+@router.get("/auto-reply/stats/hits/stream")
+async def stream_hit_stats():
+    """SSE 实时推送规则命中统计数据。
+
+    推送频率：每 2 秒一次完整快照 + 每次命中立即推送增量。
+
+    数据格式:
+    {
+        "type": "snapshot" | "hit" | "stats",
+        "total_hits": int,
+        "leaderboard": [...],  // TOP 10
+        "heatmap": [...],      // 所有规则的耗时统计
+        "timeline": [...],     // 最近 100 次命中
+    }
+    """
+    from ..auto_reply.hit_tracker import get_stats, hit_tracker
+
+    async def event_generator():
+        # 初始快照
+        stats = get_stats()
+        yield f"data: {json.dumps({'type': 'init', **stats})}\n\n"
+
+        # 记录上次的 timeline 长度，用于检测新命中
+        last_timeline_len = len(stats.get("timeline", []))
+
+        # 循环推送（每 2 秒一次完整快照）
+        while True:
+            await asyncio.sleep(2)
+            try:
+                stats = get_stats()
+                timeline = stats.get("timeline", [])
+
+                # 检测是否有新命中（时间线长度增加）
+                if len(timeline) > last_timeline_len:
+                    # 有新命中，发送增量更新
+                    new_hits = timeline[:len(timeline) - last_timeline_len]
+                    for hit in reversed(new_hits):
+                        yield f"data: {json.dumps({'type': 'hit', 'data': hit, 'total_hits': stats['total_hits']})}\n\n"
+                    last_timeline_len = len(timeline)
+
+                # 发送完整快照
+                yield f"data: {json.dumps({'type': 'snapshot', **stats})}\n\n"
+            except Exception:
+                # 出错时发送心跳保持连接
+                yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
+        },
+    )
+
+
+@router.get("/auto-reply/stats/hits/realtime")
+async def get_realtime_hit_stats():
+    """获取实时命中统计数据（轮询接口，返回完整快照）。"""
+    from ..auto_reply.hit_tracker import get_stats as get_realtime_stats
+    return ok(get_realtime_stats())

@@ -6,7 +6,6 @@ import { api } from '../api/client'
 // key = localStorage 键名，value = settings.json 中的字段名
 const PREFS_MAP: Record<string, string> = {
   telnix_theme: 'theme',
-  telnix_list_no_select: 'list_no_select',
   telnix_nav_order: 'nav_order',
   telnix_col_order: 'col_order',
   telnix_copy_fields: 'copy_fields',
@@ -14,6 +13,7 @@ const PREFS_MAP: Record<string, string> = {
   telnix_cache_autoclean: 'cache_autoclean',
   telnix_auto_scroll: 'auto_scroll',
   telnix_auto_scroll_delay: 'auto_scroll_delay',
+  telnix_lang: 'lang',
 }
 
 let syncTimer: number | null = null
@@ -60,11 +60,11 @@ async function doSync() {
   const snapshot = computePrefsSnapshot()
   const hash = computeHash(snapshot)
   if (hash === lastSyncHash) return  // 无变化
-  lastSyncHash = hash
   try {
     await api.saveSettings(snapshot)
+    lastSyncHash = hash  // 仅成功后更新，失败时下次会重试
   } catch {
-    // 忽略：失败时下次再试
+    // 失败时不更新 lastSyncHash，下次会重试
   }
 }
 
@@ -74,7 +74,7 @@ export function initPrefsSync() {
   setTimeout(() => syncPrefs(false), 2000)
   // 监听跨 tab 的 storage 事件，其他 tab 修改偏好时也同步
   window.addEventListener('storage', (e) => {
-    if (e.key && PREFS_MAP[e.key]) {
+    if (e.key && PREFS_MAP[e.key as keyof typeof PREFS_MAP]) {
       syncPrefs()
     }
   })

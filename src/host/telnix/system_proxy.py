@@ -1,16 +1,17 @@
-"""跨平台系统代理配置。
+"""Cross-platform system proxy configuration.
 
-平台支持：
-- Windows: 写注册表（ProxyServer/ProxyEnable/ProxyOverride）+ 通知系统刷新
+Platform support:
+- Windows: write registry (ProxyServer/ProxyEnable/ProxyOverride) + notify system to refresh
 - macOS: networksetup -setwebproxy/-setsecurewebproxy/-setproxybypassdomains
-- Linux: gsettings set org.gnome.system.proxy mode/host/port/ignore-hosts（GNOME）
-        + KDE: kwriteconfig5（KDE）
+- Linux: gsettings set org.gnome.system.proxy mode/host/port/ignore-hosts (GNOME)
+        + KDE: kwriteconfig5 (KDE)
 
-设计要点：
-- 每个平台独立的 set/clear 实现，对外暴露统一接口
-- 设置代理时排除 localhost/127.0.0.1，让浏览器直连本地 API（SSE 实时推送）
-- 代理状态标记文件：开启时写入，关闭时删除（崩溃恢复用）
-- 优雅降级：工具不可用时打印警告但不抛异常
+Design notes:
+- Each platform has its own set/clear implementation, exposing a unified interface
+- When setting the proxy, localhost/127.0.0.1 is excluded so the browser connects
+  directly to the local API (for real-time SSE push)
+- Proxy state marker file: written when enabled, deleted when disabled (for crash recovery)
+- Graceful degradation: prints a warning but does not raise when a tool is unavailable
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ IS_UNIX = IS_LINUX or IS_MACOS
 
 
 def _get_data_dir() -> str:
-    """获取数据目录（避免循环导入）。"""
+    """Get the data directory (avoids circular imports)."""
     try:
         from .config import get_data_dir
         return get_data_dir()
@@ -39,7 +40,7 @@ _PROXY_ACTIVE_FLAG: Optional[str] = None
 
 
 def _get_proxy_flag_path() -> str:
-    """代理状态标记文件路径（崩溃恢复用）。"""
+    """Path to the proxy state marker file (for crash recovery)."""
     global _PROXY_ACTIVE_FLAG
     if _PROXY_ACTIVE_FLAG is None:
         try:
@@ -50,7 +51,7 @@ def _get_proxy_flag_path() -> str:
 
 
 def _write_proxy_flag(host: str, port: int):
-    """写代理状态标记文件。"""
+    """Write the proxy state marker file."""
     try:
         flag_path = _get_proxy_flag_path()
         os.makedirs(os.path.dirname(flag_path), exist_ok=True)
@@ -61,7 +62,7 @@ def _write_proxy_flag(host: str, port: int):
 
 
 def _delete_proxy_flag():
-    """删除代理状态标记文件。"""
+    """Delete the proxy state marker file."""
     try:
         os.unlink(_get_proxy_flag_path())
     except OSError:
@@ -69,12 +70,12 @@ def _delete_proxy_flag():
 
 
 def proxy_flag_exists() -> bool:
-    """检查代理状态标记文件是否存在（启动时崩溃恢复用）。"""
+    """Check whether the proxy state marker file exists (for crash recovery on startup)."""
     return os.path.exists(_get_proxy_flag_path())
 
 
 def read_proxy_flag() -> str:
-    """读取代理状态标记文件内容（诊断用）。"""
+    """Read the proxy state marker file contents (for diagnostics)."""
     try:
         with open(_get_proxy_flag_path(), "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -90,7 +91,7 @@ INTERNET_OPTION_REFRESH = 37
 
 
 def _set_windows_proxy(host: str, port: int) -> bool:
-    """Windows: 写注册表 + 通知系统刷新。"""
+    """Windows: write registry + notify system to refresh."""
     try:
         import winreg
         proxy_str = f"{host}:{port}"
@@ -104,12 +105,12 @@ def _set_windows_proxy(host: str, port: int) -> bool:
         _notify_windows_settings_changed()
         return True
     except Exception as e:  # noqa: BLE001
-        print(f"[Telnix] 设置 Windows 系统代理失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Failed to set Windows system proxy: {e}", file=sys.stderr)
         return False
 
 
 def _clear_windows_proxy() -> bool:
-    """Windows: 清除注册表代理设置。"""
+    """Windows: clear registry proxy settings."""
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _INTERNET_SETTINGS, 0,
@@ -118,12 +119,12 @@ def _clear_windows_proxy() -> bool:
         _notify_windows_settings_changed()
         return True
     except OSError as e:
-        print(f"[Telnix] 清除 Windows 系统代理失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Failed to clear Windows system proxy: {e}", file=sys.stderr)
         return False
 
 
 def _notify_windows_settings_changed():
-    """通知系统代理设置已改变，让应用立即生效。"""
+    """Notify the system that proxy settings have changed, so applications pick them up immediately."""
     try:
         import ctypes
         wininet = ctypes.windll.wininet
@@ -134,7 +135,7 @@ def _notify_windows_settings_changed():
 
 
 def _read_windows_proxy_enabled() -> bool:
-    """读取 Windows 注册表实际代理开关。"""
+    """Read the actual proxy toggle from the Windows registry."""
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _INTERNET_SETTINGS) as key:
@@ -152,7 +153,7 @@ _MACOS_BYPASS_DOMAINS = "localhost,127.0.0.1,*.local,169.254/16"
 
 
 def _get_macos_network_services() -> list[str]:
-    """获取 macOS 所有网络服务名（Wi-Fi/Ethernet 等）。"""
+    """Get all macOS network service names (Wi-Fi/Ethernet/etc.)."""
     try:
         result = subprocess.run(
             ["networksetup", "-listallnetworkservices"],
@@ -174,10 +175,10 @@ def _get_macos_network_services() -> list[str]:
 
 
 def _set_macos_proxy(host: str, port: int) -> bool:
-    """macOS: 用 networksetup 设置 HTTP/HTTPS 代理。"""
+    """macOS: use networksetup to set HTTP/HTTPS proxy."""
     services = _get_macos_network_services()
     if not services:
-        print("[Telnix] macOS: 未找到网络服务，无法设置系统代理", file=sys.stderr)
+        print("[Telnix] macOS: no network service found, cannot set system proxy", file=sys.stderr)
         return False
     success_count = 0
     for service in services:
@@ -205,13 +206,13 @@ def _set_macos_proxy(host: str, port: int) -> bool:
         except (subprocess.TimeoutExpired, OSError):
             pass
     if success_count == 0:
-        print("[Telnix] macOS: 所有网络服务设置代理失败", file=sys.stderr)
+        print("[Telnix] macOS: failed to set proxy on all network services", file=sys.stderr)
         return False
     return True
 
 
 def _clear_macos_proxy() -> bool:
-    """macOS: 用 networksetup 关闭 HTTP/HTTPS 代理。"""
+    """macOS: use networksetup to disable HTTP/HTTPS proxy."""
     services = _get_macos_network_services()
     if not services:
         return True  # 没有服务可清理，视为成功
@@ -228,7 +229,7 @@ def _clear_macos_proxy() -> bool:
 
 
 def _read_macos_proxy_enabled() -> bool:
-    """读取 macOS 当前代理状态（检查 Wi-Fi 服务的 webproxy 状态）。"""
+    """Read the current macOS proxy state (checks the webproxy status of the Wi-Fi service)."""
     try:
         services = _get_macos_network_services()
         if not services:
@@ -252,7 +253,7 @@ _LINUX_BYPASS_DOMAINS = "['localhost', '127.0.0.0/8', '::1', '*.local', '169.254
 
 
 def _detect_linux_desktop() -> str:
-    """检测 Linux 桌面环境：gnome / kde / other。"""
+    """Detect the Linux desktop environment: gnome / kde / other."""
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
     if "GNOME" in desktop:
         return "gnome"
@@ -274,7 +275,7 @@ def _detect_linux_desktop() -> str:
 
 
 def _set_linux_gnome_proxy(host: str, port: int) -> bool:
-    """Linux GNOME: 用 gsettings 设置系统代理。"""
+    """Linux GNOME: use gsettings to set the system proxy."""
     try:
         # 设置代理模式为 manual
         subprocess.run(
@@ -307,12 +308,12 @@ def _set_linux_gnome_proxy(host: str, port: int) -> bool:
         )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[Telnix] Linux GNOME 设置代理失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Linux GNOME: failed to set proxy: {e}", file=sys.stderr)
         return False
 
 
 def _clear_linux_gnome_proxy() -> bool:
-    """Linux GNOME: 用 gsettings 关闭系统代理。"""
+    """Linux GNOME: use gsettings to disable the system proxy."""
     try:
         subprocess.run(
             ["gsettings", "set", "org.gnome.system.proxy", "mode", "none"],
@@ -320,12 +321,12 @@ def _clear_linux_gnome_proxy() -> bool:
         )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[Telnix] Linux GNOME 清除代理失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Linux GNOME: failed to clear proxy: {e}", file=sys.stderr)
         return False
 
 
 def _read_linux_gnome_proxy_enabled() -> bool:
-    """读取 Linux GNOME 当前代理模式。"""
+    """Read the current Linux GNOME proxy mode."""
     try:
         result = subprocess.run(
             ["gsettings", "get", "org.gnome.system.proxy", "mode"],
@@ -338,7 +339,7 @@ def _read_linux_gnome_proxy_enabled() -> bool:
 
 
 def _set_linux_kde_proxy(host: str, port: int) -> bool:
-    """Linux KDE: 用 kwriteconfig5 设置系统代理。"""
+    """Linux KDE: use kwriteconfig5 to set the system proxy."""
     try:
         # KDE 代理配置文件：~/.config/kioslaverc
         for proto in ["http", "https"]:
@@ -361,12 +362,12 @@ def _set_linux_kde_proxy(host: str, port: int) -> bool:
         )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[Telnix] Linux KDE 设置代理失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Linux KDE: failed to set proxy: {e}", file=sys.stderr)
         return False
 
 
 def _clear_linux_kde_proxy() -> bool:
-    """Linux KDE: 用 kwriteconfig5 关闭系统代理。"""
+    """Linux KDE: use kwriteconfig5 to disable the system proxy."""
     try:
         subprocess.run(
             ["kwriteconfig5", "--file", "kioslaverc", "--group", "Proxy Settings",
@@ -375,12 +376,12 @@ def _clear_linux_kde_proxy() -> bool:
         )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[Telnix] Linux KDE 清除代理失败: {e}", file=sys.stderr)
+        print(f"[Telnix] Linux KDE: failed to clear proxy: {e}", file=sys.stderr)
         return False
 
 
 def _read_linux_kde_proxy_enabled() -> bool:
-    """读取 Linux KDE 当前代理状态。"""
+    """Read the current Linux KDE proxy state."""
     try:
         result = subprocess.run(
             ["kreadconfig5", "--file", "kioslaverc", "--group", "Proxy Settings",
@@ -396,15 +397,15 @@ def _read_linux_kde_proxy_enabled() -> bool:
 # ---------- 统一接口 ----------
 
 def set_system_proxy(host: str = "127.0.0.1", port: int = 8888) -> bool:
-    """设置系统代理（跨平台）。
+    """Set the system proxy (cross-platform).
 
-    平台支持：
-    - Windows: 写注册表 + 通知系统刷新
-    - macOS: networksetup 设置 HTTP/HTTPS 代理
-    - Linux GNOME: gsettings 设置 org.gnome.system.proxy
-    - Linux KDE: kwriteconfig5 设置 kioslaverc
+    Platform support:
+    - Windows: write registry + notify system to refresh
+    - macOS: networksetup to set HTTP/HTTPS proxy
+    - Linux GNOME: gsettings to set org.gnome.system.proxy
+    - Linux KDE: kwriteconfig5 to set kioslaverc
 
-    返回 True 表示成功，False 表示失败（工具不可用等）。
+    Returns True on success, False on failure (tool unavailable, etc.).
     """
     if IS_WINDOWS:
         ok = _set_windows_proxy(host, port)
@@ -417,12 +418,14 @@ def set_system_proxy(host: str = "127.0.0.1", port: int = 8888) -> bool:
         elif desktop == "kde":
             ok = _set_linux_kde_proxy(host, port)
         else:
-            print(f"[Telnix] 当前 Linux 桌面环境 '{desktop}' 不支持自动设置系统代理，"
-                  f"请手动配置浏览器/系统代理为 {host}:{port}", file=sys.stderr)
+            print(f"[Telnix] The current Linux desktop environment '{desktop}' does not support "
+                  f"automatic system proxy configuration; please manually configure the "
+                  f"browser/system proxy to {host}:{port}", file=sys.stderr)
             ok = False
     else:
-        print(f"[Telnix] 当前平台 {sys.platform} 不支持自动设置系统代理，"
-              f"请手动配置浏览器/系统代理为 {host}:{port}", file=sys.stderr)
+        print(f"[Telnix] The current platform {sys.platform} does not support automatic "
+              f"system proxy configuration; please manually configure the browser/system "
+              f"proxy to {host}:{port}", file=sys.stderr)
         ok = False
     if ok:
         _write_proxy_flag(host, port)
@@ -430,9 +433,9 @@ def set_system_proxy(host: str = "127.0.0.1", port: int = 8888) -> bool:
 
 
 def clear_system_proxy() -> bool:
-    """清除系统代理（跨平台）。
+    """Clear the system proxy (cross-platform).
 
-    返回 True 表示成功，False 表示失败。
+    Returns True on success, False on failure.
     """
     if IS_WINDOWS:
         ok = _clear_windows_proxy()
@@ -453,13 +456,13 @@ def clear_system_proxy() -> bool:
 
 
 def read_actual_proxy_enabled() -> bool:
-    """读取系统实际代理开关状态（用于代理丢失检测）。
+    """Read the actual system proxy toggle state (used for proxy-loss detection).
 
-    平台支持：
-    - Windows: 读注册表 ProxyEnable
-    - macOS: networksetup -getwebproxy 检查 Enabled
+    Platform support:
+    - Windows: read registry ProxyEnable
+    - macOS: networksetup -getwebproxy to check Enabled
     - Linux GNOME: gsettings get org.gnome.system.proxy mode
-    - Linux KDE: kreadconfig5 读 ProxyType
+    - Linux KDE: kreadconfig5 to read ProxyType
     """
     if IS_WINDOWS:
         return _read_windows_proxy_enabled()
@@ -476,7 +479,7 @@ def read_actual_proxy_enabled() -> bool:
 
 
 def get_system_proxy_info() -> dict:
-    """返回系统代理后端信息（用于前端显示）。"""
+    """Return system proxy backend info (for frontend display)."""
     if IS_WINDOWS:
         return {
             "platform": "windows",
