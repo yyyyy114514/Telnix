@@ -7,6 +7,7 @@ WAL mode and busy_timeout for concurrency handling.
 import asyncio
 import base64
 import concurrent.futures
+import heapq
 import json
 import logging
 import os
@@ -2372,8 +2373,8 @@ def get_flows_heatmap(group_by: str = "host",
     all_bucket_epochs = sorted(bucket_map.keys())
     recent_buckets = all_bucket_epochs[-max_buckets:]
 
-    # 维度 top N
-    top_dims = sorted(dim_totals.items(), key=lambda x: -x[1])[:top_n]
+    # 维度 top N（使用 heapq.nlargest 优化：O(n log k) vs O(n log n)）
+    top_dims = heapq.nlargest(top_n, dim_totals.items(), key=lambda x: -x[1])
     # 其他维度合并为 "(其他)"
     other_total = sum(c for d, c in dim_totals.items() if d not in dict(top_dims))
     dim_list = [{"key": d, "label": d or "(未知)", "total": c} for d, c in top_dims]
@@ -3418,8 +3419,8 @@ def get_cross_analysis(host: str | None = None, process: str | None = None, limi
         host_status[h][sb] = host_status[h].get(sb, 0) + 1
         host_totals[h] = host_totals.get(h, 0) + 1
 
-    # 取 top 15 host
-    top_hosts = sorted(host_totals.items(), key=lambda x: -x[1])[:15]
+    # 取 top 15 host（使用 heapq.nlargest 优化）
+    top_hosts = heapq.nlargest(15, host_totals.items(), key=lambda x: -x[1])
     top_host_labels = [h for h, _ in top_hosts]
     host_matrix = [[host_status.get(h, {}).get(b, 0) for b in status_buckets] for h in top_host_labels]
 
@@ -3455,8 +3456,8 @@ def get_cross_analysis(host: str | None = None, process: str | None = None, limi
         content_size[ct][sb] = content_size[ct].get(sb, 0) + 1
         content_totals[ct] = content_totals.get(ct, 0) + 1
 
-    # 取 top 10 content types
-    top_cts = sorted(content_totals.items(), key=lambda x: -x[1])[:10]
+    # 取 top 10 content types（使用 heapq.nlargest 优化）
+    top_cts = heapq.nlargest(10, content_totals.items(), key=lambda x: -x[1])
     top_ct_labels = [ct for ct, _ in top_cts]
     ct_matrix = [[content_size.get(ct, {}).get(b, 0) for b in size_buckets] for ct in top_ct_labels]
 

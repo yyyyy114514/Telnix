@@ -1384,6 +1384,17 @@ def _path_template(path: str, keep_query: bool = False) -> tuple[str, list[str]]
     Returns (template, query_keys). When keep_query=True the template keeps the ?k1&k2 form.
     """
     import re
+    # 性能优化：预编译路径模板化正则（避免每次调用都 re.match 重新编译）
+    if not hasattr(_path_template, "_rx_num"):
+        _path_template._rx_num = re.compile(r"^\d+$")
+        _path_template._rx_uuid = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        _path_template._rx_hex = re.compile(r"^[0-9a-fA-F]{16,}$")
+        _path_template._rx_token = re.compile(r"^[A-Za-z0-9_-]+$")
+    rx_num = _path_template._rx_num
+    rx_uuid = _path_template._rx_uuid
+    rx_hex = _path_template._rx_hex
+    rx_token = _path_template._rx_token
+
     if not path:
         return "/", []
     # Separate path and query
@@ -1395,16 +1406,16 @@ def _path_template(path: str, keep_query: bool = False) -> tuple[str, list[str]]
             out.append("")
             continue
         # Pure number
-        if re.match(r"^\d+$", seg):
+        if rx_num.match(seg):
             out.append("{id}")
         # UUID
-        elif re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", seg):
+        elif rx_uuid.match(seg):
             out.append("{uuid}")
         # Long hex (>=16)
-        elif re.match(r"^[0-9a-fA-F]{16,}$", seg):
+        elif rx_hex.match(seg):
             out.append("{hex}")
         # Long base64-ish (>=20, alphanumeric)
-        elif len(seg) >= 24 and re.match(r"^[A-Za-z0-9_-]+$", seg):
+        elif len(seg) >= 24 and rx_token.match(seg):
             out.append("{token}")
         else:
             out.append(seg)
@@ -1798,23 +1809,31 @@ def cmd_packets_analyze(args):
 
 def _classify_charset(s: str) -> str:
     """Classify a string's charset (by strictest match, for signature field detection)."""
+    # 性能优化：预编译正则
+    if not hasattr(_classify_charset, "_rx"):
+        _classify_charset._rx_num = re.compile(r"^\d+$")
+        _classify_charset._rx_hex = re.compile(r"^[0-9a-fA-F]+$")
+        _classify_charset._rx_hex_needed = re.compile(r"[a-fA-F]")
+        _classify_charset._rx_b64 = re.compile(r"^[A-Za-z0-9+/=]+$")
+        _classify_charset._rx_alnum = re.compile(r"^[A-Za-z0-9_\-]+$")
+        _classify_charset._rx_alpha = re.compile(r"^[A-Za-z]+$")
+
     if not s:
         return "empty"
-    import re
     # Pure number first (strictest)
-    if re.match(r"^\d+$", s):
+    if _classify_charset._rx_num.match(s):
         return "numeric"
     # hex (0-9a-f, must contain at least one letter)
-    if re.match(r"^[0-9a-fA-F]+$", s) and re.search(r"[a-fA-F]", s):
+    if _classify_charset._rx_hex.match(s) and _classify_charset._rx_hex_needed.search(s):
         return "hex"
     # base64 charset (strict base64 only when it contains +/=)
-    if re.match(r"^[A-Za-z0-9+/=]+$", s):
+    if _classify_charset._rx_b64.match(s):
         return "base64"
     # alphanumeric + underscore + hyphen
-    if re.match(r"^[A-Za-z0-9_\-]+$", s):
+    if _classify_charset._rx_alnum.match(s):
         return "alphanumeric"
     # Pure letters
-    if re.match(r"^[A-Za-z]+$", s):
+    if _classify_charset._rx_alpha.match(s):
         return "alpha"
     return "mixed"
 

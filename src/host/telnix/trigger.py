@@ -184,6 +184,12 @@ def parse_trigger_dsl(dsl: str) -> list[dict[str, str]]:
     """
     if not dsl or not dsl.strip():
         return []
+    # 性能优化：预编译正则
+    if not hasattr(parse_trigger_dsl, "_rx_dsl"):
+        import re
+        parse_trigger_dsl._rx_dsl = re.compile(r'^(\w+)\s*(>=|<=|~)\s*(.+)$')
+    rx_dsl = parse_trigger_dsl._rx_dsl
+
     conditions = []
     # 用 & 或 AND 分割（不区分大小写）
     parts = dsl.replace(" AND ", " & ").replace(" and ", " & ").split("&")
@@ -192,9 +198,7 @@ def parse_trigger_dsl(dsl: str) -> list[dict[str, str]]:
         if not part:
             continue
         # 优先匹配 >= 和 <= 运算符，避免被 = 分割错误
-        import re
-        # 运算符：>= / <= / ~（正则）优先
-        m = re.match(r'^(\w+)\s*(>=|<=|~)\s*(.+)$', part)
+        m = rx_dsl.match(part)
         if m:
             field = m.group(1).strip().lower()
             op = m.group(2)

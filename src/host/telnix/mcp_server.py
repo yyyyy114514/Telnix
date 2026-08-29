@@ -2357,6 +2357,17 @@ def breakpoint_timeout(seconds: int) -> str:
 
 def _path_template(path: str, keep_query: bool = False) -> tuple[str, list[str]]:
     """Path template normalization: replace numbers, UUIDs, long hex segments with {id}."""
+    # 性能优化：预编译路径模板化正则（避免每次调用都 re.match 重新编译）
+    if not hasattr(_path_template, "_rx_num"):
+        _path_template._rx_num = re.compile(r"^\d+$")
+        _path_template._rx_uuid = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        _path_template._rx_hex = re.compile(r"^[0-9a-fA-F]{16,}$")
+        _path_template._rx_token = re.compile(r"^[A-Za-z0-9_-]+$")
+    rx_num = _path_template._rx_num
+    rx_uuid = _path_template._rx_uuid
+    rx_hex = _path_template._rx_hex
+    rx_token = _path_template._rx_token
+
     if not path:
         return "/", []
     raw_path, _, query_str = path.partition("?")
@@ -2366,13 +2377,13 @@ def _path_template(path: str, keep_query: bool = False) -> tuple[str, list[str]]
         if not seg:
             out.append("")
             continue
-        if re.match(r"^\d+$", seg):
+        if rx_num.match(seg):
             out.append("{id}")
-        elif re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", seg):
+        elif rx_uuid.match(seg):
             out.append("{uuid}")
-        elif re.match(r"^[0-9a-fA-F]{16,}$", seg):
+        elif rx_hex.match(seg):
             out.append("{hex}")
-        elif len(seg) >= 24 and re.match(r"^[A-Za-z0-9_-]+$", seg):
+        elif len(seg) >= 24 and rx_token.match(seg):
             out.append("{token}")
         else:
             out.append(seg)
@@ -2413,17 +2424,26 @@ def _walk_json_leaves(obj, prefix: str = ""):
 
 def _classify_charset(s: str) -> str:
     """Classify string charset (for signature field detection)."""
+    # 性能优化：预编译正则
+    if not hasattr(_classify_charset, "_rx"):
+        _classify_charset._rx_num = re.compile(r"^\d+$")
+        _classify_charset._rx_hex = re.compile(r"^[0-9a-fA-F]+$")
+        _classify_charset._rx_hex_needed = re.compile(r"[a-fA-F]")
+        _classify_charset._rx_b64 = re.compile(r"^[A-Za-z0-9+/=]+$")
+        _classify_charset._rx_alnum = re.compile(r"^[A-Za-z0-9_\-]+$")
+        _classify_charset._rx_alpha = re.compile(r"^[A-Za-z]+$")
+
     if not s:
         return "empty"
-    if re.match(r"^\d+$", s):
+    if _classify_charset._rx_num.match(s):
         return "numeric"
-    if re.match(r"^[0-9a-fA-F]+$", s) and re.search(r"[a-fA-F]", s):
+    if _classify_charset._rx_hex.match(s) and _classify_charset._rx_hex_needed.search(s):
         return "hex"
-    if re.match(r"^[A-Za-z0-9+/=]+$", s):
+    if _classify_charset._rx_b64.match(s):
         return "base64"
-    if re.match(r"^[A-Za-z0-9_\-]+$", s):
+    if _classify_charset._rx_alnum.match(s):
         return "alphanumeric"
-    if re.match(r"^[A-Za-z]+$", s):
+    if _classify_charset._rx_alpha.match(s):
         return "alpha"
     return "mixed"
 

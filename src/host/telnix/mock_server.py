@@ -61,15 +61,28 @@ def _match_path(path: str, pattern: str, mode: str) -> bool:
     """按 match_mode 匹配 path 与 pattern。
 
     exact: 完全相等；prefix: path 以 pattern 开头；regex: re.search。
+
+    性能优化：regex 模式预编译缓存。
     """
     if not pattern:
         return False
     mode = (mode or "exact").lower()
     if mode == "regex":
-        try:
-            return re.search(pattern, path or "") is not None
-        except re.error:
+        # 预编译缓存
+        if not hasattr(_match_path, "_rx_cache"):
+            _match_path._rx_cache = {}
+        cache = _match_path._rx_cache
+        compiled = cache.get(pattern)
+        if compiled is None:
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                cache[pattern] = False
+                return False
+            cache[pattern] = compiled
+        if compiled is False:
             return False
+        return compiled.search(path or "") is not None
     if mode == "prefix":
         return (path or "").startswith(pattern)
     # exact（默认）

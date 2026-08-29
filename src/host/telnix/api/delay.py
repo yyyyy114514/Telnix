@@ -11,6 +11,7 @@
 """
 
 import fnmatch
+import heapq
 import json
 import re
 import time
@@ -91,15 +92,28 @@ def _match_url(url: str, pattern: str, mode: str) -> bool:
     """按 match_mode 匹配 url 与 pattern。
 
     wildcard: fnmatch（支持 * ? []）；regex: re.search；exact: 完全相等。
+
+    性能优化：regex 模式预编译缓存。
     """
     if not pattern:
         return False
     mode = (mode or "wildcard").lower()
     if mode == "regex":
-        try:
-            return re.search(pattern, url or "") is not None
-        except re.error:
+        # 预编译缓存
+        if not hasattr(_match_url, "_rx_cache"):
+            _match_url._rx_cache = {}
+        cache = _match_url._rx_cache
+        compiled = cache.get(pattern)
+        if compiled is None:
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                cache[pattern] = False
+                return False
+            cache[pattern] = compiled
+        if compiled is False:
             return False
+        return compiled.search(url or "") is not None
     if mode == "exact":
         return (url or "") == pattern
     # wildcard（默认）
@@ -358,9 +372,10 @@ async def get_delay_heatmap():
                 "count": len(delays),
             })
 
-    # host 分布
+    # host 分布（使用 heapq.nlargest 优化 Top 20）
+    top_hosts = heapq.nlargest(20, host_stats.items(), key=lambda x: x[1]["total"])
     host_distribution = []
-    for host, stats in sorted(host_stats.items(), key=lambda x: x[1]["total"], reverse=True)[:20]:
+    for host, stats in top_hosts:
         delays = stats["delays"]
         avg_delay = sum(delays) / len(delays) if delays else 0
         host_distribution.append({

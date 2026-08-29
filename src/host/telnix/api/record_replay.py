@@ -12,12 +12,19 @@ httpx.AsyncClient 并发重放，返回统计结果。
 - 响应断言
 - 条件执行规则
 - 录制 → Mock 自举
+
+性能优化：
+- 预编译正则模式（path_pattern, query_pattern）
 """
 
 import asyncio
 import json
 import re
 import threading
+
+# 性能优化：预编译正则模式
+_PATH_PATTERN = re.compile(r'/\{(\w+)\}|\{(\w+)\}')
+_QUERY_PATTERN = re.compile(r'[\?&](\w+)=([^&\s]+)')
 import time
 import uuid
 from datetime import datetime
@@ -375,9 +382,9 @@ async def extract_variables(script_id: str, body: VariableExtractionRequest):
     # 自动检测可提取的变量
     detected_vars: dict[str, dict] = {}
 
-    # 内置提取规则：从 URL path、query、body 中检测参数
-    path_pattern = re.compile(r'/\{(\w+)\}|\{(\w+)\}')
-    query_pattern = re.compile(r'[\?&](\w+)=([^&\s]+)')
+    # 内置提取规则：从 URL path、query、body 中检测参数（使用预编译正则）
+    path_pattern = _PATH_PATTERN
+    query_pattern = _QUERY_PATTERN
 
     for flow in flows:
         url = flow.get("url", "")
@@ -1255,9 +1262,9 @@ async def extract_variables(script_id: str, body: VariableExtractionRequest):
     # 自动检测可提取的变量
     detected_vars: dict[str, dict] = {}
 
-    # 内置提取规则：从 URL path、query、body 中检测参数
-    path_pattern = re.compile(r'/\{(\w+)\}|\{(\w+)\}')
-    query_pattern = re.compile(r'[\?&](\w+)=([^&\s]+)')
+    # 内置提取规则：从 URL path、query、body 中检测参数（使用预编译正则）
+    path_pattern = _PATH_PATTERN
+    query_pattern = _QUERY_PATTERN
 
     for flow in flows:
         url = flow.get("url", "")

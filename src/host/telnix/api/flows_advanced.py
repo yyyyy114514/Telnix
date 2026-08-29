@@ -8,6 +8,7 @@
 """
 
 import csv
+import heapq
 import io
 import json
 from datetime import datetime
@@ -112,10 +113,10 @@ async def export_report(
     cross_analysis = db.get_cross_analysis(host=host, process=process, limit=limit)
     anomalies = db.detect_anomalies(host=host, process=process, limit=limit)
 
-    # 获取 Top 端点
+    # 获取 Top 端点（使用 heapq.nlargest 优化）
     try:
         endpoints = db.get_flows_endpoint_stats(limit=2000)
-        top_endpoints = sorted(endpoints, key=lambda x: -x.get("count", 0))[:20]
+        top_endpoints = heapq.nlargest(20, endpoints, key=lambda x: x.get("count", 0))
     except Exception:
         top_endpoints = []
 
@@ -254,12 +255,7 @@ async def export_report(
   <!-- 异常检测 -->
   <div class="card">
     <h2>异常检测 ({anomalies.get('summary', {}).get('anomaly_count', 0)} 项)</h2>
-    {"".join(f"""
-    <div class="alert alert-{a['severity']}">
-      <span class="badge badge-{a['severity']}">{a['severity']}</span>
-      {a['message']}
-    </div>""" for a in anomalies.get('anomalies', []))}
-    {"<p style='color:#999'>未检测到明显异常</p>" if not anomalies.get('anomalies') else ""}
+    <!__ALERTS__>
   </div>
 
   <!-- Top 端点 -->
@@ -267,12 +263,27 @@ async def export_report(
     <h2>Top 20 端点</h2>
     <table>
       <tr><th>方法</th><th>Host</th><th>路径</th><th>请求数</th><th>状态码</th></tr>
-      {"".join(f"<tr><td>{ep.get('method','')}</td><td>{ep.get('host','')}</td><td>{ep.get('path_template','')}</td><td>{ep.get('count',0)}</td><td>{','.join(str(s) for s in ep.get('status_codes',[]))}</td></tr>" for ep in top_endpoints)}
+      <!__ENDPOINTS__>
     </table>
   </div>
 </div>
 </body>
 </html>"""
+
+        # 动态生成异常和端点 HTML
+        alerts_html = ""
+        if anomalies.get('anomalies'):
+            for a in anomalies.get('anomalies', []):
+                alerts_html += "<div class='alert alert-" + a['severity'] + "'><span class='badge badge-" + a['severity'] + "'>" + a['severity'] + "</span> " + a['message'] + "</div>"
+        else:
+            alerts_html = "<p style='color:#999'>未检测到明显异常</p>"
+        html = html.replace("<!__ALERTS__>", alerts_html)
+
+        endpoints_html = ""
+        for ep in top_endpoints:
+            status_str = ','.join(str(s) for s in ep.get('status_codes', []))
+            endpoints_html += "<tr><td>" + ep.get('method','') + "</td><td>" + ep.get('host','') + "</td><td>" + ep.get('path_template','') + "</td><td>" + str(ep.get('count',0)) + "</td><td>" + status_str + "</td></tr>"
+        html = html.replace("<!__ENDPOINTS__>", endpoints_html)
 
         return StreamingResponse(
             io.BytesIO(html.encode("utf-8")),
