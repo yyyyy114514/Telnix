@@ -1,6 +1,6 @@
 # Telnix
 
-> 一个完全由AI（GLM5.2+Hy3）构建的强大抓包代理工具
+> bug很多，暂时没时间做了，先上传。main是glm5.2，dev是fable5，烧了快2亿token了
 
 [快速开始](#快速开始)
 
