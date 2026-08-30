@@ -1,6 +1,6 @@
 # Telnix
 
-开发中版本敬请查看：[这里](https://github.com/yyyyy114514/Telnix/tree/trae/agent-AtFtHG)
+main比较老，开发中版本敬请查看：[这里](https://github.com/yyyyy114514/Telnix/tree/dev)
 
 > 完全由 [GLM-5.2](https://chatglm.cn) 构建的 Fiddler 式 HTTP/HTTPS 抓包代理工具。
 > FastAPI 后端 + Vue 3 前端 + SQLite 存储，原生 Windows 支持，macOS / Linux 优雅降级，单命令启动。
