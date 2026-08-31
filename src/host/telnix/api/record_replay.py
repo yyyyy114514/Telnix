@@ -370,7 +370,7 @@ def _extract_variable_from_flow(flow: dict, rule: dict) -> str | None:
 async def get_script_variables(script_id: str):
     """获取脚本的变量定义。"""
     variables = _get_script_variables(script_id)
-    return ok(variables)
+    return ok({"script_id": script_id, "variables": variables, "flows": []})
 
 
 @router.post("/record-scripts/{script_id}/variables/extract")
@@ -536,12 +536,14 @@ async def delete_environment(env_id: str):
 class AssertionRule(BaseModel):
     """断言规则。"""
     id: str | None = None
-    name: str
-    field: str  # status_code | response_body | response_header | request_header
-    operator: str  # equals | contains | regex | greater | less
-    expected_value: str
+    name: str = ""
+    field: str  # status_code | response_body | response_header.* | request_header.* | response_time
+    operator: str  # equals | not_equals | contains | not_contains | regex | exists | not_exists | greater | less
+    expected_value: str = ""
     enabled: bool = True
     note: str = ""
+    script_id: str | None = None
+    flow_id: int | None = None
 
 
 @router.get("/record-scripts/assertions")
@@ -549,6 +551,14 @@ async def list_assertions():
     """获取所有断言规则。"""
     data = settings_store.get_setting(_ASSERTIONS_KEY, [])
     return ok(data if isinstance(data, list) else [])
+
+
+@router.get("/record-scripts/{script_id}/assertions")
+async def list_script_assertions(script_id: str):
+    """获取指定脚本的断言规则。"""
+    data = settings_store.get_setting(_ASSERTIONS_KEY, [])
+    assertions = data if isinstance(data, list) else []
+    return ok([a for a in assertions if a.get("script_id") == script_id])
 
 
 @router.post("/record-scripts/assertions")
@@ -564,10 +574,19 @@ async def create_assertion(body: AssertionRule):
         "expected_value": body.expected_value,
         "enabled": body.enabled,
         "note": body.note,
+        "script_id": body.script_id,
+        "flow_id": body.flow_id,
     }
     assertions.append(assertion)
     settings_store.set_setting(_ASSERTIONS_KEY, assertions)
     return ok(assertion)
+
+
+@router.post("/record-scripts/{script_id}/assertions")
+async def create_script_assertion(script_id: str, body: AssertionRule):
+    """为指定脚本创建断言规则。"""
+    body.script_id = script_id
+    return await create_assertion(body)
 
 
 @router.put("/record-scripts/assertions/{assertion_id}")
@@ -585,6 +604,8 @@ async def update_assertion(assertion_id: str, body: AssertionRule):
                 "expected_value": body.expected_value,
                 "enabled": body.enabled,
                 "note": body.note,
+                "script_id": body.script_id if body.script_id is not None else a.get("script_id"),
+                "flow_id": body.flow_id if body.flow_id is not None else a.get("flow_id"),
             }
             settings_store.set_setting(_ASSERTIONS_KEY, assertions)
             return ok(assertions[i])
@@ -615,6 +636,8 @@ def _check_assertion(assertion: dict, response_data: dict) -> tuple[bool, str]:
         actual = str(response_data.get("status_code", ""))
     elif field == "response_body":
         actual = str(response_data.get("response_body", ""))
+    elif field == "response_time":
+        actual = str(response_data.get("duration_ms", ""))
     elif field.startswith("response_header."):
         header_name = field.replace("response_header.", "")
         headers = response_data.get("response_headers", {})
@@ -628,10 +651,18 @@ def _check_assertion(assertion: dict, response_data: dict) -> tuple[bool, str]:
     passed = False
     if operator == "equals":
         passed = actual == expected
+    elif operator == "not_equals":
+        passed = actual != expected
     elif operator == "contains":
         passed = expected in actual
+    elif operator == "not_contains":
+        passed = expected not in actual
     elif operator == "regex":
         passed = bool(re.search(expected, actual))
+    elif operator == "exists":
+        passed = bool(actual)
+    elif operator == "not_exists":
+        passed = not actual
     elif operator == "greater":
         try:
             passed = float(actual) > float(expected)
@@ -1068,9 +1099,25 @@ async def delete_script(script_id: str):
     return ok({"id": script_id})
 
 
+class ReplayOptions(BaseModel):
+    """参数化回放选项。"""
+
+    environment_id: str | None = None
+    iterations: int = 1
+    delay_ms: int = 0
+    fail_fast: bool = False
+
+
 @router.post("/record-scripts/{script_id}/replay")
-async def replay_script(script_id: str):
-    """回放脚本：并发重放脚本中的 flows，返回统计结果。"""
+async def replay_script(script_id: str, body: ReplayOptions | None = None):
+    """回放脚本：并发重放脚本中的 flows，返回统计结果。
+
+    可选 body 支持参数化回放：
+    - environment_id: 指定环境则启用变量替换（走增强回放）
+    - iterations: 重复执行次数
+    - delay_ms: 每轮之间的间隔毫秒数
+    - fail_fast: 任一轮出现失败即停止
+    """
     scripts = _get_all_scripts_with_flows()
     s = _find_script(scripts, script_id)
     if not s:
@@ -1078,9 +1125,44 @@ async def replay_script(script_id: str):
     flows = s.get("flows") or []
     if not flows:
         return err("Script has no flows to replay")
+
+    opts = body or ReplayOptions()
+    iterations = max(1, min(int(opts.iterations or 1), 100))
+    use_enhanced = bool(opts.environment_id)
+
+    all_results: list[dict] = []
+    success = fail = 0
+    status_dist: dict[str, int] = {}
+    aborted = False
+
     try:
-        stats = await _replay_flows(flows)
-        return ok(stats)
+        for i in range(iterations):
+            if use_enhanced:
+                stats = await _replay_flows_enhanced(flows, opts.environment_id)
+            else:
+                stats = await _replay_flows(flows)
+            success += stats.get("success", 0)
+            fail += stats.get("fail", 0)
+            for k, v in (stats.get("status_distribution") or {}).items():
+                status_dist[k] = status_dist.get(k, 0) + v
+            for r in stats.get("results") or []:
+                r["iteration"] = i + 1
+                all_results.append(r)
+            if opts.fail_fast and (stats.get("fail", 0) > 0 or stats.get("assertion_fails", 0) > 0):
+                aborted = True
+                break
+            if i < iterations - 1 and opts.delay_ms > 0:
+                await asyncio.sleep(opts.delay_ms / 1000.0)
+        return ok({
+            "total": len(flows),
+            "replayed": len(all_results),
+            "success": success,
+            "fail": fail,
+            "iterations": iterations,
+            "aborted": aborted,
+            "status_distribution": status_dist,
+            "results": all_results,
+        })
     except Exception as e:  # noqa: BLE001
         return err(f"Replay failed: {e}")
 
@@ -1142,776 +1224,3 @@ async def stop_recording(body: ScriptStopRecord | None = None):
     out = {k: v for k, v in script.items() if k != "flows"}
     out["flow_count"] = len(flows)
     return ok(out)
-
-
-# ---------- 变量提取与多环境配置 ----------
-
-class VariableExtractionRequest(BaseModel):
-    """从 flows 提取变量的请求。"""
-    flow_ids: list[int]
-    extraction_rules: list[dict] = []  # [{name, field, pattern}]
-
-
-class EnvironmentCreate(BaseModel):
-    """创建/更新环境。"""
-    id: str | None = None
-    name: str
-    description: str = ""
-    variables: dict[str, str] = {}
-    is_default: bool = False
-
-
-class ScriptVariable(BaseModel):
-    """脚本变量定义。"""
-    name: str
-    description: str = ""
-    type: str = "string"  # string | number | boolean | json_path | regex
-    extraction_rule: str = ""  # field.path 或 regex pattern
-    sample_values: list[str] = []
-    from_flow_id: int = 0
-
-
-def _get_script_variables(script_id: str) -> list[dict]:
-    """获取脚本的变量定义。"""
-    data = settings_store.get_setting(f"{_VARIABLES_KEY}_{script_id}", [])
-    return data if isinstance(data, list) else []
-
-
-def _save_script_variables(script_id: str, variables: list[dict]) -> None:
-    """保存脚本变量定义。"""
-    settings_store.set_setting(f"{_VARIABLES_KEY}_{script_id}", variables)
-
-
-def _get_environments() -> list[dict]:
-    """获取所有环境配置。"""
-    data = settings_store.get_setting(_ENVIRONMENTS_KEY, [])
-    return data if isinstance(data, list) else []
-
-
-def _save_environments(environments: list[dict]) -> None:
-    """保存环境配置列表。"""
-    settings_store.set_setting(_ENVIRONMENTS_KEY, environments)
-
-
-def _extract_variable_from_flow(flow: dict, rule: dict) -> str | None:
-    """根据提取规则从 flow 中提取变量值。"""
-    field = rule.get("field", "")
-    pattern = rule.get("pattern", "")
-    name = rule.get("name", "")
-
-    if not field or not name:
-        return None
-
-    # 获取字段值
-    value = flow
-    for part in field.split("."):
-        if value is None:
-            return None
-        value = value.get(part) if isinstance(value, dict) else None
-
-    if value is None:
-        return None
-
-    value_str = str(value)
-
-    # 根据类型提取
-    var_type = rule.get("type", "string")
-    if var_type == "regex" and pattern:
-        match = re.search(pattern, value_str)
-        if match:
-            return match.group(1) if match.lastindex else match.group(0)
-    elif var_type == "json_path" and pattern:
-        # 简单的 JSONPath 提取（支持 .key 和 .key[0]）
-        try:
-            data = json.loads(value_str) if isinstance(value, str) else value
-            parts = pattern.lstrip(".").split(".")
-            for p in parts:
-                if data is None:
-                    return None
-                if p.endswith("]"):
-                    key, idx = p[:-1], int(p[p.index("[") + 1:-1])
-                    data = data.get(key)
-                    if isinstance(data, list) and 0 <= idx < len(data):
-                        data = data[idx]
-                    else:
-                        return None
-                else:
-                    data = data.get(p)
-            return str(data) if data is not None else None
-        except Exception:  # noqa: BLE001
-            return None
-    else:
-        return value_str
-
-    return None
-
-
-@router.get("/record-scripts/{script_id}/variables")
-async def get_script_variables(script_id: str):
-    """获取脚本的变量定义。"""
-    variables = _get_script_variables(script_id)
-    return ok(variables)
-
-
-@router.post("/record-scripts/{script_id}/variables/extract")
-async def extract_variables(script_id: str, body: VariableExtractionRequest):
-    """从 flows 中自动提取变量。"""
-    flows_map = db.get_flows_by_ids(body.flow_ids) if body.flow_ids else {}
-    flows = [flows_map[fid] for fid in body.flow_ids if fid in flows_map]
-
-    # 自动检测可提取的变量
-    detected_vars: dict[str, dict] = {}
-
-    # 内置提取规则：从 URL path、query、body 中检测参数（使用预编译正则）
-    path_pattern = _PATH_PATTERN
-    query_pattern = _QUERY_PATTERN
-
-    for flow in flows:
-        url = flow.get("url", "")
-        body_str = flow.get("request_body") or ""
-
-        # 从 path 提取变量
-        for match in path_pattern.finditer(url):
-            var_name = match.group(1) or match.group(2)
-            if var_name:
-                if var_name not in detected_vars:
-                    detected_vars[var_name] = {
-                        "name": var_name,
-                        "type": "path",
-                        "extraction_rule": "url.path",
-                        "sample_values": [],
-                        "description": f"Path variable: {var_name}",
-                        "from_flow_id": flow.get("id", 0),
-                    }
-                # 尝试从其他 flow 中提取实际值
-                if len(detected_vars[var_name]["sample_values"]) < 3:
-                    for other_flow in flows:
-                        if other_flow.get("id") != flow.get("id"):
-                            extracted = _extract_variable_from_flow(
-                                other_flow,
-                                {"field": "url", "pattern": rf'/{var_name}/([^/\s]+)', "type": "regex", "name": var_name}
-                            )
-                            if extracted and extracted not in detected_vars[var_name]["sample_values"]:
-                                detected_vars[var_name]["sample_values"].append(extracted)
-
-        # 从 query 提取变量
-        for match in query_pattern.finditer(url):
-            var_name = match.group(1)
-            var_value = match.group(2)
-            if var_name and var_value:
-                if var_name not in detected_vars:
-                    detected_vars[var_name] = {
-                        "name": var_name,
-                        "type": "query",
-                        "extraction_rule": "url.query",
-                        "sample_values": [],
-                        "description": f"Query parameter: {var_name}",
-                        "from_flow_id": flow.get("id", 0),
-                    }
-                if var_value not in detected_vars[var_name]["sample_values"]:
-                    detected_vars[var_name]["sample_values"].append(var_value)
-
-        # 从 JSON body 提取变量
-        try:
-            if body_str:
-                body_data = json.loads(body_str) if isinstance(body_str, str) else body_str
-                if isinstance(body_data, dict):
-                    for key, value in body_data.items():
-                        if key not in detected_vars:
-                            detected_vars[key] = {
-                                "name": key,
-                                "type": "body",
-                                "extraction_rule": f"body.{key}",
-                                "sample_values": [],
-                                "description": f"Request body field: {key}",
-                                "from_flow_id": flow.get("id", 0),
-                            }
-                        if isinstance(value, (str, int, float, bool)):
-                            val_str = str(value)
-                            if val_str not in detected_vars[key]["sample_values"]:
-                                detected_vars[key]["sample_values"].append(val_str)
-        except Exception:  # noqa: BLE001
-            pass
-
-    variables = list(detected_vars.values())
-    # 保存到脚本变量定义
-    _save_script_variables(script_id, variables)
-    return ok({"variables": variables, "count": len(variables)})
-
-
-@router.get("/record-scripts/environments")
-async def list_environments():
-    """获取所有环境配置。"""
-    return ok(_get_environments())
-
-
-@router.post("/record-scripts/environments")
-async def create_environment(body: EnvironmentCreate):
-    """创建新环境。"""
-    environments = _get_environments()
-
-    # 检查名称唯一性
-    if any(e.get("name") == body.name for e in environments):
-        return err("Environment name already exists")
-
-    # 如果设为默认，取消其他默认
-    if body.is_default:
-        for e in environments:
-            e["is_default"] = False
-
-    env = {
-        "id": body.id or uuid.uuid4().hex[:8],
-        "name": body.name,
-        "description": body.description,
-        "variables": body.variables,
-        "is_default": body.is_default,
-    }
-    environments.append(env)
-    _save_environments(environments)
-    return ok(env)
-
-
-@router.put("/record-scripts/environments/{env_id}")
-async def update_environment(env_id: str, body: EnvironmentCreate):
-    """更新环境配置。"""
-    environments = _get_environments()
-    idx = -1
-    for i, e in enumerate(environments):
-        if e.get("id") == env_id:
-            idx = i
-            break
-
-    if idx < 0:
-        return err("Environment not found")
-
-    # 如果设为默认，取消其他默认
-    if body.is_default:
-        for e in environments:
-            e["is_default"] = False
-
-    environments[idx] = {
-        "id": env_id,
-        "name": body.name,
-        "description": body.description,
-        "variables": body.variables,
-        "is_default": body.is_default,
-    }
-    _save_environments(environments)
-    return ok(environments[idx])
-
-
-@router.delete("/record-scripts/environments/{env_id}")
-async def delete_environment(env_id: str):
-    """删除环境。"""
-    environments = _get_environments()
-    new_envs = [e for e in environments if e.get("id") != env_id]
-    if len(new_envs) == len(environments):
-        return err("Environment not found")
-    _save_environments(new_envs)
-    return ok({"id": env_id})
-
-
-# ---------- 响应断言 ----------
-
-class AssertionRule(BaseModel):
-    """断言规则。"""
-    id: str | None = None
-    name: str
-    field: str  # status_code | response_body | response_header | request_header
-    operator: str  # equals | contains | regex | greater | less
-    expected_value: str
-    enabled: bool = True
-    note: str = ""
-
-
-@router.get("/record-scripts/assertions")
-async def list_assertions():
-    """获取所有断言规则。"""
-    data = settings_store.get_setting(_ASSERTIONS_KEY, [])
-    return ok(data if isinstance(data, list) else [])
-
-
-@router.post("/record-scripts/assertions")
-async def create_assertion(body: AssertionRule):
-    """创建断言规则。"""
-    data = settings_store.get_setting(_ASSERTIONS_KEY, [])
-    assertions = data if isinstance(data, list) else []
-    assertion = {
-        "id": body.id or uuid.uuid4().hex[:8],
-        "name": body.name,
-        "field": body.field,
-        "operator": body.operator,
-        "expected_value": body.expected_value,
-        "enabled": body.enabled,
-        "note": body.note,
-    }
-    assertions.append(assertion)
-    settings_store.set_setting(_ASSERTIONS_KEY, assertions)
-    return ok(assertion)
-
-
-@router.put("/record-scripts/assertions/{assertion_id}")
-async def update_assertion(assertion_id: str, body: AssertionRule):
-    """更新断言规则。"""
-    data = settings_store.get_setting(_ASSERTIONS_KEY, [])
-    assertions = data if isinstance(data, list) else []
-    for i, a in enumerate(assertions):
-        if a.get("id") == assertion_id:
-            assertions[i] = {
-                "id": assertion_id,
-                "name": body.name,
-                "field": body.field,
-                "operator": body.operator,
-                "expected_value": body.expected_value,
-                "enabled": body.enabled,
-                "note": body.note,
-            }
-            settings_store.set_setting(_ASSERTIONS_KEY, assertions)
-            return ok(assertions[i])
-    return err("Assertion not found")
-
-
-@router.delete("/record-scripts/assertions/{assertion_id}")
-async def delete_assertion(assertion_id: str):
-    """删除断言规则。"""
-    data = settings_store.get_setting(_ASSERTIONS_KEY, [])
-    assertions = data if isinstance(data, list) else []
-    new_assertions = [a for a in assertions if a.get("id") != assertion_id]
-    if len(new_assertions) == len(assertions):
-        return err("Assertion not found")
-    settings_store.set_setting(_ASSERTIONS_KEY, new_assertions)
-    return ok({"id": assertion_id})
-
-
-def _check_assertion(assertion: dict, response_data: dict) -> tuple[bool, str]:
-    """检查单条断言是否通过。"""
-    field = assertion.get("field", "")
-    operator = assertion.get("operator", "")
-    expected = assertion.get("expected_value", "")
-
-    # 获取字段值
-    actual = ""
-    if field == "status_code":
-        actual = str(response_data.get("status_code", ""))
-    elif field == "response_body":
-        actual = str(response_data.get("response_body", ""))
-    elif field.startswith("response_header."):
-        header_name = field.replace("response_header.", "")
-        headers = response_data.get("response_headers", {})
-        actual = str(headers.get(header_name, ""))
-    elif field.startswith("request_header."):
-        header_name = field.replace("request_header.", "")
-        headers = response_data.get("request_headers", {})
-        actual = str(headers.get(header_name, ""))
-
-    # 比较
-    passed = False
-    if operator == "equals":
-        passed = actual == expected
-    elif operator == "contains":
-        passed = expected in actual
-    elif operator == "regex":
-        passed = bool(re.search(expected, actual))
-    elif operator == "greater":
-        try:
-            passed = float(actual) > float(expected)
-        except (ValueError, TypeError):
-            passed = False
-    elif operator == "less":
-        try:
-            passed = float(actual) < float(expected)
-        except (ValueError, TypeError):
-            passed = False
-
-    return passed, f"{field} {operator} {expected}: got {actual}"
-
-
-# ---------- 条件执行规则 ----------
-
-class ConditionRule(BaseModel):
-    """条件执行规则。"""
-    id: str | None = None
-    name: str
-    condition_type: str  # status_code | response_body | response_header | request_header
-    operator: str  # equals | contains | regex | greater | less
-    value: str
-    action: str  # skip | delay | mock | abort
-    action_params: dict = {}
-    enabled: bool = True
-
-
-def _get_condition_rules(script_id: str) -> list[dict]:
-    """获取脚本的条件执行规则。"""
-    data = settings_store.get_setting(f"{_CONDITIONS_KEY}_{script_id}", [])
-    return data if isinstance(data, list) else []
-
-
-def _save_condition_rules(script_id: str, rules: list[dict]) -> None:
-    """保存脚本的条件执行规则。"""
-    settings_store.set_setting(f"{_CONDITIONS_KEY}_{script_id}", rules)
-
-
-@router.get("/record-scripts/{script_id}/condition-rules")
-async def list_condition_rules(script_id: str):
-    """获取脚本的条件执行规则。"""
-    return ok(_get_condition_rules(script_id))
-
-
-@router.post("/record-scripts/{script_id}/condition-rules")
-async def create_condition_rule(script_id: str, body: ConditionRule):
-    """创建条件执行规则。"""
-    rules = _get_condition_rules(script_id)
-    rule = {
-        "id": body.id or uuid.uuid4().hex[:8],
-        "name": body.name,
-        "condition_type": body.condition_type,
-        "operator": body.operator,
-        "value": body.value,
-        "action": body.action,
-        "action_params": body.action_params,
-        "enabled": body.enabled,
-    }
-    rules.append(rule)
-    _save_condition_rules(script_id, rules)
-    return ok(rule)
-
-
-@router.put("/record-scripts/{script_id}/condition-rules/{rule_id}")
-async def update_condition_rule(script_id: str, rule_id: str, body: ConditionRule):
-    """更新条件执行规则。"""
-    rules = _get_condition_rules(script_id)
-    for i, r in enumerate(rules):
-        if r.get("id") == rule_id:
-            rules[i] = {
-                "id": rule_id,
-                "name": body.name,
-                "condition_type": body.condition_type,
-                "operator": body.operator,
-                "value": body.value,
-                "action": body.action,
-                "action_params": body.action_params,
-                "enabled": body.enabled,
-            }
-            _save_condition_rules(script_id, rules)
-            return ok(rules[i])
-    return err("Condition rule not found")
-
-
-@router.delete("/record-scripts/{script_id}/condition-rules/{rule_id}")
-async def delete_condition_rule(script_id: str, rule_id: str):
-    """删除条件执行规则。"""
-    rules = _get_condition_rules(script_id)
-    new_rules = [r for r in rules if r.get("id") != rule_id]
-    if len(new_rules) == len(rules):
-        return err("Condition rule not found")
-    _save_condition_rules(script_id, new_rules)
-    return ok({"id": rule_id})
-
-
-def _check_condition(rule: dict, response_data: dict) -> tuple[bool, str]:
-    """检查条件是否满足。"""
-    cond_type = rule.get("condition_type", "")
-    operator = rule.get("operator", "")
-    expected = rule.get("value", "")
-
-    # 获取条件值
-    actual = ""
-    if cond_type == "status_code":
-        actual = str(response_data.get("status_code", ""))
-    elif cond_type == "response_body":
-        actual = str(response_data.get("response_body", ""))
-    elif cond_type.startswith("response_header."):
-        header_name = cond_type.replace("response_header.", "")
-        headers = response_data.get("response_headers", {})
-        actual = str(headers.get(header_name, ""))
-    elif cond_type.startswith("request_header."):
-        header_name = cond_type.replace("request_header.", "")
-        headers = response_data.get("request_headers", {})
-        actual = str(headers.get(header_name, ""))
-
-    # 比较
-    matched = False
-    if operator == "equals":
-        matched = actual == expected
-    elif operator == "contains":
-        matched = expected in actual
-    elif operator == "regex":
-        matched = bool(re.search(expected, actual))
-    elif operator == "greater":
-        try:
-            matched = float(actual) > float(expected)
-        except (ValueError, TypeError):
-            matched = False
-    elif operator == "less":
-        try:
-            matched = float(actual) < float(expected)
-        except (ValueError, TypeError):
-            matched = False
-
-    return matched, rule.get("action", "")
-
-
-# ---------- 增强回放：支持变量替换、环境、断言、条件执行 ----------
-
-def _substitute_template(text: str, variables: dict[str, str]) -> str:
-    """在文本中替换变量占位符。"""
-    if not text or not variables:
-        return text
-
-    result = text
-    for key, value in variables.items():
-        # {{variable}} 风格
-        result = result.replace(f"{{{{{key}}}}}", str(value))
-        # ${variable} 风格
-        result = result.replace(f"${{{key}}}", str(value))
-        # $variable 风格
-        result = result.replace(f"${key}", str(value))
-
-    return result
-
-
-def _substitute_headers(headers: dict, variables: dict[str, str]) -> dict:
-    """替换请求头中的变量。"""
-    result = {}
-    for key, value in headers.items():
-        result[_substitute_template(str(key), variables)] = _substitute_template(str(value), variables)
-    return result
-
-
-async def _replay_flows_enhanced(
-    flows: list[dict],
-    environment_id: str | None = None,
-    apply_assertions: bool = True,
-    apply_conditions: bool = True,
-) -> dict:
-    """增强版回放：支持变量替换、环境、断言和条件执行。"""
-    try:
-        import httpx
-    except ImportError:  # noqa: BLE001
-        raise RuntimeError("httpx is not installed, replay unavailable")
-
-    # 获取环境变量
-    env_vars: dict[str, str] = {}
-    if environment_id:
-        environments = _get_environments()
-        for env in environments:
-            if env.get("id") == environment_id:
-                env_vars = env.get("variables", {})
-                break
-
-    # 获取断言规则
-    assertions = settings_store.get_setting(_ASSERTIONS_KEY, []) if apply_assertions else []
-    if not isinstance(assertions, list):
-        assertions = []
-
-    # 仅重放合法 HTTP(S) 流量
-    http_flows = [f for f in flows if (f.get("url") or "").lower().startswith("http")]
-
-    results: list[dict] = []
-    success = 0
-    fail = 0
-    skipped = 0
-    assertion_fails = 0
-    status_dist: dict[str, int] = {}
-    sem = asyncio.Semaphore(10)
-
-    async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=False, proxy=None) as client:
-
-        async def _one(flow: dict):
-            nonlocal success, fail, skipped, assertion_fails
-
-            async with sem:
-                t0 = time.time()
-
-                # 变量替换
-                url = _substitute_template(flow.get("url") or "", env_vars)
-                headers = _safe_json(flow.get("request_headers"))
-                headers = _substitute_headers(headers, env_vars)
-                # 移除 hop-by-hop / Host 头
-                for k in list(headers.keys()):
-                    if k.lower() in ("host", "content-length", "transfer-encoding",
-                                      "connection", "keep-alive"):
-                        del headers[k]
-                body = _substitute_template(flow.get("request_body") or "", env_vars)
-                content = _to_bytes(body)
-
-                method = _substitute_template((flow.get("method") or "GET").upper(), env_vars)
-
-                try:
-                    resp = await client.request(method, url, headers=headers, content=content)
-                    dt = (time.time() - t0) * 1000.0
-
-                    response_data = {
-                        "status_code": resp.status_code,
-                        "response_body": resp.text,
-                        "response_headers": dict(resp.headers),
-                        "request_headers": headers,
-                    }
-
-                    # 检查断言
-                    assertion_passed = True
-                    assertion_results = []
-                    if assertions:
-                        for assertion in assertions:
-                            if not assertion.get("enabled", True):
-                                continue
-                            passed, msg = _check_assertion(assertion, response_data)
-                            assertion_results.append({"assertion": assertion.get("name"), "passed": passed, "message": msg})
-                            if not passed:
-                                assertion_passed = False
-                                assertion_fails += 1
-
-                    result_entry = {
-                        "flow_id": flow.get("id"),
-                        "url": url,
-                        "method": method,
-                        "status_code": resp.status_code,
-                        "duration_ms": round(dt, 2),
-                        "ok": assertion_passed,
-                        "assertions": assertion_results,
-                    }
-
-                    # 检查条件执行
-                    if apply_conditions:
-                        for rule in assertions:  # TODO: 需要传入条件规则
-                            matched, action = _check_condition(rule, response_data)
-                            if matched:
-                                if action == "skip":
-                                    result_entry["skipped"] = True
-                                    skipped += 1
-                                    results.append(result_entry)
-                                    return
-                                elif action == "delay":
-                                    delay_ms = rule.get("action_params", {}).get("delay_ms", 1000)
-                                    await asyncio.sleep(delay_ms / 1000.0)
-
-                    results.append(result_entry)
-
-                    if assertion_passed:
-                        success += 1
-                        sc = str(resp.status_code)
-                        status_dist[sc] = status_dist.get(sc, 0) + 1
-                    else:
-                        fail += 1
-
-                except Exception as e:  # noqa: BLE001
-                    dt = (time.time() - t0) * 1000.0
-                    results.append({
-                        "flow_id": flow.get("id"),
-                        "url": url,
-                        "method": method,
-                        "error": str(e),
-                        "duration_ms": round(dt, 2),
-                        "ok": False,
-                    })
-                    fail += 1
-
-        await asyncio.gather(*[_one(f) for f in http_flows], return_exceptions=True)
-
-    return {
-        "total": len(flows),
-        "replayed": len(http_flows),
-        "skipped": skipped,
-        "success": success,
-        "fail": fail,
-        "assertion_fails": assertion_fails,
-        "status_distribution": status_dist,
-        "results": results,
-    }
-
-
-@router.post("/record-scripts/{script_id}/replay-enhanced")
-async def replay_script_enhanced(script_id: str, environment_id: str | None = None):
-    """增强回放：支持变量替换、环境、断言和条件执行。"""
-    scripts = _get_all_scripts_with_flows()
-    s = _find_script(scripts, script_id)
-    if not s:
-        return err("Record script not found")
-    flows = s.get("flows") or []
-    if not flows:
-        return err("Script has no flows to replay")
-    try:
-        stats = await _replay_flows_enhanced(flows, environment_id)
-        return ok(stats)
-    except Exception as e:  # noqa: BLE001
-        return err(f"Enhanced replay failed: {e}")
-
-
-# ---------- 录制 → Mock 自举 ----------
-
-class ConvertToMockRequest(BaseModel):
-    """转换到 Mock 的请求。"""
-    flow_ids: list[int]
-    use_template: bool = True  # 是否使用模板变量
-    add_delay: bool = False
-    delay_ms: int = 0
-
-
-@router.post("/record-scripts/convert-to-mock")
-async def convert_to_mock(body: ConvertToMockRequest):
-    """将录制的 flows 转换为 Mock 规则。"""
-    flows_map = db.get_flows_by_ids(body.flow_ids) if body.flow_ids else {}
-    flows = [flows_map[fid] for fid in body.flow_ids if fid in flows_map]
-
-    mock_rules = []
-    for flow in flows:
-        url = flow.get("url", "")
-        method = (flow.get("method") or "GET").upper()
-
-        # 提取 path
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            path = parsed.path or "/"
-            if parsed.query:
-                path += "?" + parsed.query
-        except Exception:  # noqa: BLE001
-            path = "/"
-
-        # 响应头
-        response_headers = {}
-        try:
-            raw_headers = flow.get("response_headers")
-            if raw_headers:
-                response_headers = json.loads(raw_headers) if isinstance(raw_headers, str) else raw_headers
-        except Exception:  # noqa: BLE001
-            pass
-
-        # 响应体
-        response_body = flow.get("response_body") or ""
-        content_type = response_headers.get("Content-Type", "application/json") if isinstance(response_headers, dict) else "application/json"
-
-        # 如果使用模板，替换变量占位符
-        if body.use_template:
-            # 检测可能的变量
-            path = re.sub(r'/[a-f0-9-]{36}(?=/|$)', '/{{id}}', path)
-            path = re.sub(r'/(\d+)(?=/|$)', '/{{id}}', path)
-            response_body = re.sub(r'"id"\s*:\s*"?(\d+|[\w-]+)"?', '"id": "{{id}}"', response_body)
-
-        rule = {
-            "id": uuid.uuid4().hex[:8],
-            "enabled": True,
-            "method": method,
-            "path": path,
-            "match_mode": "exact",
-            "status_code": flow.get("status_code") or 200,
-            "headers": response_headers,
-            "body": response_body,
-            "content_type": content_type,
-            "delay_ms": body.delay_ms if body.add_delay else 0,
-            "note": f"Converted from flow {flow.get('id')}",
-            "template_mode": body.use_template,
-        }
-        mock_rules.append(rule)
-
-    # 保存到 mock 规则
-    try:
-        mock_rules_data = settings_store.get_setting("mock_rules", [])
-        if not isinstance(mock_rules_data, list):
-            mock_rules_data = []
-        mock_rules_data.extend(mock_rules)
-        settings_store.set_setting("mock_rules", mock_rules_data)
-    except Exception as e:  # noqa: BLE001
-        return err(f"Failed to save mock rules: {e}")
-
-    return ok({"rules": mock_rules, "count": len(mock_rules)})

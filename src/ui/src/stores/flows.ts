@@ -580,6 +580,9 @@ export const useFlowsStore = defineStore('flows', () => {
     if (!sseBatch.length) return
     const batch = sseBatch
     sseBatch = []
+    // 必须同步清空索引：否则残留上一批的下标，下一批消息会按旧下标
+    // 覆盖 sseBatch 中不相关的条目（数据错乱）或写入越界位置（稀疏数组）
+    sseBatchIndex.clear()
     // ---- 修复：先在 batch 内部按 id 去重合并 ----
     // 同一 id 的多条（完整预入库 + 5字段更新 等）合并成一条，避免空行/重复行
     const byId = new Map<number, Flow>()

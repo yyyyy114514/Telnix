@@ -91,17 +91,12 @@ async def stream_logs():
         while True:
             await asyncio.sleep(_SSE_INTERVAL)
 
-            current_counter = logger.get_counter()
-            if current_counter > last_counter:
-                # 获取新增的日志条目
-                count = current_counter - last_counter
-                entries, _ = logger.get_logs(limit=10000)
-                new_entries = entries[-count:] if len(entries) >= count else entries
-
-                for entry in reversed(new_entries):
+            # 增量读取自上次推送以来的新日志（升序），并处理计数器被重置（清空日志）的情况
+            new_entries, current_counter = logger.get_entries_since(last_counter)
+            if new_entries:
+                for entry in new_entries:
                     truncated = _truncate_detail(entry)
                     yield f"event: log\ndata: {json.dumps(truncated, ensure_ascii=False)}\n\n".encode("utf-8")
-
                 last_counter = current_counter
 
             # 定期推送统计数据（用于前端统计面板）

@@ -1,5 +1,8 @@
 export default {
   common: {
+    copy: 'Copy',
+    exported: 'Exported',
+    failed: 'Operation failed',
     confirm: 'Confirm',
     cancel: 'Cancel',
     save: 'Save',
@@ -183,6 +186,25 @@ export default {
     addCondition: 'Add Condition',
   },
   analyze: {
+    anomalies: 'Anomalies',
+    copied: 'Copied',
+    copy: 'Copy',
+    copyCurl: 'Copy as cURL',
+    copyRequest: 'Copy Request',
+    copyResponse: 'Copy Response',
+    copyUrl: 'Copy URL',
+    granularity5m: '5 min',
+    ignoreByHost: 'Ignore by Host',
+    ignoreByPid: 'Ignore by PID',
+    ignoreFailed: 'Ignore failed',
+    ignoreProcess: 'Ignore Process',
+    ignoredHost: 'Host ignored',
+    ignoredPid: 'PID ignored',
+    ignoredProcess: 'Process ignored',
+    noHostInfo: 'No host info',
+    noPidInfo: 'No PID info',
+    noProcessInfo: 'No process info',
+    viewInCapture: 'View in Capture',
     statsLoadFailed: 'Stats load failed: ',
     noHost: '(No host)',
     unknownProcess: '(Unknown process)',
@@ -565,6 +587,8 @@ export default {
     variableReplaced: '(Variable replaced)',
   },
   clash: {
+    action: 'Action',
+    connectionClosed: 'Connection closed',
     integration: 'Clash Integration',
     externalModeHint: 'External mode · Traffic forwarded via Mihomo when enabled',
     refreshStatus: 'Refresh status',
@@ -809,6 +833,12 @@ export default {
     jwtTemplate: 'JWT Token',
   },
   raw: {
+    copyRequest: 'Copy Request',
+    copyResponse: 'Copy Response',
+    copyUrl: 'Copy URL',
+    ctxIgnoreByHost: 'Ignore by Host',
+    ignoredHost: 'Host ignored',
+    noHostInfo: 'No host info',
     stopCapture: 'Stop Capture',
     startCapture: 'Start Capture',
     admin: 'Administrator',
@@ -1126,6 +1156,7 @@ export default {
     helpTip: 'Tip: type any text + Enter to use as filter; up/down arrows for history',
   },
   ws: {
+    ignoreByProcess: 'Ignore by Process',
     title: 'WebSocket Messages',
     messagesCount: '{n} messages',
     aggregateHint: 'WS messages from the same Host are aggregated into one row, click to expand',
@@ -1280,8 +1311,13 @@ export default {
     recentErrors: 'Recent Errors',
     noErrors: 'No errors',
     noData: 'No data',
+    connectionLost: 'Connection lost, reconnecting...',
+    startFailed: 'Failed to start stream: ',
   },
   settings: {
+    ollamaEndpointHint: 'Ollama API endpoint, e.g. http://localhost:11434',
+    ollamaModelHint: 'Model name to use with Ollama',
+    totalUsage: 'All Time',
     settings: 'Settings',
     save: 'Save',
     reset: 'Reset',
@@ -1946,6 +1982,7 @@ export default {
   },
 
   ruleEditor: {
+    testResultTitle: 'Test Result',
     actionHint: 'modify_response: modify response content; modify_request: modify request content; mock: directly return preset response; mock_request: forward to specified server; script: handle request/response with Python script.',
     actionMockRequest: 'Request Mock',
     actionMockResponse: 'Response Mock',
@@ -2155,6 +2192,10 @@ export default {
 
   // Flow Tag System
   flowTag: {
+    allFlows: 'All Flows',
+    autoRules: 'Auto Rules',
+    byTag: 'By Tag',
+    unmarked: 'Unmarked',
     title: 'Flow Tags',
     addTag: 'Add Tag',
     editTag: 'Edit Tag',
@@ -2201,6 +2242,9 @@ export default {
 
   // Flow Bookmark System
   flowBookmark: {
+    bookmarkAdded: 'Bookmark added',
+    deleteConfirm: 'Are you sure you want to delete this bookmark?',
+    manage: 'Manage Bookmarks',
     title: 'Bookmarks',
     addBookmark: 'Add Bookmark',
     editBookmark: 'Edit Bookmark',
@@ -2244,6 +2288,7 @@ export default {
 
   // Flow Preview
   flowPreview: {
+    noPreview: 'No preview available',
     title: 'Preview',
     imagePreview: 'Image Preview',
     jsonPreview: 'JSON Preview',
@@ -2340,6 +2385,11 @@ export default {
   },
 
   record: {
+    description: 'Description',
+    enabled: 'Enabled',
+    envVars: 'Variables',
+    flowId: 'Flow ID',
+    noFlowsToExtract: 'No flows to extract variables from',
     title: 'Record & Replay',
     startRecording: 'Start Recording',
     stopRecording: 'Stop Recording',
@@ -2535,6 +2585,23 @@ export default {
   },
 
   mock: {
+    closeButton: 'Close',
+    condFieldBody: 'Body',
+    condFieldHeader: 'Header',
+    condFieldHost: 'Host',
+    condFieldMethod: 'Method',
+    condFieldPath: 'Path',
+    condFieldQuery: 'Query',
+    condFieldStatus: 'Status',
+    condOpContains: 'contains',
+    condOpEndsWith: 'ends with',
+    condOpEquals: 'equals',
+    condOpExists: 'exists',
+    condOpNotExists: 'not exists',
+    condOpRegex: 'regex',
+    condOpStartsWith: 'starts with',
+    description: 'Description',
+    importFromFlow: 'Import from Flow',
     title: 'Mock Server',
     status: 'Status',
     running: 'Running',
@@ -2717,6 +2784,7 @@ export default {
 
   // 工作流
   workflow: {
+    template: 'Template',
     title: 'Workflow',
     create: 'Create Workflow',
     name: 'Name',
@@ -2809,6 +2877,7 @@ export default {
       tagFailed: 'Tag failed: {error}',
       exportSuccess: 'Export success: {format}',
       exportFailed: 'Export failed: {error}',
+      exportEmpty: 'Export returned empty content',
       deleted: 'Deleted',
       deleteFailed: 'Delete failed: {error}',
       modified: 'Modified',

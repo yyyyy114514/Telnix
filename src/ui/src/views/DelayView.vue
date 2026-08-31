@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useFlowsStore } from '../stores/flows'
-import { ArrowLeft, Timer, Plus, DataLine, Setting, List } from '@element-plus/icons-vue'
+import { ArrowLeft, Timer, Plus, DataLine, Setting, List, Loading } from '@element-plus/icons-vue'
+import { api } from '../api/client'
 import type { DelayRule, DelayHitLog, DelayHeatmapData, DelayJitterConfig } from '../api/client'
 
 const router = useRouter()
@@ -58,9 +58,7 @@ const phaseLabel = computed<Record<string, string>>(() => ({
   response: t('delay.phaseResponse'),
 }))
 
-function unwrap<T>(res: any, fallback: T): T {
-  return res?.data?.code === 0 ? (res.data.data as T) : fallback
-}
+// 统一走 api 封装（拦截器已解包 {code, data, msg}），不再用裸 axios + 手动 unwrap
 
 // 预填表单（从 FlowList 右键菜单跳转时）
 const prefillForm = () => {
@@ -81,8 +79,7 @@ const prefillForm = () => {
 async function load() {
   loading.value = true
   try {
-    const res = await axios.get('/api/delay-rules')
-    rules.value = unwrap<DelayRule[]>(res, [])
+    rules.value = await api.getDelayRules()
   } catch (e: any) {
     ElMessage.error(t('delay.loadFailed') + (e?.message || e))
   } finally {
@@ -92,8 +89,7 @@ async function load() {
 
 async function loadHitLogs() {
   try {
-    const res = await axios.get('/api/delay-rules/hits', { params: { limit: 100 } })
-    hitLogs.value = unwrap<DelayHitLog[]>(res, [])
+    hitLogs.value = await api.getDelayRuleHits(100)
   } catch (e: any) {
     // 静默失败
   }
@@ -102,8 +98,7 @@ async function loadHitLogs() {
 async function loadHeatmap() {
   heatmapLoading.value = true
   try {
-    const res = await axios.get('/api/delay-rules/heatmap', { params: { bucket_seconds: 300, top_n: 20 } })
-    const data = unwrap<DelayHeatmapData>(res, { buckets: [], host_distribution: [] })
+    const data = await api.getDelayHeatmap({ bucket_seconds: 300, top_n: 20 })
     heatmapData.value = data
     heatmapBuckets.value = data.buckets || []
     hostDistribution.value = data.host_distribution || []
@@ -116,8 +111,7 @@ async function loadHeatmap() {
 
 async function loadJitterConfig() {
   try {
-    const res = await axios.get('/api/delay-rules/jitter-config')
-    jitterConfig.value = unwrap<DelayJitterConfig>(res, { enabled: false, base_ms: 300, variance_ms: 50 })
+    jitterConfig.value = await api.getDelayJitterConfig()
   } catch (e: any) {
     // 使用默认值
   }
@@ -125,7 +119,8 @@ async function loadJitterConfig() {
 
 async function saveJitterConfig() {
   try {
-    await axios.put('/api/delay-rules/jitter-config', jitterConfig.value)
+    // 后端 /delay-rules/jitter-config 只注册了 POST（原 axios.put 会 405）
+    await api.setDelayJitterConfig(jitterConfig.value)
     ElMessage.success(t('delay.saveSuccess'))
   } catch (e: any) {
     ElMessage.error(t('delay.saveFailed') + (e?.message || e))
@@ -134,7 +129,7 @@ async function saveJitterConfig() {
 
 async function clearHitLogs() {
   try {
-    await axios.delete('/api/delay-rules/hits')
+    await api.clearDelayRuleHits()
     hitLogs.value = []
     ElMessage.success(t('delay.hitLogsCleared'))
   } catch (e: any) {
@@ -153,8 +148,6 @@ function openNew() {
     delay_ms: 500,
     host: '',
     note: '',
-    jitter_base: undefined,
-    jitter_variance: undefined,
   }
   // 应用预填数据
   prefillForm()
@@ -172,8 +165,6 @@ function openEdit(r: DelayRule) {
     delay_ms: r.delay_ms,
     host: r.host,
     note: r.note,
-    jitter_base: r.jitter_base,
-    jitter_variance: r.jitter_variance,
   }
   dialogVisible.value = true
 }
@@ -186,8 +177,6 @@ const form = ref<DelayRule>({
   delay_ms: 500,
   host: '',
   note: '',
-  jitter_base: undefined,
-  jitter_variance: undefined,
 })
 
 async function submit() {
@@ -198,14 +187,12 @@ async function submit() {
   submitting.value = true
   try {
     if (editing.value && editing.value.id) {
-      const res = await axios.put(`/api/delay-rules/${editing.value.id}`, form.value)
-      const updated = unwrap<DelayRule>(res, form.value)
+      const updated = await api.updateDelayRule(editing.value.id, form.value)
       const idx = rules.value.findIndex(x => x.id === editing.value!.id)
       if (idx >= 0) rules.value[idx] = updated
       ElMessage.success(t('delay.saveSuccess'))
     } else {
-      const res = await axios.post('/api/delay-rules', form.value)
-      const created = unwrap<DelayRule>(res, form.value)
+      const created = await api.createDelayRule(form.value)
       rules.value.push(created)
       ElMessage.success(t('delay.saveSuccess'))
     }
@@ -228,7 +215,7 @@ async function deleteRule(r: DelayRule) {
     return
   }
   try {
-    await axios.delete(`/api/delay-rules/${r.id}`)
+    await api.deleteDelayRule(r.id!)
     rules.value = rules.value.filter(x => x.id !== r.id)
     ElMessage.success(t('delay.deleted'))
   } catch (e: any) {
@@ -239,8 +226,7 @@ async function deleteRule(r: DelayRule) {
 async function toggleRule(r: DelayRule) {
   const prev = r.enabled
   try {
-    const res = await axios.post(`/api/delay-rules/${r.id}/toggle`)
-    const updated = unwrap<DelayRule>(res, r)
+    const updated = await api.toggleDelayRule(r.id!)
     r.enabled = updated.enabled
   } catch (e: any) {
     r.enabled = prev

@@ -231,8 +231,26 @@ async function copyLogRow(e: LogEntry) {
 
 const logListRef = ref<HTMLElement | null>(null)
 
+// 用户是否希望保持流式（独立于连接状态，供断线重连判断）
+let wantStreaming = false
+let reconnectTimer: number | null = null
+
+// SSE 推送的日志也要过一遍当前筛选条件
+function matchesFilters(entry: LogEntry): boolean {
+  if (levelFilter.value && entry.level !== levelFilter.value) return false
+  if (categoryFilter.value && entry.category !== categoryFilter.value) return false
+  const kw = keyword.value?.trim().toLowerCase()
+  if (kw) {
+    const msg = (entry.message || '').toLowerCase()
+    const detail = (entry.detail || '').toLowerCase()
+    if (!msg.includes(kw) && !detail.includes(kw)) return false
+  }
+  return true
+}
+
 function startStream() {
   if (eventSource) return
+  wantStreaming = true
 
   try {
     eventSource = api.createLogStream()
@@ -240,13 +258,6 @@ function startStream() {
     eventSource.addEventListener('log', (e: MessageEvent) => {
       try {
         const entry: LogEntry = JSON.parse(e.data)
-        // 添加到列表顶部（最新在前）
-        entries.value.unshift(entry)
-        // 限制本地缓存数量
-        if (entries.value.length > 500) {
-          entries.value = entries.value.slice(0, 500)
-        }
-        total.value++
 
         // 收集新分类
         if (entry.category && !categories.value.includes(entry.category)) {
@@ -262,13 +273,23 @@ function startStream() {
           }
         }
 
-        // 自动滚动
-        if (autoScroll.value) {
-          nextTick(() => {
-            if (logListRef.value) {
-              logListRef.value.scrollTop = 0
-            }
-          })
+        // 仅当通过当前筛选条件时才加入列表（最新在前）
+        if (matchesFilters(entry)) {
+          entries.value.unshift(entry)
+          // 限制本地缓存数量
+          if (entries.value.length > 500) {
+            entries.value = entries.value.slice(0, 500)
+          }
+          total.value++
+
+          // 自动滚动
+          if (autoScroll.value) {
+            nextTick(() => {
+              if (logListRef.value) {
+                logListRef.value.scrollTop = 0
+              }
+            })
+          }
         }
       } catch (err) {
         console.error('Failed to parse log entry:', err)
@@ -285,14 +306,17 @@ function startStream() {
 
     eventSource.onerror = (e) => {
       console.error('SSE error:', e)
-      streamError.value = 'Connection lost, reconnecting...'
+      streamError.value = t('logs.connectionLost')
+      // 先记录重连意图（stopStream 会重置 wantStreaming），再关闭旧连接
+      const shouldReconnect = wantStreaming
       stopStream()
-      // 5秒后自动重连
-      setTimeout(() => {
-        if (isStreaming.value) {
-          startStream()
-        }
-      }, 5000)
+      if (shouldReconnect) {
+        wantStreaming = true
+        if (reconnectTimer) clearTimeout(reconnectTimer)
+        reconnectTimer = window.setTimeout(() => {
+          if (wantStreaming) startStream()
+        }, 5000)
+      }
     }
 
     eventSource.onopen = () => {
@@ -300,12 +324,17 @@ function startStream() {
       streamError.value = ''
     }
   } catch (e: any) {
-    streamError.value = 'Failed to start stream: ' + (e?.message || e)
+    streamError.value = t('logs.startFailed') + (e?.message || e)
     console.error('Failed to start SSE stream:', e)
   }
 }
 
 function stopStream() {
+  wantStreaming = false
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
   if (eventSource) {
     eventSource.close()
     eventSource = null
@@ -327,33 +356,30 @@ function toggleAutoScroll() {
 
 // ============ 生命周期 ============
 
+function onVisibilityChange() {
+  if (!document.hidden) {
+    // 页面重新可见：若用户未手动停止且连接已断，则恢复
+    if (wantStreaming && !eventSource) {
+      startStream()
+    }
+  }
+}
+
 onMounted(() => {
   loadLogs()
   loadStats()
   startStream()
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
   stopStream()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
-// 监听筛选变化
+// 监听筛选变化：无论是否流式都重新加载，保证筛选结果准确
 watch([levelFilter, categoryFilter, keyword], () => {
-  if (!isStreaming.value) {
-    loadLogs()
-  }
-})
-
-// 页面可见性变化时管理 SSE 连接
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    // 页面不可见时可以暂停 SSE 节省资源
-  } else {
-    // 页面可见时恢复
-    if (!isStreaming.value && isStreaming.value !== undefined) {
-      startStream()
-    }
-  }
+  loadLogs()
 })
 </script>
 

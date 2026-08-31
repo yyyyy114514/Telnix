@@ -478,7 +478,22 @@ export const useWorkflowStore = defineStore('workflow', () => {
           const format = step.params.format || 'har'
           try {
             const sessionId = 0 // 当前会话
-            const blob = await api.exportSession(sessionId, format)
+            // exportSession 返回 {format, content, encoding?}（content 为字符串或对象），
+            // 需自行构造 Blob 下载（与 CaptureView 的导出逻辑一致）
+            const res = await api.exportSession(sessionId, format)
+            const content = (res as any)?.content ?? (res as any)?.data
+            if (content === undefined) {
+              throw new Error(i18n.global.t('workflow.log.exportEmpty'))
+            }
+            const mimeMap: Record<string, string> = {
+              har: 'application/json', json: 'application/json', csv: 'text/csv',
+              'python-requests': 'text/x-python', postman: 'application/json',
+              curl: 'application/x-sh',
+            }
+            const blob = new Blob(
+              [typeof content === 'string' ? content : JSON.stringify(content, null, 2)],
+              { type: mimeMap[format] || 'text/plain' },
+            )
 
             // 下载文件
             const extMap: Record<string, string> = {
@@ -486,7 +501,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
               'python-requests': 'py', postman: 'json', curl: 'sh',
             }
             const ext = extMap[format] || 'txt'
-            const url = URL.createObjectURL(blob as Blob)
+            const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
             a.href = url
             a.download = `telnix_export_${Date.now()}.${ext}`

@@ -35,6 +35,7 @@ from . import settings_store
 
 DEFAULT_PORT = 18902
 _MOCK_RULES_KEY = "mock_rules"
+_MOCK_MULTI_MATCH_KEY = "mock_multi_match_rules"
 _MAX_LOGS = 100
 
 # 模块级请求日志（最近 100 条，存内存）
@@ -55,6 +56,81 @@ def _get_rules() -> list[dict]:
 def _save_rules(rules: list[dict]) -> None:
     """写回 mock 规则列表到 settings.json。"""
     settings_store.set_setting(_MOCK_RULES_KEY, rules)
+
+
+def get_multi_match_rules() -> list[dict]:
+    """从 settings.json 读取多条件匹配规则列表。"""
+    data = settings_store.get_setting(_MOCK_MULTI_MATCH_KEY, [])
+    return data if isinstance(data, list) else []
+
+
+def save_multi_match_rules(rules: list[dict]) -> None:
+    """写回多条件匹配规则列表到 settings.json。"""
+    settings_store.set_setting(_MOCK_MULTI_MATCH_KEY, rules)
+
+
+def render_template(text: str, variables: dict[str, str]) -> tuple[str, list[str]]:
+    """把 ``{{var}}`` 占位符替换为变量值，返回 (渲染结果, 未定义变量名列表)。"""
+    import string
+
+    errors: list[str] = []
+
+    class _SafeDict(dict):
+        def __missing__(self, key: str) -> str:
+            errors.append(key)
+            return ""
+
+    try:
+        result = string.Template(text or "").safe_substitute(_SafeDict(variables))
+    except Exception:  # noqa: BLE001
+        return text or "", errors
+    # 同时支持 {{var}} 形式
+    def _repl(m: "re.Match[str]") -> str:
+        key = m.group(1).strip()
+        if key in variables:
+            return str(variables[key])
+        errors.append(key)
+        return m.group(0)
+
+    result = re.sub(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}", _repl, result)
+    return result, errors
+
+
+def _cond_match(cond: dict, ctx: dict) -> bool:
+    """评估单个多条件匹配条件（所有字段均须满足才算命中）。"""
+    field = (cond.get("field") or "").lower()
+    op = (cond.get("operator") or "equals")
+    if field == "header":
+        target = str(ctx["headers"].get((cond.get("header_name") or "").lower(), ""))
+    else:
+        target = str(ctx.get(field, ""))
+    value = str(cond.get("value") or "")
+    if op == "equals":
+        return target == value
+    if op == "contains":
+        return value in target
+    if op == "startsWith":
+        return target.startswith(value)
+    if op == "endsWith":
+        return target.endswith(value)
+    if op == "regex":
+        try:
+            return re.search(value, target) is not None
+        except re.error:
+            return False
+    if op == "exists":
+        return bool(target)
+    if op == "notExists":
+        return not target
+    return False
+
+
+def _match_multi_rule(rule: dict, ctx: dict) -> bool:
+    """规则的所有 conditions 全部满足才命中。"""
+    conditions = rule.get("conditions") or []
+    if not conditions:
+        return False
+    return all(_cond_match(c, ctx) for c in conditions)
 
 
 def _match_path(path: str, pattern: str, mode: str) -> bool:
@@ -166,6 +242,15 @@ class MockServer:
                 return r
         return None
 
+    def _match_multi(self, ctx: dict) -> dict | None:
+        """多条件匹配：按 priority 降序尝试启用的规则，返回首个命中者。"""
+        rules = [r for r in get_multi_match_rules() if r.get("enabled")]
+        rules.sort(key=lambda r: int(r.get("priority") or 0), reverse=True)
+        for r in rules:
+            if _match_multi_rule(r, ctx):
+                return r
+        return None
+
     def _log_request(self, entry: dict) -> None:
         """记录一条请求日志到内存环形缓冲。"""
         with _logs_lock:
@@ -202,52 +287,98 @@ def _make_handler(server: "MockServer"):
             t0 = time.time()
             server._incr_count()
             # 消费请求体
-            self._read_body()
+            raw_body = self._read_body()
 
             sp = urlsplit(self.path)
             path_only = sp.path or "/"
             full_path = self.path
             method = self.command
 
-            rule = server._match(method, path_only)
-            if rule is None:
-                body = b"No mock rule matched"
-                self.send_response(404)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                try:
-                    self.wfile.write(body)
-                except Exception:  # noqa: BLE001
-                    pass
-                server._log_request({
-                    "timestamp": datetime.now().isoformat(),
-                    "method": method,
-                    "path": full_path,
-                    "matched_rule_id": None,
-                    "matched_rule_note": "",
-                    "status_code": 404,
-                    "duration_ms": int((time.time() - t0) * 1000),
-                })
-                return
-
-            # 延迟响应
+            # 构建多条件匹配上下文
             try:
-                delay_ms = int(rule.get("delay_ms") or 0)
-            except (TypeError, ValueError):
-                delay_ms = 0
+                body_text = raw_body.decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                body_text = ""
+            ctx = {
+                "method": method,
+                "path": path_only,
+                "host": self.headers.get("Host", ""),
+                "query": sp.query or "",
+                "body": body_text,
+                "headers": {k.lower(): v for k, v in self.headers.items()},
+            }
+
+            # 多条件规则优先（有 priority），未命中再走简单规则
+            rule = server._match_multi(ctx)
+            if rule is not None:
+                resp = rule.get("mock_response") or {}
+                status = int(resp.get("status_code") or 200)
+                headers = resp.get("headers") or {}
+                if not isinstance(headers, dict):
+                    headers = {}
+                body_str = str(resp.get("body") or "")
+                if resp.get("template_mode"):
+                    variables: dict[str, str] = {}
+                    # 从 query / JSON body 提取变量值
+                    from urllib.parse import parse_qs
+                    for k, vals in parse_qs(sp.query or "").items():
+                        if vals:
+                            variables[k] = vals[0]
+                    try:
+                        import json as _json
+                        obj = _json.loads(body_text)
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                variables.setdefault(str(k), str(v))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    body_str, _errs = render_template(body_str, variables)
+                body_bytes = body_str.encode("utf-8")
+                try:
+                    delay_ms = int(resp.get("delay_ms") or 0)
+                except (TypeError, ValueError):
+                    delay_ms = 0
+            else:
+                rule = server._match(method, path_only)
+                if rule is None:
+                    body = b"No mock rule matched"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(body)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    server._log_request({
+                        "timestamp": datetime.now().isoformat(),
+                        "method": method,
+                        "path": full_path,
+                        "matched_rule_id": None,
+                        "matched_rule_note": "",
+                        "status_code": 404,
+                        "duration_ms": int((time.time() - t0) * 1000),
+                    })
+                    return
+
+                # 延迟响应
+                try:
+                    delay_ms = int(rule.get("delay_ms") or 0)
+                except (TypeError, ValueError):
+                    delay_ms = 0
+
+                try:
+                    status = int(rule.get("status_code") or 200)
+                except (TypeError, ValueError):
+                    status = 200
+                headers = rule.get("headers") or {}
+                if not isinstance(headers, dict):
+                    headers = {}
+                body_bytes = (rule.get("body") or "").encode("utf-8")
+
             if delay_ms > 0:
                 time.sleep(delay_ms / 1000.0)
-
-            try:
-                status = int(rule.get("status_code") or 200)
-            except (TypeError, ValueError):
-                status = 200
-            headers = rule.get("headers") or {}
-            if not isinstance(headers, dict):
-                headers = {}
-            body_bytes = (rule.get("body") or "").encode("utf-8")
 
             self.send_response(status)
             has_ct = any(k.lower() == "content-type" for k in headers)

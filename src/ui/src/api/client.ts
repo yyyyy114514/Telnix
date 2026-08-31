@@ -14,8 +14,6 @@ export interface DelayRule {
   delay_ms: number
   host: string
   note: string
-  jitter_base?: number
-  jitter_variance?: number
 }
 
 /** 延迟规则命中日志 */
@@ -123,15 +121,13 @@ export interface MockRule {
 
 /** Mock 日志条目 */
 export interface MockLog {
-  id: number
   timestamp: string
   matched_rule_id: string | null
+  matched_rule_note: string
   method: string
   path: string
   status_code: number
-  response_time_ms: number
-  request_body_size: number
-  response_body_size: number
+  duration_ms: number
 }
 
 /** Mock 服务状态 */
@@ -192,12 +188,14 @@ export interface RecordCondition {
 /** 断言规则 */
 export interface AssertionRule {
   id?: string
-  name: string
-  field: 'status_code' | 'response_body' | 'response_header' | 'request_header'
-  operator: 'equals' | 'contains' | 'regex' | 'greater' | 'less'
+  name?: string
+  field: 'status_code' | 'response_body' | 'response_time' | `response_header.${string}` | `request_header.${string}`
+  operator: 'equals' | 'not_equals' | 'contains' | 'not_contains' | 'regex' | 'exists' | 'not_exists' | 'greater' | 'less'
   expected_value: string
   enabled: boolean
-  note: string
+  note?: string
+  script_id?: string | null
+  flow_id?: number | null
 }
 
 /** 后端统一响应格式 */
@@ -823,7 +821,7 @@ client.interceptors.response.use(
     // HTTP 4xx/5xx 错误：检查是否为 WinDivert 需要确认（403 + need_ack=true）
     const errData = error?.response?.data
     if (errData && errData.need_ack === true) {
-      return _handleWindivertAck(error.response, errData.msg || '需要确认 WinDivert 风险提示')
+      return _handleWindivertAck(error.response, errData.msg || i18n.global.t('api.needWindivertAck'))
     }
     const msg = errData?.msg
     if (msg) {
@@ -856,7 +854,7 @@ async function _handleWindivertAck(resp: AxiosResponse, msg: string): Promise<an
   // 弹全局对话框，等待用户响应
   const accepted = await waitForWindivertAck(fullMsg, briefMsg)
   if (!accepted) {
-    return Promise.reject(new Error(i18n.global.t('api.userCancelledWindivertAck')))
+    return Promise.reject(new Error(i18n.global.t('api.windivertAckCancelled')))
   }
   // 用户确认：调 ack API 持久化（永久不再提示）
   try {
@@ -1192,39 +1190,52 @@ export const api = {
         const reader = resp.body?.getReader()
         const decoder = new TextDecoder()
         let result = ''
+        // SSE 行缓冲：fetch 的 chunk 边界可能把一行 data 切成两半，
+        // 必须跨 read() 累积并按完整行处理，否则半行 JSON 会被当纯文本拼进结果
+        let lineBuf = ''
         if (!reader) {
           reject(new Error('No response body'))
           return
         }
+        const processLine = (line: string): boolean => {
+          if (!line.startsWith('data: ')) return true
+          const data = line.slice(6)
+          if (data === '[DONE]') return false
+          try {
+            const parsed = JSON.parse(data)
+            // 后端失败时推送 {error: ...}，随后 [DONE]
+            if (parsed.error) {
+              reject(new Error(parsed.error))
+              return false
+            }
+            if (parsed.type === 'content' && typeof parsed.content === 'string') {
+              result += parsed.content
+              onChunk(parsed.content)
+            }
+          } catch {
+            // 非 JSON，当纯文本处理
+            result += data
+            onChunk(data)
+          }
+          return true
+        }
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
-          const text = decoder.decode(value, { stream: true })
-          // SSE format: data: {...} or data: content
-          for (const line of text.split('\n')) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6)
-              if (data === '[DONE]') {
-                resolve(result)
-                return
-              }
-              try {
-                const parsed = JSON.parse(data)
-                if (parsed.content) {
-                  result += parsed.content
-                  onChunk(parsed.content)
-                }
-                if (parsed.done) {
-                  resolve(result)
-                  return
-                }
-              } catch {
-                // 非 JSON，当纯文本处理
-                result += data
-                onChunk(data)
-              }
+          lineBuf += decoder.decode(value, { stream: true })
+          // SSE format: data: {...}\n\n —— 只处理已完整的行，残余留到下一轮
+          const lines = lineBuf.split('\n')
+          lineBuf = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!processLine(line)) {
+              resolve(result)
+              return
             }
           }
+        }
+        if (lineBuf && !processLine(lineBuf)) {
+          resolve(result)
+          return
         }
         resolve(result)
       } catch (e) {
@@ -1249,7 +1260,7 @@ export const api = {
 
   // 导出
   exportSession: (sessionId: number, format: string) =>
-    post<{ url?: string; path?: string; data?: any }>(`/export/${sessionId}`, { format }),
+    post<{ format: string; content: string; encoding?: string }>(`/export/${sessionId}`, { format }),
 
   // 导入流量（JSON 或 HAR 格式）
   importFlows: (body: { format: string; content: string; session_name?: string }) =>
@@ -1319,7 +1330,7 @@ export const api = {
   setCertExpiryAlert: (enabled: boolean) => put('/cert/expiry-alert', { enabled }),
   regenerateCert: () => post('/cert/regenerate'),
   // 手机抓包配置信息（本机 IP、代理端口、证书下载 URL）
-  mobileSetup: () => get<{ lan_ip: string; proxy_host: string; proxy_port: number; api_port: number; cert_download_url: string }>('/mobile/setup'),
+  mobileSetup: () => get<{ lan_ip: string; proxy_host: string; proxy_port: number; api_port: number; cert_download_url: string; android_cert_url: string }>('/mobile/setup'),
 
   // 弱网模拟（Throttle）
   getThrottle: () => get<{ enabled: boolean; latency_ms: number; bps_kbps: number; drop_pct: number }>('/throttle'),
@@ -1440,7 +1451,7 @@ export const api = {
   proxyToolsImport: (body: { rules: any; mode?: string }) =>
     post<{ imported: number; skipped: number; conflicts: any[]; details: Record<string, number> }>('/proxy-tools/import', body),
   proxyToolsValidateImport: (body: { rules: any }) =>
-    get<{ valid: boolean; conflicts: any[]; warnings: any[] }>('/proxy-tools/validate-import', body),
+    post<{ valid: boolean; conflicts: any[]; warnings: any[] }>('/proxy-tools/validate-import', body),
 
   // Clash/Mihomo 集成
   clashStatus: () => get<any>('/clash/status'),
@@ -1554,6 +1565,13 @@ export const api = {
   deleteAllCookies: () => del<{ flows_updated: number; cleared: boolean }>('/cookies'),
 
   // ========== 延迟规则增强 ==========
+  // 延迟规则 CRUD（与后端 /delay-rules 对齐；此前 DelayView 直接用 axios 裸调，
+  // 其中 jitter-config 保存误用 PUT 导致后端 405，统一走 api 封装修复）
+  getDelayRules: () => get<DelayRule[]>('/delay-rules'),
+  createDelayRule: (rule: DelayRule) => post<DelayRule>('/delay-rules', rule),
+  updateDelayRule: (id: string, rule: DelayRule) => put<DelayRule>(`/delay-rules/${id}`, rule),
+  deleteDelayRule: (id: string) => del(`/delay-rules/${id}`),
+  toggleDelayRule: (id: string) => post<DelayRule>(`/delay-rules/${id}/toggle`),
   // 从流量生成延迟规则
   createDelayRuleFromFlow: (flowId: number, phase: 'request' | 'response', delayMs?: number) =>
     post<DelayRule>('/delay-rules/from-flow', { flow_id: flowId, phase, delay_ms: delayMs }),
@@ -1565,7 +1583,7 @@ export const api = {
     get<DelayHeatmapData>('/delay-rules/heatmap', params),
   // 梯度延迟配置
   getDelayJitterConfig: () => get<DelayJitterConfig>('/delay-rules/jitter-config'),
-  setDelayJitterConfig: (config: DelayJitterConfig) => put('/delay-rules/jitter-config', config),
+  setDelayJitterConfig: (config: DelayJitterConfig) => post('/delay-rules/jitter-config', config),
 
   // ========== Mock 增强 ==========
   // 动态响应模板
@@ -1580,7 +1598,7 @@ export const api = {
   deleteMockMultiMatchRule: (id: string) => del(`/mock/multi-match-rules/${id}`),
   // Mock + 延迟联调：预览模板渲染结果
   previewMockTemplate: (templateId: string, variables?: Record<string, string>) =>
-    post<{ rendered_body: string; rendered_headers: Record<string, string>; errors: string[] }>('/mock/templates/preview', { template_id: templateId, variables }),
+    post<{ rendered_body: string; rendered_headers: Record<string, string>; errors: string[] }>(`/mock/templates/${templateId}/preview`, { variables }),
   // Mock 模板变量提取（从流量自动提取可用变量）
   extractMockTemplateVariables: (flowId: number) => get<{ variables: TemplateVariable[] }>(`/mock/templates/extract-variables/${flowId}`),
 
@@ -1592,12 +1610,6 @@ export const api = {
   createReplayEnvironment: (env: ReplayEnvironment) => post<ReplayEnvironment>('/record-scripts/environments', env),
   updateReplayEnvironment: (id: string, env: ReplayEnvironment) => put(`/record-scripts/environments/${id}`, env),
   deleteReplayEnvironment: (id: string) => del(`/record-scripts/environments/${id}`),
-  // 带环境变量的回放
-  replayWithEnvironment: (scriptId: string, environmentId: string, conditions?: RecordCondition[]) =>
-    post<ReplayResponse>('/record-scripts/replay-with-env', { script_id: scriptId, environment_id: environmentId, conditions }),
-  // 录制 → Mock 自举：从录制脚本生成 Mock 规则
-  bootstrapMockFromScript: (scriptId: string, options?: { include_delay?: boolean; extract_variables?: boolean }) =>
-    post<{ mock_rules: MockRule[]; variable_extractions: TemplateVariable[] }>('/record-scripts/bootstrap-mock', { script_id: scriptId, options }),
   // 条件执行规则
   getReplayConditionRules: (scriptId: string) => get<ReplayConditionRule[]>(`/record-scripts/${scriptId}/condition-rules`),
   createReplayConditionRule: (scriptId: string, rule: ReplayConditionRule) =>
@@ -1611,12 +1623,15 @@ export const api = {
     post<{ variables: ScriptVariable[]; count: number }>(`/record-scripts/${scriptId}/variables/extract`, { flow_ids: flowIds }),
   // 断言规则
   listAssertions: () => get<AssertionRule[]>('/record-scripts/assertions'),
+  listScriptAssertions: (scriptId: string) => get<AssertionRule[]>(`/record-scripts/${scriptId}/assertions`),
   createAssertion: (rule: AssertionRule) => post<AssertionRule>('/record-scripts/assertions', rule),
+  createScriptAssertion: (scriptId: string, rule: AssertionRule) =>
+    post<AssertionRule>(`/record-scripts/${scriptId}/assertions`, rule),
   updateAssertion: (id: string, rule: AssertionRule) => put(`/record-scripts/assertions/${id}`, rule),
   deleteAssertion: (id: string) => del(`/record-scripts/assertions/${id}`),
-  // 增强回放（带环境、断言、条件）
+  // 增强回放（带环境、断言、条件；environment_id 为查询参数）
   replayScriptEnhanced: (scriptId: string, environmentId?: string) =>
-    post<ReplayResponse>(`/record-scripts/${scriptId}/replay-enhanced`, { environment_id: environmentId }),
+    post<ReplayResponse>(`/record-scripts/${scriptId}/replay-enhanced${environmentId ? `?environment_id=${encodeURIComponent(environmentId)}` : ''}`),
   // 录制 → Mock 转换
   convertToMock: (flowIds: number[], options?: { use_template?: boolean; add_delay?: boolean; delay_ms?: number }) =>
     post<{ rules: MockRule[]; count: number }>('/record-scripts/convert-to-mock', { flow_ids: flowIds, ...options }),

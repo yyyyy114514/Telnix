@@ -246,3 +246,260 @@ async def import_from_flow(body: ImportFlowReq):
     rules.append(data)
     _save_rules(rules)
     return ok(data)
+
+
+# ---------- 动态响应模板 ----------
+
+_MOCK_TEMPLATES_KEY = "mock_templates"
+
+
+class TemplateVariableModel(BaseModel):
+    """模板变量定义。"""
+
+    name: str
+    description: str = ""
+    type: str = "string"  # string | number | boolean | json | regex
+    default_value: str = ""
+    extraction_pattern: str = ""
+    from_flow_field: str = ""
+
+
+class MockTemplateModel(BaseModel):
+    """动态响应模板。"""
+
+    id: str | None = None
+    name: str
+    description: str = ""
+    variables: list[TemplateVariableModel] = []
+    body_template: str = ""
+    headers_template: str = ""
+    status_code: int = 200
+    content_type: str = "application/json"
+    delay_ms: int = 0
+
+
+class PreviewReq(BaseModel):
+    """模板预览请求。"""
+
+    variables: dict[str, str] = {}
+
+
+def _get_templates() -> list[dict]:
+    data = settings_store.get_setting(_MOCK_TEMPLATES_KEY, [])
+    return data if isinstance(data, list) else []
+
+
+def _save_templates(templates: list[dict]) -> None:
+    settings_store.set_setting(_MOCK_TEMPLATES_KEY, templates)
+
+
+def _template_to_dict(tpl: MockTemplateModel, tpl_id: str | None = None) -> dict:
+    data = tpl.model_dump()
+    data["id"] = tpl_id or data.get("id") or uuid.uuid4().hex[:8]
+    return data
+
+
+@router.get("/mock/templates")
+async def list_templates():
+    """获取动态响应模板列表。"""
+    return ok(_get_templates())
+
+
+@router.post("/mock/templates")
+async def create_template(tpl: MockTemplateModel):
+    """新增动态响应模板。"""
+    data = _template_to_dict(tpl)
+    templates = _get_templates()
+    templates.append(data)
+    _save_templates(templates)
+    return ok(data)
+
+
+@router.put("/mock/templates/{tpl_id}")
+async def update_template(tpl_id: str, tpl: MockTemplateModel):
+    """更新指定模板。"""
+    templates = _get_templates()
+    for i, t in enumerate(templates):
+        if t.get("id") == tpl_id:
+            data = _template_to_dict(tpl, tpl_id=tpl_id)
+            templates[i] = data
+            _save_templates(templates)
+            return ok(data)
+    return err("Mock template not found")
+
+
+@router.delete("/mock/templates/{tpl_id}")
+async def delete_template(tpl_id: str):
+    """删除指定模板。"""
+    templates = _get_templates()
+    new_templates = [t for t in templates if t.get("id") != tpl_id]
+    if len(new_templates) == len(templates):
+        return err("Mock template not found")
+    _save_templates(new_templates)
+    return ok({"id": tpl_id})
+
+
+@router.post("/mock/templates/{tpl_id}/preview")
+async def preview_template(tpl_id: str, body: PreviewReq):
+    """用给定变量渲染模板，预览最终响应。"""
+    templates = _get_templates()
+    tpl = next((t for t in templates if t.get("id") == tpl_id), None)
+    if tpl is None:
+        return err("Mock template not found")
+
+    # 变量值：请求提供 > 模板默认值
+    variables: dict[str, str] = {}
+    for v in tpl.get("variables") or []:
+        if v.get("name"):
+            variables[v["name"]] = v.get("default_value") or ""
+
+    rendered_body, missing_body = _mock.render_template(
+        tpl.get("body_template") or "", {**variables, **(body.variables or {})}
+    )
+    rendered_headers, missing_headers = _mock.render_template(
+        tpl.get("headers_template") or "", {**variables, **(body.variables or {})}
+    )
+
+    # headers_template 按行解析为 dict
+    rendered_headers_dict: dict[str, str] = {}
+    for line in rendered_headers.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        rendered_headers_dict[k.strip()] = v.strip()
+
+    errors = [f"undefined variable: {name}" for name in missing_body + missing_headers]
+    return ok({
+        "rendered_body": rendered_body,
+        "rendered_headers": rendered_headers_dict,
+        "errors": errors,
+        "status_code": tpl.get("status_code") or 200,
+        "content_type": tpl.get("content_type") or "application/json",
+        "delay_ms": tpl.get("delay_ms") or 0,
+    })
+
+
+@router.get("/mock/templates/extract-variables/{flow_id}")
+async def extract_template_variables(flow_id: int):
+    """从流量中提取可用作模板变量的字段。"""
+    flow = db.get_flow(flow_id)
+    if not flow:
+        return err("Flow not found")
+
+    variables: list[dict] = [
+        {"name": "method", "description": "HTTP method", "type": "string",
+         "default_value": flow.get("method") or "", "extraction_pattern": "", "from_flow_field": "method"},
+        {"name": "path", "description": "Request path", "type": "string",
+         "default_value": flow.get("path") or "", "extraction_pattern": "", "from_flow_field": "path"},
+        {"name": "host", "description": "Request host", "type": "string",
+         "default_value": flow.get("host") or "", "extraction_pattern": "", "from_flow_field": "host"},
+        {"name": "status_code", "description": "Response status code", "type": "number",
+         "default_value": str(flow.get("status_code") or ""), "extraction_pattern": "", "from_flow_field": "status_code"},
+    ]
+
+    # 响应体为 JSON 时提取顶层字段
+    try:
+        obj = _json.loads(flow.get("response_body") or "")
+        if isinstance(obj, dict):
+            for k, v in list(obj.items())[:20]:
+                variables.append({
+                    "name": f"response_{k}", "description": f"Response JSON field: {k}",
+                    "type": "string", "default_value": str(v)[:200],
+                    "extraction_pattern": "", "from_flow_field": f"response_body.{k}",
+                })
+    except Exception:  # noqa: BLE001
+        pass
+
+    return ok({"variables": variables})
+
+
+# ---------- 多条件匹配规则 ----------
+
+class MockMatchConditionModel(BaseModel):
+    """匹配条件。"""
+
+    field: str = "method"  # method | path | host | header | body | query | status
+    operator: str = "equals"  # equals | contains | startsWith | endsWith | regex | exists | notExists
+    value: str = ""
+    header_name: str = ""
+
+
+class MockResponseModel(BaseModel):
+    """命中后的响应模板。"""
+
+    status_code: int = 200
+    headers: dict[str, str] = {}
+    body: str = ""
+    delay_ms: int = 0
+    template_mode: bool = False
+
+
+class MockMultiMatchRuleModel(BaseModel):
+    """多条件匹配规则。"""
+
+    id: str | None = None
+    enabled: bool = True
+    name: str
+    conditions: list[MockMatchConditionModel] = []
+    mock_response: MockResponseModel = MockResponseModel()
+    priority: int = 0
+    note: str = ""
+
+
+def _multi_rule_to_dict(rule: MockMultiMatchRuleModel, rule_id: str | None = None) -> dict:
+    data = rule.model_dump()
+    data["id"] = rule_id or data.get("id") or uuid.uuid4().hex[:8]
+    return data
+
+
+@router.get("/mock/multi-match-rules")
+async def list_multi_match_rules():
+    """获取多条件匹配规则列表。"""
+    return ok(_mock.get_multi_match_rules())
+
+
+@router.post("/mock/multi-match-rules")
+async def create_multi_match_rule(rule: MockMultiMatchRuleModel):
+    """新增多条件匹配规则。"""
+    data = _multi_rule_to_dict(rule)
+    rules = _mock.get_multi_match_rules()
+    rules.append(data)
+    _mock.save_multi_match_rules(rules)
+    return ok(data)
+
+
+@router.put("/mock/multi-match-rules/{rule_id}")
+async def update_multi_match_rule(rule_id: str, rule: MockMultiMatchRuleModel):
+    """更新指定多条件匹配规则。"""
+    rules = _mock.get_multi_match_rules()
+    for i, r in enumerate(rules):
+        if r.get("id") == rule_id:
+            data = _multi_rule_to_dict(rule, rule_id=rule_id)
+            rules[i] = data
+            _mock.save_multi_match_rules(rules)
+            return ok(data)
+    return err("Multi-match rule not found")
+
+
+@router.delete("/mock/multi-match-rules/{rule_id}")
+async def delete_multi_match_rule(rule_id: str):
+    """删除指定多条件匹配规则。"""
+    rules = _mock.get_multi_match_rules()
+    new_rules = [r for r in rules if r.get("id") != rule_id]
+    if len(new_rules) == len(rules):
+        return err("Multi-match rule not found")
+    _mock.save_multi_match_rules(new_rules)
+    return ok({"id": rule_id})
+
+
+@router.post("/mock/multi-match-rules/{rule_id}/toggle")
+async def toggle_multi_match_rule(rule_id: str):
+    """切换多条件匹配规则启用状态。"""
+    rules = _mock.get_multi_match_rules()
+    for r in rules:
+        if r.get("id") == rule_id:
+            r["enabled"] = not r.get("enabled", True)
+            _mock.save_multi_match_rules(rules)
+            return ok(r)
+    return err("Multi-match rule not found")

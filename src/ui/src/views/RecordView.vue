@@ -165,9 +165,14 @@ function unwrap<T>(res: any, fallback: T): T {
 
 // ===== 变量管理函数 =====
 async function loadVariables() {
+  // 后端无全局 variables 接口：逐脚本拉取变量定义
   try {
-    const res = await axios.get('/api/record-scripts/variables')
-    scriptVariables.value = unwrap<RecordScriptVariables[]>(res, [])
+    const results = await Promise.all(scripts.value.map(s =>
+      axios.get(`/api/record-scripts/${s.id}/variables`).then(
+        res => unwrap<RecordScriptVariables>(res, { script_id: s.id, variables: [], flows: [] })
+      ).catch(() => null)
+    ))
+    scriptVariables.value = results.filter((r): r is RecordScriptVariables => !!r)
   } catch (e: any) {
     ElMessage.error(t('record.loadVarsFailed') + (e?.message || e))
   }
@@ -188,7 +193,13 @@ async function openVariablesDialog(script: RecordScript) {
 
 async function extractVariables(script: RecordScript) {
   try {
-    await axios.post(`/api/record-scripts/${script.id}/extract-variables`)
+    // 后端接口：POST /record-scripts/{id}/variables/extract，body 需 flow_ids
+    const flowIds = (script.flow_ids || []) as number[]
+    if (!flowIds.length) {
+      ElMessage.warning(t('record.noFlowsToExtract'))
+      return
+    }
+    await axios.post(`/api/record-scripts/${script.id}/variables/extract`, { flow_ids: flowIds })
     ElMessage.success(t('record.extractVarsSuccess'))
     await openVariablesDialog(script)
   } catch (e: any) {
@@ -359,7 +370,13 @@ async function doParameterizedReplay() {
 // ===== 转换到 Mock =====
 async function convertToMock(script: RecordScript) {
   try {
-    await axios.post(`/api/record-scripts/${script.id}/convert-to-mock`)
+    const flowIds = (script.flow_ids || []) as number[]
+    if (!flowIds.length) {
+      ElMessage.warning(t('record.noFlowsToExtract'))
+      return
+    }
+    // 后端接口：POST /record-scripts/convert-to-mock，body 需 flow_ids
+    await axios.post('/api/record-scripts/convert-to-mock', { flow_ids: flowIds })
     ElMessage.success(t('record.convertToMockSuccess'))
     router.push('/mock')
   } catch (e: any) {

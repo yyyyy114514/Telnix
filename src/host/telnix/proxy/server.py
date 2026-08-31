@@ -3509,7 +3509,7 @@ class ProxyServer:
             state["done"].set()
 
     def _notify_flow_update(self, flow_id, status_code, resp_headers: Headers,
-                            resp_body, duration_ms: int):
+                            resp_body, duration_ms: int, size: int | None = None):
         """响应完成后推送 SSE 更新，让前端补齐预入库 flow 的响应字段。
 
         与 _insert_flow 的请求阶段 SSE 推送配合：请求阶段推送 lite flow（status=null），
@@ -3528,6 +3528,12 @@ class ProxyServer:
                 "duration_ms": duration_ms,
                 "_is_update": True,
             }
+            if size is None:
+                try:
+                    size = len(resp_body or b"")
+                except TypeError:
+                    size = 0
+            flow["size"] = size
             db._notify_flow_subscribers(flow)
         except Exception:  # noqa: BLE001
             pass

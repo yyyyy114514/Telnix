@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -241,14 +242,11 @@ async def chat_stream(body: ChatRequest):
         })
         yield f"data: {usage_payload}\n\n"
 
-        # Stream content word by word
-        words = ai_reply.split()
-        for i, word in enumerate(words):
-            chunk = word
-            if i < len(words) - 1:
-                chunk += " "
-            escaped = chunk.replace("\n", "\\n").replace("\r", "\\r")
-            content_payload = json.dumps({"type": "content", "content": escaped})
+        # Stream content token by token (whitespace/newlines preserved;
+        # json.dumps escapes real newlines so each SSE data line stays single-line)
+        tokens = [t for t in re.split(r"(\s+)", ai_reply) if t]
+        for tok in tokens:
+            content_payload = json.dumps({"type": "content", "content": tok}, ensure_ascii=False)
             yield f"data: {content_payload}\n\n"
             await asyncio.sleep(0.005)
 

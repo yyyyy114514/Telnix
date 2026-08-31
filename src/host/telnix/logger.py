@@ -133,6 +133,27 @@ def get_counter() -> int:
     return _counter
 
 
+def get_entries_since(counter: int) -> tuple[list[dict], int]:
+    """Get entries logged after the given counter, in ascending (oldest-first) order.
+
+    Returns (entries, current_counter). If the counter was reset (logs cleared),
+    returns the whole buffer so the stream resynchronizes instead of going silent.
+    """
+    from itertools import islice
+
+    with _lock:
+        current = _counter
+        if current < counter:
+            # Counter reset (clear_logs): send everything we still have
+            return list(_buffer), current
+        count = current - counter
+        if count <= 0:
+            return [], current
+        if count >= len(_buffer):
+            return list(_buffer), current
+        return list(islice(_buffer, len(_buffer) - count, len(_buffer))), current
+
+
 def get_stats() -> dict:
     """Get log statistics for dashboard display."""
     with _lock:

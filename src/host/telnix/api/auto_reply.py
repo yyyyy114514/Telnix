@@ -1100,30 +1100,34 @@ async def stream_hit_stats():
         "timeline": [...],     // 最近 100 次命中
     }
     """
-    from ..auto_reply.hit_tracker import get_stats, hit_tracker
+    from ..auto_reply.hit_tracker import get_stats
 
     async def event_generator():
         # 初始快照
         stats = get_stats()
         yield f"data: {json.dumps({'type': 'init', **stats})}\n\n"
 
-        # 记录上次的 timeline 长度，用于检测新命中
-        last_timeline_len = len(stats.get("timeline", []))
+        # 记录上次的命中总数（timeline 有 maxlen，满了之后长度不再增长，
+        # 因此用 total_hits 检测新命中而不是 timeline 长度）
+        last_total_hits = stats.get("total_hits", 0)
 
         # 循环推送（每 2 秒一次完整快照）
         while True:
             await asyncio.sleep(2)
             try:
                 stats = get_stats()
+                total_hits = stats.get("total_hits", 0)
                 timeline = stats.get("timeline", [])
 
-                # 检测是否有新命中（时间线长度增加）
-                if len(timeline) > last_timeline_len:
-                    # 有新命中，发送增量更新
-                    new_hits = timeline[:len(timeline) - last_timeline_len]
+                if total_hits > last_total_hits:
+                    # 有新命中：timeline 为最新在前，取头部增量（旧→新推送）
+                    delta = total_hits - last_total_hits
+                    new_hits = timeline[:delta] if delta <= len(timeline) else timeline
                     for hit in reversed(new_hits):
-                        yield f"data: {json.dumps({'type': 'hit', 'data': hit, 'total_hits': stats['total_hits']})}\n\n"
-                    last_timeline_len = len(timeline)
+                        yield f"data: {json.dumps({'type': 'hit', 'data': hit, 'total_hits': total_hits})}\n\n"
+                # total_hits 变小意味着统计被清空，直接发快照重新同步即可
+
+                last_total_hits = total_hits
 
                 # 发送完整快照
                 yield f"data: {json.dumps({'type': 'snapshot', **stats})}\n\n"

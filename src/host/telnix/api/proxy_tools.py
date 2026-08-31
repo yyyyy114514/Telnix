@@ -399,7 +399,7 @@ async def proxy_tools_import(body: dict):
     })
 
 
-@router.get("/proxy-tools/validate-import")
+@router.post("/proxy-tools/validate-import")
 async def proxy_tools_validate_import(body: dict):
     """预览导入规则，检测冲突（不实际导入）。
 

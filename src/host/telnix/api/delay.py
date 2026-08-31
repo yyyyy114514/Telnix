@@ -312,9 +312,12 @@ def _record_hit(rule_id: str, rule_pattern: str, flow_id: int, url: str, matched
 
 
 @router.get("/delay-rules/hits")
-async def list_delay_hits():
-    """获取延迟命中日志。"""
-    return ok(_get_hits())
+async def list_delay_hits(limit: int | None = None):
+    """获取延迟命中日志（可选 limit，返回最新 N 条）。"""
+    hits = _get_hits()
+    if limit is not None and limit > 0:
+        hits = hits[:limit]
+    return ok(hits)
 
 
 @router.delete("/delay-rules/hits")
@@ -327,8 +330,8 @@ async def clear_delay_hits():
 # ---------- 延迟分布热力图 ----------
 
 @router.get("/delay-rules/heatmap")
-async def get_delay_heatmap():
-    """获取延迟分布热力图数据。"""
+async def get_delay_heatmap(bucket_seconds: int = 3600, top_n: int = 20):
+    """获取延迟分布热力图数据（bucket_seconds 支持自定义分桶粒度，top_n 限制 host 数）。"""
     hits = _get_hits()
 
     # 按时间桶和 host 聚合
@@ -348,11 +351,14 @@ async def get_delay_heatmap():
 
         delay = hit.get("matched_delay_ms", 0)
 
-        # 按小时分桶
-        if len(timestamp) >= 13:
-            time_bucket = timestamp[:13]  # YYYY-MM-DDTHH
-        else:
-            time_bucket = timestamp[:10]  # YYYY-MM-DD
+        # 按指定粒度分桶（默认 1 小时）
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(timestamp)
+            bucket_ts = int(dt.timestamp()) // max(1, bucket_seconds) * max(1, bucket_seconds)
+            time_bucket = datetime.fromtimestamp(bucket_ts).isoformat()
+        except Exception:  # noqa: BLE001
+            time_bucket = timestamp[:13] if len(timestamp) >= 13 else timestamp[:10]
 
         time_buckets[time_bucket][host].append(delay)
 
@@ -372,8 +378,8 @@ async def get_delay_heatmap():
                 "count": len(delays),
             })
 
-    # host 分布（使用 heapq.nlargest 优化 Top 20）
-    top_hosts = heapq.nlargest(20, host_stats.items(), key=lambda x: x[1]["total"])
+    # host 分布（使用 heapq.nlargest 优化 Top N）
+    top_hosts = heapq.nlargest(max(1, top_n), host_stats.items(), key=lambda x: x[1]["total"])
     host_distribution = []
     for host, stats in top_hosts:
         delays = stats["delays"]

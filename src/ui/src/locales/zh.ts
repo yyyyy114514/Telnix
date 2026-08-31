@@ -1,5 +1,8 @@
 export default {
   common: {
+    copy: '复制',
+    exported: '已导出',
+    failed: '操作失败',
     confirm: '确认',
     cancel: '取消',
     save: '保存',
@@ -183,6 +186,25 @@ export default {
     addCondition: '添加条件',
   },
   analyze: {
+    anomalies: '异常检测',
+    copied: '已复制',
+    copy: '复制',
+    copyCurl: '复制为 cURL',
+    copyRequest: '复制请求',
+    copyResponse: '复制响应',
+    copyUrl: '复制 URL',
+    granularity5m: '5 分钟',
+    ignoreByHost: '按 Host 忽略',
+    ignoreByPid: '按 PID 忽略',
+    ignoreFailed: '忽略失败',
+    ignoreProcess: '忽略进程',
+    ignoredHost: '已忽略该 Host',
+    ignoredPid: '已忽略该 PID',
+    ignoredProcess: '已忽略该进程',
+    noHostInfo: '无 Host 信息',
+    noPidInfo: '无 PID 信息',
+    noProcessInfo: '无进程信息',
+    viewInCapture: '在抓包页查看',
     statsLoadFailed: '统计加载失败：',
     noHost: '(无 host)',
     unknownProcess: '(未知进程)',
@@ -565,6 +587,8 @@ export default {
     variableReplaced: '（变量已替换）',
   },
   clash: {
+    action: '操作',
+    connectionClosed: '连接已关闭',
     integration: 'Clash 集成',
     externalModeHint: '外接模式 · 启用后流量经 Mihomo 转发',
     refreshStatus: '刷新状态',
@@ -809,6 +833,12 @@ export default {
     jwtTemplate: 'JWT Token',
   },
   raw: {
+    copyRequest: '复制请求',
+    copyResponse: '复制响应',
+    copyUrl: '复制 URL',
+    ctxIgnoreByHost: '按 Host 忽略',
+    ignoredHost: '已忽略该 Host',
+    noHostInfo: '无 Host 信息',
     stopCapture: '停止抓包',
     startCapture: '开始抓包',
     admin: '管理员',
@@ -1126,6 +1156,7 @@ export default {
     helpTip: '提示：输入任意文本回车即作为过滤器；上下箭头切换历史',
   },
   ws: {
+    ignoreByProcess: '按进程忽略',
     title: 'WebSocket 消息',
     messagesCount: '{n} 条消息',
     aggregateHint: '同一 Host 的 WS 消息会聚合成一行，点击展开',
@@ -1280,8 +1311,20 @@ export default {
     recentErrors: '最近异常',
     noErrors: '暂无错误',
     noData: '暂无数据',
+    connectionLost: '连接断开，正在重连…',
+    startFailed: '启动实时流失败：',
   },
   settings: {
+    ollamaEndpointHint: 'Ollama API 地址，如 http://localhost:11434',
+    ollamaModelHint: 'Ollama 使用的模型名称',
+    totalUsage: '累计用量',
+    aiService: 'AI 服务',
+    aiServiceHint: '选择要使用的 AI 服务，不同服务需要不同的 API Key',
+    aiUsage: '使用统计',
+    todayUsage: '今日',
+    monthUsage: '本月',
+    requests: '请求数',
+    aiServiceChanged: 'AI 服务已切换',
     settings: '设置',
     save: '保存',
     reset: '重置',
@@ -1939,6 +1982,7 @@ export default {
   },
 
   ruleEditor: {
+    testResultTitle: '测试结果',
     actionHint: 'modify_response：修改响应内容；modify_request：修改请求内容；mock：直接返回预设响应；mock_request：转发到指定服务器；script：用 Python 脚本处理请求/响应。',
     actionMockRequest: '请求 Mock',
     actionMockResponse: '响应 Mock',
@@ -2148,6 +2192,10 @@ export default {
 
   // 流量标记系统
   flowTag: {
+    allFlows: '全部流量',
+    autoRules: '自动规则',
+    byTag: '按标签',
+    unmarked: '未标记',
     title: '流量标记',
     addTag: '添加标记',
     editTag: '编辑标记',
@@ -2194,6 +2242,9 @@ export default {
 
   // 流量书签系统
   flowBookmark: {
+    bookmarkAdded: '已添加书签',
+    deleteConfirm: '确定删除该书签吗？',
+    manage: '管理书签',
     title: '书签',
     addBookmark: '添加书签',
     editBookmark: '编辑书签',
@@ -2237,6 +2288,7 @@ export default {
 
   // 流量预览
   flowPreview: {
+    noPreview: '暂无预览',
     title: '预览',
     imagePreview: '图片预览',
     jsonPreview: 'JSON 预览',
@@ -2334,6 +2386,11 @@ export default {
   },
 
   record: {
+    description: '描述',
+    enabled: '启用',
+    envVars: '变量',
+    flowId: '流量 ID',
+    noFlowsToExtract: '没有可提取变量的流量',
     title: '录制与回放',
     startRecording: '开始录制',
     stopRecording: '停止录制',
@@ -2529,6 +2586,23 @@ export default {
   },
 
   mock: {
+    closeButton: '关闭',
+    condFieldBody: '请求体',
+    condFieldHeader: '请求头',
+    condFieldHost: '主机',
+    condFieldMethod: '方法',
+    condFieldPath: '路径',
+    condFieldQuery: '查询参数',
+    condFieldStatus: '状态码',
+    condOpContains: '包含',
+    condOpEndsWith: '以…结尾',
+    condOpEquals: '等于',
+    condOpExists: '存在',
+    condOpNotExists: '不存在',
+    condOpRegex: '正则',
+    condOpStartsWith: '以…开头',
+    description: '描述',
+    importFromFlow: '从流量导入',
     title: 'Mock 服务',
     status: '运行状态',
     running: '运行中',
@@ -2753,6 +2827,7 @@ export default {
       tagFailed: '标记失败: {error}',
       exportSuccess: '导出成功: {format}',
       exportFailed: '导出失败: {error}',
+      exportEmpty: '导出内容为空',
       deleted: '已删除',
       deleteFailed: '删除失败: {error}',
       modified: '已修改',

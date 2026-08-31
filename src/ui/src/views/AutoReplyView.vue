@@ -150,9 +150,12 @@ let reconnectTimer: number | null = null
 const RECONNECT_DELAY_MS = 3000
 const MAX_RECONNECT_ATTEMPTS = 5
 let reconnectAttempts = 0
+// 用户是否希望保持实时监控（独立于连接状态，供断线重连/轮询判断）
+let wantRealtime = false
 
 function startRealtimeMonitor() {
-  if (isRealtimeActive.value) return
+  if (hitStatsStream) return
+  wantRealtime = true
   isRealtimeActive.value = true
   reconnectAttempts = 0
 
@@ -162,18 +165,27 @@ function startRealtimeMonitor() {
   // 方法1：SSE 流
   try {
     hitStatsStream = api.createHitStatsStream()
+    hitStatsStream.onopen = () => {
+      // SSE 连接成功：停掉兜底轮询，避免 SSE + 轮询双通道同时刷新
+      stopPolling()
+    }
     hitStatsStream.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
         // 重置重连计数
         reconnectAttempts = 0
-        if (data.type === 'init' || data.type === 'snapshot' || data.type === 'keepalive') {
+        // 收到消息说明 SSE 通道健康，同样停掉可能残留的轮询
+        if (pollTimer !== null) stopPolling()
+        if (data.type === 'init' || data.type === 'snapshot') {
           realtimeHitStats.value = {
             total_hits: data.total_hits,
             heatmap: data.heatmap || [],
             timeline: data.timeline || [],
             leaderboard: data.leaderboard || [],
           }
+        } else if (data.type === 'keepalive') {
+          // 后端心跳：不携带数据，跳过（不能按 snapshot 处理，否则面板被清空）
+          return
         } else if (data.type === 'hit' && data.data) {
           // 增量更新：将新命中添加到时间线头部
           if (realtimeHitStats.value) {
@@ -183,13 +195,6 @@ function startRealtimeMonitor() {
               total_hits: data.total_hits,
               timeline: newTimeline,
             }
-            // 更新排行榜和热力图的命中计数
-            if (data.heatmap_update) {
-              realtimeHitStats.value = {
-                ...realtimeHitStats.value,
-                heatmap: data.heatmap_update,
-              }
-            }
           }
         }
       } catch {
@@ -197,17 +202,27 @@ function startRealtimeMonitor() {
       }
     }
     hitStatsStream.onerror = () => {
-      // SSE 断开时自动重连或切换到轮询
-      stopRealtimeMonitor()
-      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        scheduleReconnect()
-      } else {
-        startPolling()
+      // SSE 断开：关闭旧连接，自动重连或切换到轮询
+      closeStreamOnly()
+      if (wantRealtime) {
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          scheduleReconnect()
+        } else {
+          startPolling()
+        }
       }
     }
   } catch {
     // SSE 不可用，切换到轮询
     startPolling()
+  }
+}
+
+// 仅关闭 SSE 连接（不改变监控意图），供 onerror 内部使用
+function closeStreamOnly() {
+  if (hitStatsStream) {
+    hitStatsStream.close()
+    hitStatsStream = null
   }
 }
 
@@ -217,7 +232,7 @@ function scheduleReconnect() {
   reconnectAttempts++
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null
-    if (isRealtimeActive.value) {
+    if (wantRealtime) {
       startRealtimeMonitor()
     }
   }, RECONNECT_DELAY_MS)
@@ -225,23 +240,22 @@ function scheduleReconnect() {
 
 // 停止 SSE 流
 function stopRealtimeMonitor() {
+  wantRealtime = false
   isRealtimeActive.value = false
-  if (hitStatsStream) {
-    hitStatsStream.close()
-    hitStatsStream = null
-  }
+  closeStreamOnly()
   // 清除重连定时器
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  stopPolling()
 }
 
 // 轮询备用方案（每 2 秒刷新）
 function startPolling() {
   if (pollTimer !== null) return
   pollTimer = window.setInterval(() => {
-    if (isRealtimeActive.value) {
+    if (wantRealtime) {
       loadRealtimeHitStats()
     }
   }, 2000)
